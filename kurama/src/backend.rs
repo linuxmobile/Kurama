@@ -132,6 +132,19 @@ impl fmt::Debug for CardInput {
 }
 
 #[derive(Clone)]
+pub struct CustomFieldInput {
+    pub name: String,
+    pub value: Secret,
+    pub field_type: i64,
+}
+
+impl fmt::Debug for CustomFieldInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CustomFieldInput([redacted])")
+    }
+}
+
+#[derive(Clone)]
 pub struct IdentityInput {
     pub first_name: Option<Secret>,
     pub last_name: Option<Secret>,
@@ -221,6 +234,7 @@ pub enum Request {
         notes: Option<Secret>,
         card: Option<CardInput>,
         identity: Option<IdentityInput>,
+        fields: Vec<CustomFieldInput>,
     },
     CreateSshKey {
         name: String,
@@ -499,6 +513,7 @@ pub fn perform(request: Request) -> Event {
             notes,
             card,
             identity,
+            fields,
         } => match call(json!({
             "action": "create_item",
             "options": {
@@ -511,7 +526,15 @@ pub fn perform(request: Request) -> Event {
                 "website": website,
                 "notes": notes.as_ref().map(Secret::as_str),
                 "card": card.as_ref().and_then(CardInput::value),
-                "identity": identity.as_ref().and_then(IdentityInput::value)
+                "identity": identity.as_ref().and_then(IdentityInput::value),
+                "fields": fields
+                    .iter()
+                    .map(|field| json!({
+                        "name": field.name,
+                        "value": field.value.as_str(),
+                        "type": field.field_type
+                    }))
+                    .collect::<Vec<_>>()
             }
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
@@ -1172,11 +1195,17 @@ mod tests {
                 postal_code: None,
                 country: None,
             }),
+            fields: vec![CustomFieldInput {
+                name: "Recovery code".to_owned(),
+                value: Secret::new("custom-secret".to_owned()),
+                field_type: 1,
+            }],
         };
         let debug = format!("{request:?}");
         assert!(!debug.contains("hunter2"));
         assert!(!debug.contains("private note"));
         assert!(!debug.contains("ada@example.com"));
+        assert!(!debug.contains("custom-secret"));
         assert!(debug.contains("redacted"));
     }
 

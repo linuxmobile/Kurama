@@ -7,8 +7,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use rune::{edit::TextEdit, Tx, Waker};
 
 use crate::backend::{
-    self, clear_revealed, clear_totp, Approval, CardInput, Event, FieldValue, IdentityInput,
-    ItemDetails, ItemField, Request, Secret, Snapshot, TotpMeta, VaultRow,
+    self, clear_revealed, clear_totp, Approval, CardInput, CustomFieldInput, Event, FieldValue,
+    IdentityInput, ItemDetails, ItemField, Request, Secret, Snapshot, TotpMeta, VaultRow,
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -82,6 +82,12 @@ pub struct CardDraft {
     pub code: TextEdit,
 }
 
+pub struct CustomFieldDraft {
+    pub name: TextEdit,
+    pub value: TextEdit,
+    pub field_type: i64,
+}
+
 pub struct SshDraft {
     pub private_key: TextEdit,
     pub public_key: TextEdit,
@@ -111,6 +117,7 @@ pub struct CreateDraft {
     pub card: CardDraft,
     pub identity: IdentityDraft,
     pub ssh: SshDraft,
+    pub fields: Vec<CustomFieldDraft>,
 }
 
 pub struct EditDraft {
@@ -406,6 +413,7 @@ pub fn start_create() -> CreateDraft {
         card: empty_card_draft(),
         identity: empty_identity_draft(),
         ssh: empty_ssh_draft(),
+        fields: Vec::new(),
     }
 }
 
@@ -614,6 +622,65 @@ pub fn set_create_type(state: &mut State, item_type: i64) {
     }
 }
 
+fn add_create_field_raw(draft: &mut CreateDraft) {
+    draft.fields.push(CustomFieldDraft {
+        name: TextEdit::new("Recovery phrase"),
+        value: TextEdit::new("correct horse battery staple"),
+        field_type: 1,
+    });
+}
+
+pub fn add_create_field(state: &mut State) {
+    if let Some(draft) = state.create.as_mut() {
+        draft.fields.push(CustomFieldDraft {
+            name: TextEdit::new(""),
+            value: TextEdit::new(""),
+            field_type: 0,
+        });
+    }
+}
+
+pub fn remove_create_field(state: &mut State, index: usize) {
+    if let Some(draft) = state.create.as_mut() {
+        if index < draft.fields.len() {
+            draft.fields.remove(index);
+        }
+    }
+}
+
+pub fn cycle_create_field_type(state: &mut State, index: usize) {
+    if let Some(field) = state
+        .create
+        .as_mut()
+        .and_then(|draft| draft.fields.get_mut(index))
+    {
+        field.field_type = (field.field_type + 1) % 3;
+    }
+}
+
+pub fn toggle_create_field_value(state: &mut State, index: usize) {
+    if let Some(field) = state
+        .create
+        .as_mut()
+        .and_then(|draft| draft.fields.get_mut(index))
+    {
+        let enabled = field.value.text.eq_ignore_ascii_case("true") || field.value.text == "1";
+        field.value = TextEdit::new(if enabled { "false" } else { "true" });
+    }
+}
+
+fn custom_fields_input(drafts: &[CustomFieldDraft]) -> Vec<CustomFieldInput> {
+    drafts
+        .iter()
+        .filter(|field| !field.name.text.trim().is_empty())
+        .map(|field| CustomFieldInput {
+            name: field.name.text.trim().to_owned(),
+            value: Secret::new(field.value.text.clone()),
+            field_type: field.field_type,
+        })
+        .collect()
+}
+
 pub fn submit_create(state: &mut State) {
     let Some(draft) = state.create.take() else {
         return;
@@ -662,6 +729,7 @@ pub fn submit_create(state: &mut State) {
             identity: (draft.item_type == 4)
                 .then(|| identity_input(&draft.identity))
                 .flatten(),
+            fields: custom_fields_input(&draft.fields),
         },
     );
 }
@@ -1360,6 +1428,13 @@ pub fn scene_create_ssh(state: &mut State) {
     scene_populated(state);
     let mut draft = start_create();
     draft.item_type = 5;
+    state.create = Some(draft);
+}
+
+pub fn scene_create_fields(state: &mut State) {
+    scene_populated(state);
+    let mut draft = start_create();
+    add_create_field_raw(&mut draft);
     state.create = Some(draft);
 }
 

@@ -53,6 +53,7 @@ fn main() -> ExitCode {
             ("create-card", state::scene_create_card),
             ("create-identity", state::scene_create_identity),
             ("create-ssh", state::scene_create_ssh),
+            ("create-fields", state::scene_create_fields),
         ],
         setup: Some(state::setup),
         poll: Some(state::poll),
@@ -120,8 +121,12 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                         | "create-public-key"
                         | "create-fingerprint"
                 )
-            ) || focused
-                .is_some_and(|key| key.starts_with("create-card") || key.starts_with("edit-card"));
+            ) || focused.is_some_and(|key| {
+                key.starts_with("create-card")
+                    || key.starts_with("edit-card")
+                    || key.starts_with("create-field-name-")
+                    || key.starts_with("create-field-value-")
+            });
             if typing {
                 return false;
             }
@@ -631,6 +636,44 @@ mod tests {
                     && public_key.as_deref() == Some("ssh-ed25519 AAAA deploy@host")
                     && fingerprint.as_deref() == Some("SHA256:abc")
                     && notes.as_ref().map(backend::Secret::as_str) == Some("Production deploy key")
+        )));
+    }
+
+    #[test]
+    fn create_form_submits_custom_fields() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("new-item").expect("new item button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("create-custom-fields").is_some());
+        state::add_create_field(&mut rt.state);
+        rt.frame(1.0 / 60.0);
+        let draft = rt.state.create.as_mut().unwrap();
+        draft.name.replace_text("With fields");
+        draft.fields[0].name.replace_text("Recovery phrase");
+        draft.fields[0]
+            .value
+            .replace_text("correct horse battery staple");
+        draft.fields[0].field_type = 1;
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("create-submit").expect("create button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::CreateItem { name, fields, .. }
+                if name == "With fields"
+                    && fields.len() == 1
+                    && fields[0].name == "Recovery phrase"
+                    && fields[0].value.as_str() == "correct horse battery staple"
+                    && fields[0].field_type == 1
         )));
     }
 

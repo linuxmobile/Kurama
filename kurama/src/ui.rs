@@ -8,12 +8,13 @@ use rune::{
 use crate::backend::{revealed_value, totp_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
-    cancel_create, cancel_edit, copy_field, cycle_create_folder, cycle_edit_folder, delete_item,
-    dispatch, folder_label, move_selection, open_attachment, open_trash, restore_item,
-    select_category, select_folder, select_item, set_create_type, set_favorite, start_edit,
-    submit_create, submit_edit, submit_quick_unlock, submit_search, submit_unlock,
-    toggle_create_favorite, toggle_edit_favorite, toggle_reveal, CardDraft, Category,
-    IdentityDraft, Location, SshDraft, State,
+    add_create_field, cancel_create, cancel_edit, copy_field, cycle_create_field_type,
+    cycle_create_folder, cycle_edit_folder, delete_item, dispatch, folder_label, move_selection,
+    open_attachment, open_trash, remove_create_field, restore_item, select_category, select_folder,
+    select_item, set_create_type, set_favorite, start_edit, submit_create, submit_edit,
+    submit_quick_unlock, submit_search, submit_unlock, toggle_create_favorite,
+    toggle_create_field_value, toggle_edit_favorite, toggle_reveal, CardDraft, Category,
+    CustomFieldDraft, IdentityDraft, Location, SshDraft, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -461,6 +462,105 @@ fn ssh_fields(ssh: &SshDraft, dark: bool, submit: fn(&mut State)) -> El {
         ))
 }
 
+fn custom_fields(fields: &[CustomFieldDraft], dark: bool) -> El {
+    let t = tok::theme(dark);
+    let mut view = col().key("create-custom-fields").gap(12.0).child(
+        text("Custom fields")
+            .font(SECTION_TITLE)
+            .color(t.text_secondary)
+            .h(18.0)
+            .center_y(),
+    );
+    for (index, field) in fields.iter().enumerate() {
+        let type_label = match field.field_type {
+            1 => "Hidden",
+            2 => "Boolean",
+            _ => "Text",
+        };
+        let value = if field.field_type == 2 {
+            let enabled = field.value.text.eq_ignore_ascii_case("true") || field.value.text == "1";
+            let label = if enabled { "Yes" } else { "No" };
+            labeled_input(
+                &field.value,
+                &format!("create-field-value-{index}"),
+                "Value",
+                "false",
+                dark,
+                move |state| &mut state.create.as_mut().unwrap().fields[index].value,
+                submit_create,
+            )
+            .child(action(
+                &format!("create-field-toggle-{index}"),
+                label,
+                dark,
+                move |state| toggle_create_field_value(state, index),
+            ))
+        } else {
+            labeled_input(
+                &field.value,
+                &format!("create-field-value-{index}"),
+                "Value",
+                "Value",
+                dark,
+                move |state| &mut state.create.as_mut().unwrap().fields[index].value,
+                submit_create,
+            )
+        };
+        view = view.child(
+            row()
+                .key(format!("create-field-row-{index}"))
+                .gap(12.0)
+                .center_y()
+                .child(
+                    labeled_input(
+                        &field.name,
+                        &format!("create-field-name-{index}"),
+                        "Name",
+                        "Field name",
+                        dark,
+                        move |state| &mut state.create.as_mut().unwrap().fields[index].name,
+                        submit_create,
+                    )
+                    .w(180.0),
+                )
+                .child(value.grow(1.0))
+                .child(
+                    col()
+                        .gap(6.0)
+                        .child(
+                            text("Type")
+                                .font(SECTION_TITLE)
+                                .color(t.text_secondary)
+                                .h(18.0)
+                                .center_y(),
+                        )
+                        .child(
+                            row()
+                                .gap(6.0)
+                                .child(action(
+                                    &format!("create-field-type-{index}"),
+                                    type_label,
+                                    dark,
+                                    move |state| cycle_create_field_type(state, index),
+                                ))
+                                .child(action(
+                                    &format!("create-field-remove-{index}"),
+                                    "×",
+                                    dark,
+                                    move |state| remove_create_field(state, index),
+                                )),
+                        ),
+                ),
+        );
+    }
+    view.child(action(
+        "create-field-add",
+        "+ Add field",
+        dark,
+        add_create_field,
+    ))
+}
+
 fn form_panel(key: &str, title: &str, dark: bool, header_extra: El, body: El, footer: El) -> El {
     let t = tok::theme(dark);
     col()
@@ -613,7 +713,8 @@ fn create_form(s: &State, dark: bool) -> El {
             })
         } else {
             el()
-        });
+        })
+        .child(custom_fields(&draft.fields, dark));
 
     let footer = row()
         .child(action(
