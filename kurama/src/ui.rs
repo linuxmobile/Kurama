@@ -10,18 +10,20 @@ use crate::icons;
 use crate::state::{
     add_create_field, add_create_uri, add_edit_uri, adjust_generator_length,
     adjust_generator_words, cancel_create, cancel_delete_send, cancel_edit, cancel_send,
-    close_attachment, close_generator, close_sends, confirm_delete_send, copy_field,
-    copy_generated, copy_send, cycle_create_field_type, cycle_create_folder, cycle_edit_folder,
-    delete_item, disable_send, dispatch, folder_label, generate_password, logout, move_selection,
-    new_send, open_attachment, open_generator, open_sends, open_trash, remove_create_field,
-    remove_create_uri, remove_edit_uri, request_delete_send, restore_item, select_category,
+    close_attachment, close_generator, close_sends, close_ssh_tools, confirm_delete_send,
+    copy_field, copy_generated, copy_send, cycle_create_field_type, cycle_create_folder,
+    cycle_edit_folder, cycle_ssh_algorithm, delete_item, disable_send, dispatch, folder_label,
+    generate_password, logout, move_selection, new_send, open_attachment, open_generator,
+    open_sends, open_ssh_tools, open_trash, remove_create_field, remove_create_uri,
+    remove_edit_uri, request_delete_send, restore_item, save_ssh_tool_key, select_category,
     select_folder, select_item, select_send, send_two_factor_email, set_auth_mode, set_create_type,
-    set_favorite, set_generator_passphrase, start_edit, submit_auth, submit_create, submit_edit,
-    submit_fido2, submit_quick_unlock, submit_search, submit_send, submit_unlock,
+    set_favorite, set_generator_passphrase, set_ssh_tool_mode, start_edit, submit_auth,
+    submit_create, submit_edit, submit_fido2, submit_quick_unlock, submit_search, submit_send,
+    submit_ssh_export, submit_ssh_generate, submit_ssh_import, submit_unlock,
     toggle_create_favorite, toggle_create_field_value, toggle_edit_favorite,
     toggle_generator_option, toggle_reveal, toggle_send_hidden, use_generated, AttachmentView,
     AuthMode, CardDraft, Category, CustomFieldDraft, GeneratorOption, GeneratorTarget,
-    IdentityDraft, Location, SendDraft, SshDraft, State,
+    IdentityDraft, Location, SendDraft, SshDraft, SshToolMode, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -35,6 +37,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 
     let content = if let Some(view) = s.attachment_preview.as_ref() {
         attachment_preview(s, view, dark)
+    } else if s.ssh_tools.is_some() {
+        ssh_tools(s, dark)
     } else if s.generator.is_some() {
         generator(s, dark)
     } else if s.help {
@@ -155,6 +159,8 @@ fn labeled_input(
                             cancel_edit(s);
                         } else if s.send_form.is_some() {
                             cancel_send(s);
+                        } else if s.ssh_tools.is_some() {
+                            close_ssh_tools(s);
                         } else {
                             return false;
                         }
@@ -214,6 +220,8 @@ fn multiline_field(
                             cancel_edit(s);
                         } else if s.send_form.is_some() {
                             cancel_send(s);
+                        } else if s.ssh_tools.is_some() {
+                            close_ssh_tools(s);
                         } else {
                             return false;
                         }
@@ -1044,6 +1052,177 @@ fn edit_form(s: &State, dark: bool) -> El {
     )
 }
 
+fn ssh_tools(s: &State, dark: bool) -> El {
+    let Some(draft) = s.ssh_tools.as_ref() else {
+        return el();
+    };
+    let tabs = row()
+        .key("ssh-tool-tabs")
+        .gap(8.0)
+        .child(action(
+            "ssh-tool-tab-generate",
+            if draft.mode == SshToolMode::Generate {
+                "● Generate"
+            } else {
+                "Generate"
+            },
+            dark,
+            |state| set_ssh_tool_mode(state, SshToolMode::Generate),
+        ))
+        .child(action(
+            "ssh-tool-tab-import",
+            if draft.mode == SshToolMode::Import {
+                "● Import"
+            } else {
+                "Import"
+            },
+            dark,
+            |state| set_ssh_tool_mode(state, SshToolMode::Import),
+        ))
+        .child(action(
+            "ssh-tool-tab-export",
+            if draft.mode == SshToolMode::Export {
+                "● Export"
+            } else {
+                "Export"
+            },
+            dark,
+            |state| set_ssh_tool_mode(state, SshToolMode::Export),
+        ));
+    let mut body = col().gap(14.0).child(labeled_input(
+        &draft.name,
+        "ssh-tool-name",
+        "Vault item name",
+        "Laptop key",
+        dark,
+        |state| &mut state.ssh_tools.as_mut().unwrap().name,
+        save_ssh_tool_key,
+    ));
+    body = match draft.mode {
+        SshToolMode::Generate => body
+            .child(
+                row()
+                    .key("ssh-tool-algorithm")
+                    .gap(10.0)
+                    .center_y()
+                    .child(action("ssh-tool-algorithm-prev", "‹", dark, |state| {
+                        cycle_ssh_algorithm(state, -1)
+                    }))
+                    .child(
+                        text(draft.algorithm.text.clone())
+                            .key("ssh-tool-algorithm-label")
+                            .font(ROW_SUBTITLE)
+                            .color(tok::theme(dark).text),
+                    )
+                    .child(action("ssh-tool-algorithm-next", "›", dark, |state| {
+                        cycle_ssh_algorithm(state, 1)
+                    })),
+            )
+            .child(labeled_input(
+                &draft.comment,
+                "ssh-tool-comment",
+                "Comment (optional)",
+                "user@laptop",
+                dark,
+                |state| &mut state.ssh_tools.as_mut().unwrap().comment,
+                submit_ssh_generate,
+            ))
+            .child(action(
+                "ssh-tool-generate",
+                "Generate key",
+                dark,
+                submit_ssh_generate,
+            )),
+        SshToolMode::Import => body
+            .child(multiline_field(
+                &draft.private_key,
+                "ssh-tool-private-key",
+                MultilineStyle {
+                    label: "Private key",
+                    placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----",
+                    height: 140.0,
+                    revealed_secure: true,
+                },
+                dark,
+                |state| &mut state.ssh_tools.as_mut().unwrap().private_key,
+            ))
+            .child(action(
+                "ssh-tool-import",
+                "Import key",
+                dark,
+                submit_ssh_import,
+            )),
+        SshToolMode::Export => body
+            .child(labeled_input(
+                &draft.target,
+                "ssh-tool-target",
+                "Vault SSH key",
+                "Item name or ID",
+                dark,
+                |state| &mut state.ssh_tools.as_mut().unwrap().target,
+                submit_ssh_export,
+            ))
+            .child(action(
+                "ssh-tool-export",
+                "Export key",
+                dark,
+                submit_ssh_export,
+            )),
+    };
+    if !draft.private_key.text.is_empty() || !draft.public_key.text.is_empty() {
+        body = body
+            .child(
+                text("Key material")
+                    .key("ssh-tool-result-title")
+                    .font(SECTION_TITLE)
+                    .color(tok::theme(dark).text_secondary),
+            )
+            .child(
+                text_input(&draft.private_key, type_::BODY)
+                    .secure()
+                    .revealed(true)
+                    .key("ssh-tool-result-private")
+                    .label("SSH private key")
+                    .w_full()
+                    .h(90.0)
+                    .padding(10.0)
+                    .radius(8.0)
+                    .fill(tok::theme(dark).card)
+                    .color(tok::theme(dark).text),
+            )
+            .child(
+                text_input(&draft.public_key, type_::BODY)
+                    .key("ssh-tool-result-public")
+                    .label("SSH public key")
+                    .w_full()
+                    .h(60.0)
+                    .padding(10.0)
+                    .radius(8.0)
+                    .fill(tok::theme(dark).card)
+                    .color(tok::theme(dark).text),
+            )
+            .child(field("Fingerprint", &draft.fingerprint.text, dark));
+    }
+    let footer = row()
+        .gap(8.0)
+        .child(action("ssh-tool-close", "Close", dark, close_ssh_tools))
+        .child(action(
+            "ssh-tool-save",
+            "Save to vault",
+            dark,
+            save_ssh_tool_key,
+        ));
+    form_panel(
+        "ssh-tools-form",
+        "SSH keys",
+        dark,
+        tabs,
+        body,
+        footer,
+        s.form_error.as_deref(),
+    )
+}
+
 fn attachment_preview(_s: &State, view: &AttachmentView, dark: bool) -> El {
     let t = tok::theme(dark);
     let preview_text = view
@@ -1477,6 +1656,7 @@ fn top_bar(s: &State, dark: bool) -> El {
             },
         ))
         .child(action("sends", "Sends", dark, open_sends))
+        .child(action("ssh-tools", "SSH keys", dark, open_ssh_tools))
         .child(action("sync", "Sync", dark, |s| dispatch(s, Request::Sync)))
         .child(action("generate", "Generate", dark, |s| {
             open_generator(s, GeneratorTarget::None)

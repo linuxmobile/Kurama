@@ -88,6 +88,26 @@ pub struct AttachmentView {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum SshToolMode {
+    Generate,
+    Import,
+    Export,
+}
+
+#[derive(Clone, Debug)]
+pub struct SshToolsDraft {
+    pub mode: SshToolMode,
+    pub name: TextEdit,
+    pub algorithm: TextEdit,
+    pub comment: TextEdit,
+    pub target: TextEdit,
+    pub private_key: TextEdit,
+    pub public_key: TextEdit,
+    pub fingerprint: TextEdit,
+    pub algorithm_label: String,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Location {
     Vault,
     Trash,
@@ -238,6 +258,7 @@ pub struct State {
     pub send_pending_delete: Option<String>,
     pub send_error: Option<String>,
     pub attachment_preview: Option<AttachmentView>,
+    pub ssh_tools: Option<SshToolsDraft>,
     pub revealed: Option<String>,
     pub totp: Option<TotpMeta>,
     pub busy: bool,
@@ -281,6 +302,7 @@ impl Default for State {
             send_pending_delete: None,
             send_error: None,
             attachment_preview: None,
+            ssh_tools: None,
             revealed: None,
             totp: None,
             busy: true,
@@ -1497,6 +1519,16 @@ fn visible_fingerprint(state: &State) -> u64 {
         .as_ref()
         .map(|view| view.filename.as_str())
         .hash(&mut hasher);
+    state
+        .ssh_tools
+        .as_ref()
+        .map(|draft| draft.mode)
+        .hash(&mut hasher);
+    state
+        .ssh_tools
+        .as_ref()
+        .map(|draft| draft.fingerprint.text.as_str())
+        .hash(&mut hasher);
     for send in &state.sends {
         send.id.hash(&mut hasher);
         send.name.hash(&mut hasher);
@@ -1785,6 +1817,43 @@ fn apply(state: &mut State, event: Event) {
             state.send_pending_delete = None;
             state.notice = Some("Send deleted".to_owned());
             dispatch(state, Request::ListSends);
+        }
+        Event::SshKeyGenerated {
+            private,
+            public,
+            fingerprint,
+            algorithm,
+        } => {
+            if let Some(draft) = state.ssh_tools.as_mut() {
+                draft.private_key.replace_text(private.as_str());
+                draft.public_key.replace_text(&public);
+                draft.fingerprint.replace_text(&fingerprint);
+                draft.algorithm_label = algorithm;
+            }
+            state.notice = Some("SSH key generated".to_owned());
+        }
+        Event::SshKeyImported {
+            public,
+            fingerprint,
+        } => {
+            if let Some(draft) = state.ssh_tools.as_mut() {
+                draft.public_key.replace_text(&public);
+                draft.fingerprint.replace_text(&fingerprint);
+            }
+            state.notice = Some("SSH key imported".to_owned());
+        }
+        Event::SshKeyExported {
+            private,
+            public,
+            fingerprint,
+        } => {
+            if let Some(draft) = state.ssh_tools.as_mut() {
+                draft.mode = SshToolMode::Export;
+                draft.private_key.replace_text(private.as_str());
+                draft.public_key.replace_text(&public);
+                draft.fingerprint.replace_text(&fingerprint);
+            }
+            state.notice = Some("SSH key exported".to_owned());
         }
         Event::FavoriteChanged { id, favorite } => {
             for row in state.rows.iter_mut().chain(state.snapshot.items.iter_mut()) {
@@ -2085,6 +2154,142 @@ pub fn close_attachment(state: &mut State) {
     backend::clear_attachment_text();
 }
 
+const SSH_ALGORITHMS: [&str; 5] = [
+    "ed25519",
+    "rsa-2048",
+    "rsa-4096",
+    "ecdsa-p256",
+    "ecdsa-p384",
+];
+
+fn empty_ssh_tools_draft() -> SshToolsDraft {
+    SshToolsDraft {
+        mode: SshToolMode::Generate,
+        name: TextEdit::new(""),
+        algorithm: TextEdit::new(SSH_ALGORITHMS[0]),
+        comment: TextEdit::new(""),
+        target: TextEdit::new(""),
+        private_key: TextEdit::new("").secure(),
+        public_key: TextEdit::new(""),
+        fingerprint: TextEdit::new(""),
+        algorithm_label: "ED25519".to_owned(),
+    }
+}
+
+pub fn open_ssh_tools(state: &mut State) {
+    state.ssh_tools = Some(empty_ssh_tools_draft());
+    state.attachment_preview = None;
+    state.form_error = None;
+}
+
+pub fn close_ssh_tools(state: &mut State) {
+    state.ssh_tools = None;
+    state.form_error = None;
+}
+
+pub fn set_ssh_tool_mode(state: &mut State, mode: SshToolMode) {
+    if let Some(draft) = state.ssh_tools.as_mut() {
+        draft.mode = mode;
+    }
+    state.form_error = None;
+}
+
+pub fn cycle_ssh_algorithm(state: &mut State, delta: isize) {
+    let Some(draft) = state.ssh_tools.as_mut() else {
+        return;
+    };
+    let current = SSH_ALGORITHMS
+        .iter()
+        .position(|algorithm| *algorithm == draft.algorithm.text)
+        .unwrap_or(0);
+    let len = SSH_ALGORITHMS.len() as isize;
+    let next = (current as isize + delta).rem_euclid(len) as usize;
+    draft.algorithm.replace_text(SSH_ALGORITHMS[next]);
+}
+
+pub fn submit_ssh_generate(state: &mut State) {
+    let Some(draft) = state.ssh_tools.as_ref() else {
+        return;
+    };
+    dispatch(
+        state,
+        Request::GenerateSshKey {
+            algorithm: draft.algorithm.text.trim().to_owned(),
+            comment: draft.comment.text.trim().to_owned(),
+        },
+    );
+}
+
+pub fn submit_ssh_import(state: &mut State) {
+    let Some(draft) = state.ssh_tools.as_ref() else {
+        return;
+    };
+    let private_key = draft.private_key.text.trim();
+    if private_key.is_empty() {
+        state.form_error = Some("Paste an OpenSSH private key to import.".to_owned());
+        return;
+    }
+    state.form_error = None;
+    dispatch(
+        state,
+        Request::ImportSshKey {
+            private_key: Secret::new(private_key.to_owned()),
+        },
+    );
+}
+
+pub fn submit_ssh_export(state: &mut State) {
+    let Some(draft) = state.ssh_tools.as_ref() else {
+        return;
+    };
+    let item_id = draft.target.text.trim();
+    if item_id.is_empty() {
+        state.form_error = Some("Enter the SSH key item name or ID to export.".to_owned());
+        return;
+    }
+    state.form_error = None;
+    dispatch(
+        state,
+        Request::ExportSshKey {
+            item_id: item_id.to_owned(),
+        },
+    );
+}
+
+pub fn save_ssh_tool_key(state: &mut State) {
+    let Some(draft) = state.ssh_tools.as_ref() else {
+        return;
+    };
+    if draft.private_key.text.trim().is_empty() || draft.public_key.text.trim().is_empty() {
+        state.form_error = Some("Generate, import, or export a key before saving it.".to_owned());
+        return;
+    }
+    let name = {
+        let name = draft.name.text.trim();
+        if name.is_empty() {
+            "SSH key".to_owned()
+        } else {
+            name.to_owned()
+        }
+    };
+    let private_key = draft.private_key.text.trim().to_owned();
+    let public_key = draft.public_key.text.trim().to_owned();
+    let fingerprint = draft.fingerprint.text.trim().to_owned();
+    state.form_error = None;
+    dispatch(
+        state,
+        Request::CreateSshKey {
+            name,
+            private_key: Secret::new(private_key),
+            public_key: Some(public_key),
+            fingerprint: Some(fingerprint),
+            notes: None,
+            folder_id: None,
+            favorite: false,
+        },
+    );
+}
+
 pub fn scene_populated(state: &mut State) {
     state.snapshot = Snapshot {
         status: "unlocked".to_owned(),
@@ -2304,6 +2509,16 @@ pub fn scene_attachment_preview(state: &mut State) {
         "notes.txt",
         Secret::new("Meeting notes\n- review phase 8\n- ship release build".to_owned()),
     );
+}
+
+pub fn scene_ssh_tools(state: &mut State) {
+    scene_populated(state);
+    let mut draft = empty_ssh_tools_draft();
+    draft.private_key.replace_text("-----BEGIN OPENSSH PRIVATE KEY-----\nprivate-key-material\n-----END OPENSSH PRIVATE KEY-----");
+    draft.public_key.replace_text("ssh-ed25519 AAAA...");
+    draft.fingerprint.replace_text("SHA256:example-fingerprint");
+    draft.name.replace_text("Laptop key");
+    state.ssh_tools = Some(draft);
 }
 
 pub fn scene_create_card(state: &mut State) {
@@ -3280,5 +3495,77 @@ mod tests {
             rx.try_iter().next(),
             Some(Request::DeleteSend { id }) if id == "send-2"
         ));
+    }
+
+    #[test]
+    fn ssh_tool_generation_uses_selected_algorithm() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        open_ssh_tools(&mut state);
+        cycle_ssh_algorithm(&mut state, 1);
+        state
+            .ssh_tools
+            .as_mut()
+            .unwrap()
+            .comment
+            .replace_text("laptop");
+
+        submit_ssh_generate(&mut state);
+
+        assert!(matches!(
+            rx.try_iter().next(),
+            Some(Request::GenerateSshKey { algorithm, comment })
+                if algorithm == "rsa-2048" && comment == "laptop"
+        ));
+    }
+
+    #[test]
+    fn ssh_tool_import_validates_and_redacts_private_key() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        open_ssh_tools(&mut state);
+        submit_ssh_import(&mut state);
+        assert!(state.form_error.is_some());
+        assert!(rx.try_iter().next().is_none());
+
+        state
+            .ssh_tools
+            .as_mut()
+            .unwrap()
+            .private_key
+            .replace_text("private-key-material");
+        submit_ssh_import(&mut state);
+        let requests: Vec<Request> = rx.try_iter().collect();
+        assert!(state.form_error.is_none());
+        assert!(!format!("{requests:?}").contains("private-key-material"));
+        assert!(matches!(requests[0], Request::ImportSshKey { .. }));
+    }
+
+    #[test]
+    fn ssh_tool_results_fill_the_draft_for_saving() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        open_ssh_tools(&mut state);
+        apply(
+            &mut state,
+            Event::SshKeyGenerated {
+                private: Secret::new("private-key-material".to_owned()),
+                public: "ssh-ed25519 AAAA".to_owned(),
+                fingerprint: "SHA256:fp".to_owned(),
+                algorithm: "ED25519".to_owned(),
+            },
+        );
+        let draft = state.ssh_tools.as_ref().unwrap();
+        assert_eq!(draft.public_key.text, "ssh-ed25519 AAAA");
+        assert_eq!(draft.fingerprint.text, "SHA256:fp");
+        assert_eq!(draft.algorithm_label, "ED25519");
+
+        save_ssh_tool_key(&mut state);
+        let requests: Vec<Request> = rx.try_iter().collect();
+        assert!(!format!("{requests:?}").contains("private-key-material"));
+        assert!(matches!(requests[0], Request::CreateSshKey { .. }));
     }
 }

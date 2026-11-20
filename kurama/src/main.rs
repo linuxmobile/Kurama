@@ -63,6 +63,7 @@ fn main() -> ExitCode {
             ("sends", state::scene_sends),
             ("send-form", state::scene_send_form),
             ("attachment-preview", state::scene_attachment_preview),
+            ("ssh-tools", state::scene_ssh_tools),
         ],
         setup: Some(state::setup),
         poll: Some(state::poll),
@@ -83,6 +84,10 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         }
         Key::Escape if state.attachment_preview.is_some() => {
             state::close_attachment(state);
+            true
+        }
+        Key::Escape if state.ssh_tools.is_some() => {
+            state::close_ssh_tools(state);
             true
         }
         Key::Escape if state.edit.is_some() => {
@@ -162,6 +167,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                     || key.starts_with("create-field-value-")
                     || key.starts_with("create-uri-")
                     || key.starts_with("edit-uri-")
+                    || key.starts_with("ssh-tool-")
                     || key.starts_with("account-")
             });
             if typing {
@@ -241,6 +247,25 @@ mod tests {
             "generator-entropy",
             "generator-copy",
             "generator-close",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+    }
+
+    #[test]
+    fn ssh_tools_scene_shows_generate_and_saved_key() {
+        let mut rt = runtime(state::scene_ssh_tools);
+        rt.frame(1.0 / 60.0);
+        for key in [
+            "ssh-tools-form",
+            "ssh-tool-tabs",
+            "ssh-tool-name",
+            "ssh-tool-algorithm",
+            "ssh-tool-comment",
+            "ssh-tool-generate",
+            "ssh-tool-result-private",
+            "ssh-tool-result-public",
+            "ssh-tool-save",
         ] {
             assert!(rt.find(key).is_some(), "missing key: {key}");
         }

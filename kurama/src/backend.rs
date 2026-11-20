@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Mutex;
 
+use kurama_host::ssh::{generate_keypair, parse_private_key, GeneratedSshKey, SshAlgorithm};
 use serde_json::{json, Value};
 
 /// Timing data for a TOTP code. The code itself stays in a dedicated store.
@@ -351,6 +352,16 @@ pub enum Request {
     DeleteSend {
         id: String,
     },
+    GenerateSshKey {
+        algorithm: String,
+        comment: String,
+    },
+    ImportSshKey {
+        private_key: Secret,
+    },
+    ExportSshKey {
+        item_id: String,
+    },
 }
 
 #[derive(Clone)]
@@ -520,6 +531,21 @@ pub enum Event {
     },
     SendDeleted {
         id: String,
+    },
+    SshKeyGenerated {
+        private: Secret,
+        public: String,
+        fingerprint: String,
+        algorithm: String,
+    },
+    SshKeyImported {
+        public: String,
+        fingerprint: String,
+    },
+    SshKeyExported {
+        private: Secret,
+        public: String,
+        fingerprint: String,
     },
     Auth(AuthOutcome),
     Generated {
@@ -982,6 +1008,43 @@ pub fn perform(request: Request) -> Event {
             "id": id.clone(),
         })) {
             Ok(_) => Event::SendDeleted { id },
+            Err(error) => Event::Error(error),
+        },
+        Request::GenerateSshKey { algorithm, comment } => {
+            let parsed = match algorithm.parse::<SshAlgorithm>() {
+                Ok(parsed) => parsed,
+                Err(error) => return Event::Error(error),
+            };
+            let comment = (!comment.trim().is_empty()).then(|| comment.trim());
+            match generate_keypair(parsed, comment) {
+                Ok(key) => Event::SshKeyGenerated {
+                    private: Secret::new(key.private_key),
+                    public: key.public_key,
+                    fingerprint: key.fingerprint,
+                    algorithm: key.algorithm_name,
+                },
+                Err(error) => Event::Error(error),
+            }
+        }
+        Request::ImportSshKey { private_key } => match parse_private_key(private_key.as_str()) {
+            Ok(key) => Event::SshKeyImported {
+                public: key.public_key,
+                fingerprint: key.fingerprint,
+            },
+            Err(error) => Event::Error(error),
+        },
+        Request::ExportSshKey { item_id } => match call(json!({
+            "action": "get_ssh_key",
+            "query": item_id.clone(),
+        })) {
+            Ok(response) => match exported_ssh_key(&response) {
+                Ok(key) => Event::SshKeyExported {
+                    private: Secret::new(key.private_key),
+                    public: key.public_key,
+                    fingerprint: key.fingerprint,
+                },
+                Err(error) => Event::Error(error),
+            },
             Err(error) => Event::Error(error),
         },
     }
@@ -1556,6 +1619,25 @@ fn send_row(value: &Value) -> Option<SendRow> {
     })
 }
 
+fn exported_ssh_key(response: &Value) -> Result<GeneratedSshKey, String> {
+    let item = response
+        .get("item")
+        .ok_or_else(|| "SSH key item is missing".to_owned())?;
+    let ssh = item
+        .get("ssh_key")
+        .ok_or_else(|| "Item is not an SSH key".to_owned())?;
+    let private_key = text(ssh, "private_key");
+    if private_key.is_empty() {
+        return Err("SSH key item has no private key".to_owned());
+    }
+    Ok(GeneratedSshKey {
+        algorithm_name: text(ssh, "key_type"),
+        private_key,
+        public_key: text(ssh, "public_key"),
+        fingerprint: text(ssh, "fingerprint"),
+    })
+}
+
 fn approvals(response: &Value) -> Vec<Approval> {
     response
         .get("prompts")
@@ -1779,6 +1861,29 @@ mod tests {
         assert_eq!(found[2].approval_id, Some(9));
         let debug = format!("{:?}", found);
         assert!(!debug.contains("super-secret"));
+    }
+
+    #[test]
+    fn exported_ssh_key_keeps_private_material_redacted() {
+        let response = json!({
+            "item": {
+                "ssh_key": {
+                    "key_type": "ed25519",
+                    "private_key": "private-key-value",
+                    "public_key": "ssh-ed25519 AAAA",
+                    "fingerprint": "SHA256:fp"
+                }
+            }
+        });
+        let key = exported_ssh_key(&response).unwrap();
+        assert_eq!(key.algorithm_name, "ed25519");
+        assert_eq!(key.public_key, "ssh-ed25519 AAAA");
+        assert_eq!(key.fingerprint, "SHA256:fp");
+        let request = Request::ImportSshKey {
+            private_key: Secret::new(key.private_key.clone()),
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("private-key-value"));
     }
 
     #[test]
