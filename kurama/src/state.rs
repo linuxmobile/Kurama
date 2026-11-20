@@ -33,6 +33,15 @@ impl Category {
         Category::SshKeys,
     ];
 
+    pub fn step(self, delta: isize) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|category| *category == self)
+            .unwrap_or(0) as isize;
+        let len = Self::ALL.len() as isize;
+        Self::ALL[((index + delta).rem_euclid(len)) as usize]
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Category::All => "All items",
@@ -261,11 +270,18 @@ fn select_row(state: &mut State, index: usize, tx: &mut Tx) -> bool {
     if state.selected.as_deref() == Some(id.as_str()) {
         return false;
     }
-    state.selected = Some(id.clone());
-    clear_reveal(state);
-    request_details(state);
+    select_item(state, id.clone());
     tx.scroll_into_view_in("item-scroller", format!("item-{id}"));
     true
+}
+
+pub fn select_item(state: &mut State, id: String) {
+    if state.selected.as_deref() == Some(id.as_str()) {
+        return;
+    }
+    state.selected = Some(id);
+    clear_reveal(state);
+    request_details(state);
 }
 
 pub fn toggle_reveal(state: &mut State, key: String) {
@@ -919,6 +935,28 @@ mod tests {
         toggle_reveal(&mut state, "password".to_owned());
         assert_eq!(state.revealed, None);
         assert_eq!(backend::revealed_value("password"), None);
+    }
+
+    #[test]
+    fn select_item_requests_details_and_clears_reveal() {
+        let _guard = backend::REVEAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        backend::stash_revealed("password", "old-secret".to_owned());
+        state.revealed = Some("password".to_owned());
+
+        select_item(&mut state, "2".to_owned());
+        assert_eq!(state.selected.as_deref(), Some("2"));
+        assert_eq!(state.revealed, None);
+        assert_eq!(backend::revealed_value("password"), None);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            Request::Details { id } if id == "2"
+        )));
     }
 
     #[test]

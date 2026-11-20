@@ -68,6 +68,29 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Up => state::move_selection(state, -1, tx),
         Key::Home => state::select_first(state, tx),
         Key::End => state::select_last(state, tx),
+        Key::Text(text) => {
+            let typing = matches!(tx.focused(), Some("search" | "unlock-password"));
+            if typing {
+                return false;
+            }
+            match text.as_str() {
+                "/" => {
+                    tx.focus("search", true);
+                    true
+                }
+                "j" => state::move_selection(state, 1, tx),
+                "k" => state::move_selection(state, -1, tx),
+                "h" => {
+                    state::select_category(state, state.category.step(-1));
+                    true
+                }
+                "l" => {
+                    state::select_category(state, state.category.step(1));
+                    true
+                }
+                _ => false,
+            }
+        }
         _ => false,
     }
 }
@@ -215,6 +238,45 @@ mod tests {
             mods: Mods::default(),
         });
         rt.frame(0.0);
+        assert_eq!(rt.state.selected.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn clicking_an_item_selects_it() {
+        let mut rt = runtime(state::scene_populated);
+        rt.frame(0.0);
+        let (x, y) = rt.find("item-2").expect("second item");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        assert_eq!(rt.state.selected.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn vim_keys_navigate_items_and_categories() {
+        let mut rt = runtime(state::scene_populated);
+        rt.on_key = Some(on_key);
+        rt.frame(0.0);
+
+        let press = |rt: &mut Runtime<State>, key: Key| {
+            rt.key(KeyEvent {
+                key,
+                mods: Mods::default(),
+            });
+            rt.frame(0.0);
+        };
+        press(&mut rt, Key::Text("j".to_owned()));
+        assert_eq!(rt.state.selected.as_deref(), Some("2"));
+        press(&mut rt, Key::Text("k".to_owned()));
+        assert_eq!(rt.state.selected.as_deref(), Some("1"));
+        press(&mut rt, Key::Text("l".to_owned()));
+        assert_eq!(rt.state.category, state::Category::Favorites);
+        press(&mut rt, Key::Text("h".to_owned()));
+        assert_eq!(rt.state.category, state::Category::All);
+        press(&mut rt, Key::Text("/".to_owned()));
+        assert!(rt.state.query.focused);
+        press(&mut rt, Key::Text("j".to_owned()));
+        assert_eq!(rt.state.query.text, "j");
         assert_eq!(rt.state.selected.as_deref(), Some("1"));
     }
 

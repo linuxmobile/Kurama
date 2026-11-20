@@ -7,8 +7,9 @@ use rune::{
 use crate::backend::{revealed_value, totp_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
-    copy_field, dispatch, move_selection, open_trash, select_category, select_folder, set_favorite,
-    submit_quick_unlock, submit_search, submit_unlock, toggle_reveal, Category, Location, State,
+    copy_field, dispatch, move_selection, open_trash, select_category, select_folder, select_item,
+    set_favorite, submit_quick_unlock, submit_search, submit_unlock, toggle_reveal, Category,
+    Location, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -405,7 +406,7 @@ fn item_row(item: &VaultRow, selected: bool, dark: bool) -> El {
         .hover(t.hover)
         .press(t.press)
         .cursor(Cursor::Pointer)
-        .on_press(move |s: &mut State| s.selected = Some(id.clone()))
+        .on_press(move |s: &mut State| select_item(s, id.clone()))
         .child(
             icon(icons::for_type(&item.type_name), 18.0)
                 .key(format!("item-icon-{}-{}", item.type_name, item.id))
