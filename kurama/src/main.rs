@@ -141,6 +141,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                 }
                 "n" => {
                     state.create = Some(state::start_create());
+                    state.form_error = None;
                     tx.focus("create-name", true);
                     true
                 }
@@ -440,6 +441,29 @@ mod tests {
                     && folder_id.as_deref() == Some("development")
                     && notes.as_ref().map(backend::Secret::as_str) == Some("Keep this private")
         )));
+    }
+
+    #[test]
+    fn create_form_shows_validation_error() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("new-item").expect("new item button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("create-submit").expect("create button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("create-form-error").is_some());
+        assert_eq!(
+            rt.state.form_error.as_deref(),
+            Some("Item name is required.")
+        );
     }
 
     #[test]

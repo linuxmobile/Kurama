@@ -153,6 +153,7 @@ pub struct State {
     pub totp: Option<TotpMeta>,
     pub busy: bool,
     pub notice: Option<String>,
+    pub form_error: Option<String>,
     pub approvals: Vec<Approval>,
     pub pending_delete: Option<String>,
     pub dark_override: Option<bool>,
@@ -186,6 +187,7 @@ impl Default for State {
             totp: None,
             busy: true,
             notice: None,
+            form_error: None,
             approvals: Vec::new(),
             pending_delete: None,
             dark_override: None,
@@ -687,15 +689,25 @@ pub fn submit_create(state: &mut State) {
     };
     let name = draft.name.text.trim().to_owned();
     if name.is_empty() {
-        state.notice = Some("Enter a name for the new item.".to_owned());
+        state.form_error = Some("Item name is required.".to_owned());
         state.create = Some(draft);
         return;
     }
     if draft.item_type == 5 && draft.ssh.private_key.text.trim().is_empty() {
-        state.notice = Some("Paste an SSH private key.".to_owned());
+        state.form_error = Some("SSH private key is required.".to_owned());
         state.create = Some(draft);
         return;
     }
+    if draft
+        .fields
+        .iter()
+        .any(|field| field.name.text.trim().is_empty() && !field.value.text.trim().is_empty())
+    {
+        state.form_error = Some("Name every custom field that has a value.".to_owned());
+        state.create = Some(draft);
+        return;
+    }
+    state.form_error = None;
     if draft.item_type == 5 {
         let private_key = Secret::new(draft.ssh.private_key.text.clone());
         dispatch(
@@ -736,6 +748,7 @@ pub fn submit_create(state: &mut State) {
 
 pub fn cancel_create(state: &mut State) {
     state.create = None;
+    state.form_error = None;
 }
 
 pub fn start_edit(state: &mut State) {
@@ -760,6 +773,7 @@ pub fn start_edit(state: &mut State) {
             empty_identity_draft()
         },
     });
+    state.form_error = None;
 }
 
 pub fn toggle_edit_favorite(state: &mut State) {
@@ -784,10 +798,11 @@ pub fn submit_edit(state: &mut State) {
     };
     let name = draft.name.text.trim().to_owned();
     if name.is_empty() {
-        state.notice = Some("Enter a name for this item.".to_owned());
+        state.form_error = Some("Item name is required.".to_owned());
         state.edit = Some(draft);
         return;
     }
+    state.form_error = None;
     dispatch(
         state,
         Request::UpdateItem {
@@ -811,6 +826,7 @@ pub fn submit_edit(state: &mut State) {
 
 pub fn cancel_edit(state: &mut State) {
     state.edit = None;
+    state.form_error = None;
 }
 
 pub fn delete_item(state: &mut State, permanent: bool) {
@@ -1668,10 +1684,7 @@ mod tests {
         submit_create(&mut state);
         assert!(rx.try_iter().next().is_none());
         assert!(state.create.is_some());
-        assert_eq!(
-            state.notice.as_deref(),
-            Some("Enter a name for the new item.")
-        );
+        assert_eq!(state.form_error.as_deref(), Some("Item name is required."));
     }
 
     #[test]
@@ -1729,7 +1742,7 @@ mod tests {
         state.edit.as_mut().unwrap().name.replace_text("   ");
         submit_edit(&mut state);
         assert!(rx.try_iter().next().is_none());
-        assert_eq!(state.notice.as_deref(), Some("Enter a name for this item."));
+        assert_eq!(state.form_error.as_deref(), Some("Item name is required."));
     }
 
     #[test]

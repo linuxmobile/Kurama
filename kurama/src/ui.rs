@@ -561,7 +561,15 @@ fn custom_fields(fields: &[CustomFieldDraft], dark: bool) -> El {
     ))
 }
 
-fn form_panel(key: &str, title: &str, dark: bool, header_extra: El, body: El, footer: El) -> El {
+fn form_panel(
+    key: &str,
+    title: &str,
+    dark: bool,
+    header_extra: El,
+    body: El,
+    footer: El,
+    error: Option<&str>,
+) -> El {
     let t = tok::theme(dark);
     col()
         .key(key)
@@ -597,6 +605,22 @@ fn form_panel(key: &str, title: &str, dark: bool, header_extra: El, body: El, fo
                         .padding(20.0)
                         .gap(16.0),
                 )
+                .child(if let Some(error) = error {
+                    text(error.to_owned())
+                        .key(format!("{key}-error"))
+                        .font(ROW_SUBTITLE)
+                        .color(Color {
+                            r: 0.96,
+                            g: 0.45,
+                            b: 0.42,
+                            a: 1.0,
+                        })
+                        .w_full()
+                        .px(20.0)
+                        .pb(8.0)
+                } else {
+                    el()
+                })
                 .child(el().h(1.0).w_full().fill(t.separator))
                 .child(
                     row()
@@ -752,7 +776,15 @@ fn create_form(s: &State, dark: bool) -> El {
         .child(action("create-submit", "Create", dark, submit_create))
         .child(action("create-cancel", "Cancel", dark, cancel_create));
 
-    form_panel("create-form", "New item", dark, choices, body, footer)
+    form_panel(
+        "create-form",
+        "New item",
+        dark,
+        choices,
+        body,
+        footer,
+        s.form_error.as_deref(),
+    )
 }
 
 fn edit_form(s: &State, dark: bool) -> El {
@@ -889,7 +921,15 @@ fn edit_form(s: &State, dark: bool) -> El {
         .child(action("save-edit", "Save", dark, submit_edit))
         .child(action("cancel-edit", "Cancel", dark, cancel_edit));
 
-    form_panel("edit-form", "Edit item", dark, header, body, footer)
+    form_panel(
+        "edit-form",
+        "Edit item",
+        dark,
+        header,
+        body,
+        footer,
+        s.form_error.as_deref(),
+    )
 }
 
 fn top_bar(s: &State, dark: bool) -> El {
@@ -935,6 +975,7 @@ fn top_bar(s: &State, dark: bool) -> El {
         .child(el().grow(1.0))
         .child(action_tx("new-item", "New", dark, |state, tx| {
             state.create = Some(crate::state::start_create());
+            state.form_error = None;
             tx.focus("create-name", true);
         }))
         .child(action(
