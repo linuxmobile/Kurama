@@ -64,6 +64,10 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         return false;
     }
     match &event.key {
+        Key::Escape if state.help => {
+            state.help = false;
+            true
+        }
         Key::Escape if state.edit.is_some() => {
             state::cancel_edit(state);
             true
@@ -85,6 +89,10 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                 return false;
             }
             match text.as_str() {
+                "?" => {
+                    state.help = !state.help;
+                    true
+                }
                 "/" => {
                     tx.focus("search", true);
                     true
@@ -277,6 +285,28 @@ mod tests {
                 preview,
             } if item_id == "1" && attachment_id == "att-1" && filename == "notes.txt" && !preview
         )));
+    }
+
+    #[test]
+    fn help_overlay_opens_and_closes() {
+        let mut rt = runtime(state::scene_populated);
+        rt.on_key = Some(on_key);
+        rt.frame(1.0 / 60.0);
+        rt.key(KeyEvent {
+            key: Key::Text("?".to_owned()),
+            mods: Mods::default(),
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.help);
+        assert!(rt.find("help-overlay").is_some());
+        assert!(rt.find("help-shortcut-0").is_some());
+        rt.key(KeyEvent {
+            key: Key::Escape,
+            mods: Mods::default(),
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(!rt.state.help);
+        assert!(rt.find("details").is_some());
     }
 
     #[test]

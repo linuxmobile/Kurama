@@ -23,7 +23,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let connected = !s.snapshot.status.is_empty();
     let unlocked = s.snapshot.status == "unlocked";
 
-    let content = if s.create.is_some() {
+    let content = if s.help {
+        help(s, dark)
+    } else if s.create.is_some() {
         create_form(s, dark)
     } else if s.edit.is_some() {
         edit_form(s, dark)
@@ -50,6 +52,46 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(top_bar(s, dark))
         .child(content)
         .child(status_bar(s, dark))
+}
+
+fn help(_s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let shortcuts = [
+        ("↑ / ↓ / j / k", "Move between items"),
+        ("Home / End", "Select first or last item"),
+        ("h / l", "Change category"),
+        ("/", "Focus search"),
+        ("n", "Create a new item"),
+        ("?", "Toggle this help"),
+        ("Esc", "Close a form or this help"),
+    ];
+    let mut list = col().key("help-list").gap(8.0);
+    for (index, (keys, label)) in shortcuts.iter().enumerate() {
+        list = list.child(
+            row()
+                .key(format!("help-shortcut-{index}"))
+                .gap(16.0)
+                .child(text(keys.to_owned()).font(type_::LABEL).color(t.text))
+                .child(
+                    text(label.to_owned())
+                        .font(ROW_SUBTITLE)
+                        .color(t.text_secondary),
+                ),
+        );
+    }
+    col()
+        .key("help-overlay")
+        .w_full()
+        .grow(1.0)
+        .h_full()
+        .center()
+        .gap(16.0)
+        .fill(t.bg)
+        .child(text("Keyboard shortcuts").font(WINDOW_TITLE).color(t.text))
+        .child(list)
+        .child(action("help-close", "Close", dark, |state| {
+            state.help = false;
+        }))
 }
 
 fn create_form(s: &State, dark: bool) -> El {
@@ -276,6 +318,7 @@ fn top_bar(s: &State, dark: bool) -> El {
             },
         ))
         .child(action("sync", "Sync", dark, |s| dispatch(s, Request::Sync)))
+        .child(action("?", "?", dark, |s| s.help = !s.help))
         .child(action("lock", "Lock", dark, |s| dispatch(s, Request::Lock)))
 }
 

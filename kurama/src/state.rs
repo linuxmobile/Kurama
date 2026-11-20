@@ -108,6 +108,7 @@ pub struct State {
     pub approvals: Vec<Approval>,
     pub pending_delete: Option<String>,
     pub dark_override: Option<bool>,
+    pub help: bool,
     rows_version: u64,
     visible_cache: RefCell<Option<VisibleCache>>,
     pub(crate) requests: Option<Sender<Request>>,
@@ -140,6 +141,7 @@ impl Default for State {
             approvals: Vec::new(),
             pending_delete: None,
             dark_override: None,
+            help: false,
             rows_version: 0,
             visible_cache: RefCell::new(None),
             requests: None,
@@ -672,6 +674,7 @@ fn visible_fingerprint(state: &State) -> u64 {
     state.busy.hash(&mut hasher);
     state.notice.hash(&mut hasher);
     state.dark_override.hash(&mut hasher);
+    state.help.hash(&mut hasher);
     if state.snapshot.status != "unlocked" {
         state.snapshot.quick_unlock_ready.hash(&mut hasher);
         return hasher.finish();
