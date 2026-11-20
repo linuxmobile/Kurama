@@ -204,9 +204,15 @@ fn settings(s: &State, dark: bool) -> El {
                                 .scroll_edge_fade(20.0)
                                 .scroll_margin(24.0)
                                 .padding(24.0)
-                                .pb(48.0)
+                                .pb(24.0)
                                 .gap(18.0)
-                                .child(detail),
+                                .child(
+                                    col()
+                                        .key("settings-detail")
+                                        .w_full()
+                                        .pb(64.0)
+                                        .child(detail),
+                                ),
                         ),
                 ),
         )
