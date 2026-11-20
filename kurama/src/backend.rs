@@ -4,6 +4,7 @@
 //! State only holds metadata and field keys. A revealed value lives in a
 //! dedicated store so it never appears in `State` or its `Debug` output.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Mutex;
 
@@ -66,6 +67,19 @@ pub struct ItemDetails {
 pub struct FolderMeta {
     pub id: String,
     pub name: String,
+}
+
+/// View of a Send. The access link is kept inside `Secret` so it never
+/// appears in `State`'s debug output.
+#[derive(Clone, Debug)]
+pub struct SendRow {
+    pub id: String,
+    pub name: String,
+    pub disabled: bool,
+    pub expiration: String,
+    pub max_access: i64,
+    pub access_count: i64,
+    pub url: Secret,
 }
 
 /// Non-secret view of the daemon's `status` response.
@@ -312,6 +326,21 @@ pub enum Request {
         since: u64,
     },
     Approvals,
+    ListSends,
+    CreateSend {
+        name: String,
+        text: Secret,
+        hidden: bool,
+        max_access: Option<u32>,
+        expiration: Option<String>,
+        password: Option<Secret>,
+    },
+    DisableSend {
+        id: String,
+    },
+    DeleteSend {
+        id: String,
+    },
 }
 
 #[derive(Clone)]
@@ -387,6 +416,27 @@ pub fn clear_revealed() {
     }
 }
 
+static SEND_URLS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+pub fn stash_send_url(id: &str, url: &Secret) {
+    if let Ok(mut urls) = SEND_URLS.lock() {
+        urls.get_or_insert_with(HashMap::new)
+            .insert(id.to_owned(), url.as_str().to_owned());
+    }
+}
+
+pub fn send_url(id: &str) -> Option<String> {
+    SEND_URLS.lock().ok()?.as_ref()?.get(id).cloned()
+}
+
+pub fn clear_send_urls() {
+    if let Ok(mut urls) = SEND_URLS.lock() {
+        if let Some(urls) = urls.as_mut() {
+            urls.clear();
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Event {
     Snapshot(Snapshot),
@@ -429,6 +479,18 @@ pub enum Event {
         notices: Vec<Notice>,
     },
     Approvals(Vec<Approval>),
+    Sends(Vec<SendRow>),
+    SendCreated {
+        id: String,
+        url: Secret,
+    },
+    SendChanged {
+        id: String,
+        disabled: bool,
+    },
+    SendDeleted {
+        id: String,
+    },
     Auth(AuthOutcome),
     Generated {
         value: Secret,
@@ -848,6 +910,49 @@ pub fn perform(request: Request) -> Event {
         Request::Approvals => match call(json!({ "action": "ssh_agent_pending" })) {
             Ok(response) => Event::Approvals(approvals(&response)),
             Err(_) => Event::Approvals(Vec::new()),
+        },
+        Request::ListSends => match call(json!({ "action": "send_list" })) {
+            Ok(response) => Event::Sends(send_rows(&response)),
+            Err(error) => Event::Error(error),
+        },
+        Request::CreateSend {
+            name,
+            text: share_text,
+            hidden,
+            max_access,
+            expiration,
+            password,
+        } => match call(json!({
+            "action": "send_create",
+            "name": name,
+            "text": share_text.as_str(),
+            "hidden": hidden,
+            "max_access": max_access,
+            "expiration": expiration,
+            "password": password.as_ref().map(Secret::as_str),
+        })) {
+            Ok(response) => {
+                let send = response.get("send").unwrap_or(&response);
+                Event::SendCreated {
+                    id: text(send, "id"),
+                    url: Secret::new(first_text(send, &["accessUrl", "accessURL"])),
+                }
+            }
+            Err(error) => Event::Error(error),
+        },
+        Request::DisableSend { id } => match call(json!({
+            "action": "send_deactivate",
+            "id": id.clone(),
+        })) {
+            Ok(_) => Event::SendChanged { id, disabled: true },
+            Err(error) => Event::Error(error),
+        },
+        Request::DeleteSend { id } => match call(json!({
+            "action": "send_delete",
+            "id": id.clone(),
+        })) {
+            Ok(_) => Event::SendDeleted { id },
+            Err(error) => Event::Error(error),
         },
     }
 }
@@ -1378,6 +1483,40 @@ fn notice(event: &Value) -> Option<Notice> {
     })
 }
 
+fn send_rows(response: &Value) -> Vec<SendRow> {
+    response
+        .get("sends")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(send_row).collect())
+        .unwrap_or_default()
+}
+
+fn send_row(value: &Value) -> Option<SendRow> {
+    let name = text(value, "name");
+    Some(SendRow {
+        id: text(value, "id"),
+        name: if name.is_empty() {
+            "(unnamed send)".to_owned()
+        } else {
+            name
+        },
+        disabled: value
+            .get("disabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        expiration: first_text(value, &["expirationDate", "expiration"]),
+        max_access: value
+            .get("maxAccessCount")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        access_count: value
+            .get("accessCount")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        url: Secret::new(first_text(value, &["accessUrl", "accessURL"])),
+    })
+}
+
 fn approvals(response: &Value) -> Vec<Approval> {
     response
         .get("prompts")
@@ -1601,6 +1740,30 @@ mod tests {
         assert_eq!(found[2].approval_id, Some(9));
         let debug = format!("{:?}", found);
         assert!(!debug.contains("super-secret"));
+    }
+
+    #[test]
+    fn send_rows_keep_metadata_and_redact_links() {
+        let response = json!({
+            "sends": [{
+                "id": "send-1",
+                "name": "Shared note",
+                "disabled": false,
+                "expirationDate": "2026-02-01T00:00:00Z",
+                "maxAccessCount": 5,
+                "accessCount": 2,
+                "accessUrl": "https://vault.example.com/send#secret"
+            }]
+        });
+        let rows = send_rows(&response);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "send-1");
+        assert_eq!(rows[0].name, "Shared note");
+        assert_eq!(rows[0].max_access, 5);
+        assert_eq!(rows[0].access_count, 2);
+        let debug = format!("{rows:?}");
+        assert!(!debug.contains("secret"));
+        assert!(debug.contains("redacted"));
     }
 
     #[test]

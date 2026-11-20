@@ -60,6 +60,8 @@ fn main() -> ExitCode {
             ("create-fields", state::scene_create_fields),
             ("create-uris", state::scene_create_uris),
             ("generator", state::scene_generator),
+            ("sends", state::scene_sends),
+            ("send-form", state::scene_send_form),
         ],
         setup: Some(state::setup),
         poll: Some(state::poll),
@@ -84,6 +86,18 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         }
         Key::Escape if state.create.is_some() => {
             state::cancel_create(state);
+            true
+        }
+        Key::Escape if state.send_form.is_some() => {
+            state::cancel_send(state);
+            true
+        }
+        Key::Escape if state.send_pending_delete.is_some() => {
+            state::cancel_delete_send(state);
+            true
+        }
+        Key::Escape if state.sends_open => {
+            state::close_sends(state);
             true
         }
         Key::Escape if state.generator.is_some() => {
@@ -130,6 +144,11 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                         | "create-fingerprint"
                         | "generator-separator"
                         | "generator-value"
+                        | "send-name"
+                        | "send-text"
+                        | "send-max-access"
+                        | "send-expiration"
+                        | "send-password"
                 )
             ) || focused.is_some_and(|key| {
                 key.starts_with("create-card")
@@ -160,6 +179,10 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                 }
                 "g" => {
                     state::open_generator(state, state::GeneratorTarget::None);
+                    true
+                }
+                "s" => {
+                    state::open_sends(state);
                     true
                 }
                 "j" => state::move_selection(state, 1, tx),
@@ -213,6 +236,42 @@ mod tests {
             "generator-entropy",
             "generator-copy",
             "generator-close",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+    }
+
+    #[test]
+    fn sends_scene_shows_rows_and_actions() {
+        let mut rt = runtime(state::scene_sends);
+        rt.frame(1.0 / 60.0);
+        for key in [
+            "sends-screen",
+            "send-list",
+            "send-row-send-1",
+            "send-detail",
+            "send-copy-link-send-1",
+            "send-disable-send-1",
+            "send-delete-send-1",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+        assert!(rt.find("send-disable-send-2").is_none());
+    }
+
+    #[test]
+    fn send_form_scene_shows_all_inputs() {
+        let mut rt = runtime(state::scene_send_form);
+        rt.frame(1.0 / 60.0);
+        for key in [
+            "send-form",
+            "send-name",
+            "send-text",
+            "send-hidden-toggle",
+            "send-max-access",
+            "send-expiration",
+            "send-password",
+            "send-submit",
         ] {
             assert!(rt.find(key).is_some(), "missing key: {key}");
         }

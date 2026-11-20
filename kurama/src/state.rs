@@ -8,8 +8,8 @@ use rune::{edit::TextEdit, Tx, Waker};
 
 use crate::backend::{
     self, clear_revealed, clear_totp, Approval, AuthOutcome, CardInput, CustomFieldInput, Event,
-    FieldValue, IdentityInput, ItemDetails, ItemField, Request, Secret, Snapshot, TotpMeta,
-    VaultRow,
+    FieldValue, IdentityInput, ItemDetails, ItemField, Request, Secret, SendRow, Snapshot,
+    TotpMeta, VaultRow,
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -66,6 +66,16 @@ impl Category {
             Category::SshKeys => item.type_name == "ssh_key",
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct SendDraft {
+    pub name: TextEdit,
+    pub text: TextEdit,
+    pub hidden: bool,
+    pub max_access: TextEdit,
+    pub expiration: TextEdit,
+    pub password: TextEdit,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -212,6 +222,12 @@ pub struct State {
     pub create: Option<CreateDraft>,
     pub auth: Option<AuthDraft>,
     pub generator: Option<GeneratorDraft>,
+    pub sends: Vec<SendRow>,
+    pub sends_open: bool,
+    pub send_selected: Option<String>,
+    pub send_form: Option<SendDraft>,
+    pub send_pending_delete: Option<String>,
+    pub send_error: Option<String>,
     pub revealed: Option<String>,
     pub totp: Option<TotpMeta>,
     pub busy: bool,
@@ -248,6 +264,12 @@ impl Default for State {
             create: None,
             auth: None,
             generator: None,
+            sends: Vec::new(),
+            sends_open: false,
+            send_selected: None,
+            send_form: None,
+            send_pending_delete: None,
+            send_error: None,
             revealed: None,
             totp: None,
             busy: true,
@@ -1455,6 +1477,20 @@ fn visible_fingerprint(state: &State) -> u64 {
         approval.client.hash(&mut hasher);
     }
     state.pending_delete.hash(&mut hasher);
+    state.sends_open.hash(&mut hasher);
+    state.send_selected.hash(&mut hasher);
+    state.send_pending_delete.hash(&mut hasher);
+    state.send_error.hash(&mut hasher);
+    for send in &state.sends {
+        send.id.hash(&mut hasher);
+        send.name.hash(&mut hasher);
+        send.disabled.hash(&mut hasher);
+    }
+    state
+        .send_form
+        .as_ref()
+        .map(|draft| draft.hidden)
+        .hash(&mut hasher);
     state
         .edit
         .as_ref()
@@ -1680,6 +1716,58 @@ fn apply(state: &mut State, event: Event) {
                 state.notice = Some("SSH approval requested".to_owned());
             }
         }
+        Event::Sends(rows) => {
+            backend::clear_send_urls();
+            for row in &rows {
+                backend::stash_send_url(&row.id, &row.url);
+            }
+            state.sends = rows;
+            state.send_error = None;
+            let selected_missing = state
+                .send_selected
+                .as_ref()
+                .is_some_and(|id| !state.sends.iter().any(|row| &row.id == id));
+            if selected_missing || state.send_selected.is_none() {
+                state.send_selected = state.sends.first().map(|row| row.id.clone());
+            }
+        }
+        Event::SendCreated { id, url } => {
+            backend::stash_send_url(&id, &url);
+            let link = Secret::new(url.as_str().to_owned());
+            state.send_form = None;
+            state.form_error = None;
+            state.send_selected = Some(id);
+            state.notice = Some("Send created · link copied".to_owned());
+            dispatch(
+                state,
+                Request::CopyText {
+                    text: link,
+                    label: "Send link".to_owned(),
+                },
+            );
+            dispatch(state, Request::ListSends);
+        }
+        Event::SendChanged { id, disabled } => {
+            if let Some(row) = state.sends.iter_mut().find(|row| row.id == id) {
+                row.disabled = disabled;
+            }
+            state.notice = Some(if disabled {
+                "Send disabled".to_owned()
+            } else {
+                "Send updated".to_owned()
+            });
+            dispatch(state, Request::ListSends);
+        }
+        Event::SendDeleted { id } => {
+            state.sends.retain(|row| row.id != id);
+            backend::clear_send_urls();
+            if state.send_selected.as_deref() == Some(id.as_str()) {
+                state.send_selected = state.sends.first().map(|row| row.id.clone());
+            }
+            state.send_pending_delete = None;
+            state.notice = Some("Send deleted".to_owned());
+            dispatch(state, Request::ListSends);
+        }
         Event::FavoriteChanged { id, favorite } => {
             for row in state.rows.iter_mut().chain(state.snapshot.items.iter_mut()) {
                 if row.id == id {
@@ -1835,6 +1923,131 @@ fn queue_unlock(state: &mut State) {
 pub fn submit_quick_unlock(state: &mut State) {
     state.password.replace_text("");
     dispatch(state, Request::QuickUnlock);
+}
+
+fn empty_send_draft() -> SendDraft {
+    SendDraft {
+        name: TextEdit::new(""),
+        text: TextEdit::new("").secure(),
+        hidden: false,
+        max_access: TextEdit::new(""),
+        expiration: TextEdit::new(""),
+        password: TextEdit::new("").secure(),
+    }
+}
+
+pub fn open_sends(state: &mut State) {
+    state.sends_open = true;
+    state.send_error = None;
+    dispatch(state, Request::ListSends);
+}
+
+pub fn close_sends(state: &mut State) {
+    state.sends_open = false;
+    state.send_form = None;
+    state.send_pending_delete = None;
+    state.send_error = None;
+}
+
+pub fn new_send(state: &mut State) {
+    state.send_form = Some(empty_send_draft());
+    state.form_error = None;
+}
+
+pub fn cancel_send(state: &mut State) {
+    state.send_form = None;
+    state.form_error = None;
+}
+
+pub fn toggle_send_hidden(state: &mut State) {
+    if let Some(draft) = state.send_form.as_mut() {
+        draft.hidden = !draft.hidden;
+    }
+}
+
+pub fn select_send(state: &mut State, id: String) {
+    state.send_selected = Some(id);
+}
+
+pub fn submit_send(state: &mut State) {
+    let Some(draft) = state.send_form.as_ref() else {
+        return;
+    };
+    let text = draft.text.text.clone();
+    if text.trim().is_empty() {
+        state.form_error = Some("Enter the text to share.".to_owned());
+        return;
+    }
+    let max_access = draft.max_access.text.trim();
+    let max_access = if max_access.is_empty() {
+        None
+    } else {
+        match max_access.parse::<u32>() {
+            Ok(value) if value > 0 => Some(value),
+            _ => {
+                state.form_error = Some("Maximum accesses must be a positive number.".to_owned());
+                return;
+            }
+        }
+    };
+    let name = {
+        let name = draft.name.text.trim();
+        if name.is_empty() {
+            "Untitled send".to_owned()
+        } else {
+            name.to_owned()
+        }
+    };
+    let expiration = draft.expiration.text.trim();
+    let expiration = (!expiration.is_empty()).then(|| expiration.to_owned());
+    let password = draft.password.text.trim();
+    let password = (!password.is_empty()).then(|| Secret::new(password.to_owned()));
+    let hidden = draft.hidden;
+    state.form_error = None;
+    dispatch(
+        state,
+        Request::CreateSend {
+            name,
+            text: Secret::new(text),
+            hidden,
+            max_access,
+            expiration,
+            password,
+        },
+    );
+}
+
+pub fn copy_send(state: &mut State, id: String) {
+    let Some(url) = backend::send_url(&id) else {
+        state.notice = Some("This send has no access link.".to_owned());
+        return;
+    };
+    dispatch(
+        state,
+        Request::CopyText {
+            text: Secret::new(url),
+            label: "Send link".to_owned(),
+        },
+    );
+}
+
+pub fn disable_send(state: &mut State, id: String) {
+    dispatch(state, Request::DisableSend { id });
+}
+
+pub fn request_delete_send(state: &mut State, id: String) {
+    state.send_pending_delete = Some(id);
+}
+
+pub fn cancel_delete_send(state: &mut State) {
+    state.send_pending_delete = None;
+}
+
+pub fn confirm_delete_send(state: &mut State) {
+    let Some(id) = state.send_pending_delete.take() else {
+        return;
+    };
+    dispatch(state, Request::DeleteSend { id });
 }
 
 pub fn scene_populated(state: &mut State) {
@@ -2001,6 +2214,46 @@ pub fn scene_generator(state: &mut State) {
         .value
         .replace_text("Co4rect-Horse-Battery");
     state.generator.as_mut().unwrap().entropy = 78.4;
+}
+
+pub fn scene_sends(state: &mut State) {
+    scene_populated(state);
+    state.sends_open = true;
+    state.sends = vec![
+        SendRow {
+            id: "send-1".to_owned(),
+            name: "Notes for Alice".to_owned(),
+            disabled: false,
+            expiration: "2026-02-01T00:00:00Z".to_owned(),
+            max_access: 5,
+            access_count: 2,
+            url: Secret::new("https://vault.example.com/send#abc123".to_owned()),
+        },
+        SendRow {
+            id: "send-2".to_owned(),
+            name: "Archived report".to_owned(),
+            disabled: true,
+            expiration: String::new(),
+            max_access: 0,
+            access_count: 0,
+            url: Secret::new(String::new()),
+        },
+    ];
+    backend::stash_send_url("send-1", &state.sends[0].url);
+    backend::stash_send_url("send-2", &state.sends[1].url);
+    state.send_selected = Some("send-1".to_owned());
+}
+
+pub fn scene_send_form(state: &mut State) {
+    scene_sends(state);
+    state.send_form = Some(empty_send_draft());
+    state
+        .send_form
+        .as_mut()
+        .unwrap()
+        .text
+        .replace_text("Share this text securely");
+    state.form_error = None;
 }
 
 pub fn scene_create_card(state: &mut State) {
@@ -2861,5 +3114,95 @@ mod tests {
             }]),
         );
         assert_eq!(state.approvals.len(), 1);
+    }
+
+    #[test]
+    fn send_submission_queues_redacted_request() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        state.send_form = Some(SendDraft {
+            name: TextEdit::new("Notes"),
+            text: TextEdit::new("private-share-text").secure(),
+            hidden: true,
+            max_access: TextEdit::new("3"),
+            expiration: TextEdit::new("2026-03-01"),
+            password: TextEdit::new("send-passphrase").secure(),
+        });
+
+        submit_send(&mut state);
+
+        assert!(state.send_form.is_some());
+        let requests: Vec<Request> = rx.try_iter().collect();
+        match &requests[0] {
+            Request::CreateSend {
+                name,
+                text,
+                hidden,
+                max_access,
+                expiration,
+                password,
+            } => {
+                assert_eq!(name, "Notes");
+                assert_eq!(text.as_str(), "private-share-text");
+                assert!(*hidden);
+                assert_eq!(*max_access, Some(3));
+                assert_eq!(expiration.as_deref(), Some("2026-03-01"));
+                assert_eq!(
+                    password.as_ref().map(Secret::as_str),
+                    Some("send-passphrase")
+                );
+                let debug = format!("{requests:?}");
+                assert!(!debug.contains("private-share-text"));
+                assert!(!debug.contains("send-passphrase"));
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_events_expose_links_only_through_the_store() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        let row = SendRow {
+            id: "send-1".to_owned(),
+            name: "Shared".to_owned(),
+            disabled: false,
+            expiration: String::new(),
+            max_access: 0,
+            access_count: 0,
+            url: Secret::new("https://example.test/send#capability".to_owned()),
+        };
+        let debug = format!("{row:?}");
+        assert!(!debug.contains("capability"));
+
+        apply(&mut state, Event::Sends(vec![row]));
+
+        assert_eq!(state.sends.len(), 1);
+        assert_eq!(state.send_selected.as_deref(), Some("send-1"));
+        assert_eq!(
+            backend::send_url("send-1").as_deref(),
+            Some("https://example.test/send#capability")
+        );
+        let requests: Vec<Request> = rx.try_iter().collect();
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn send_delete_confirmation_queues_delete() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        request_delete_send(&mut state, "send-2".to_owned());
+        assert_eq!(state.send_pending_delete.as_deref(), Some("send-2"));
+
+        confirm_delete_send(&mut state);
+
+        assert!(state.send_pending_delete.is_none());
+        assert!(matches!(
+            rx.try_iter().next(),
+            Some(Request::DeleteSend { id }) if id == "send-2"
+        ));
     }
 }

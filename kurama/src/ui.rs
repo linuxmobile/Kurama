@@ -9,16 +9,18 @@ use crate::backend::{revealed_value, totp_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
     add_create_field, add_create_uri, add_edit_uri, adjust_generator_length,
-    adjust_generator_words, cancel_create, cancel_edit, close_generator, copy_field,
-    copy_generated, cycle_create_field_type, cycle_create_folder, cycle_edit_folder, delete_item,
-    dispatch, folder_label, generate_password, logout, move_selection, open_attachment,
-    open_generator, open_trash, remove_create_field, remove_create_uri, remove_edit_uri,
-    restore_item, select_category, select_folder, select_item, send_two_factor_email,
-    set_auth_mode, set_create_type, set_favorite, set_generator_passphrase, start_edit,
-    submit_auth, submit_create, submit_edit, submit_fido2, submit_quick_unlock, submit_search,
-    submit_unlock, toggle_create_favorite, toggle_create_field_value, toggle_edit_favorite,
-    toggle_generator_option, toggle_reveal, use_generated, AuthMode, CardDraft, Category,
-    CustomFieldDraft, GeneratorOption, GeneratorTarget, IdentityDraft, Location, SshDraft, State,
+    adjust_generator_words, cancel_create, cancel_delete_send, cancel_edit, cancel_send,
+    close_generator, close_sends, confirm_delete_send, copy_field, copy_generated, copy_send,
+    cycle_create_field_type, cycle_create_folder, cycle_edit_folder, delete_item, disable_send,
+    dispatch, folder_label, generate_password, logout, move_selection, new_send, open_attachment,
+    open_generator, open_sends, open_trash, remove_create_field, remove_create_uri,
+    remove_edit_uri, request_delete_send, restore_item, select_category, select_folder,
+    select_item, select_send, send_two_factor_email, set_auth_mode, set_create_type, set_favorite,
+    set_generator_passphrase, start_edit, submit_auth, submit_create, submit_edit, submit_fido2,
+    submit_quick_unlock, submit_search, submit_send, submit_unlock, toggle_create_favorite,
+    toggle_create_field_value, toggle_edit_favorite, toggle_generator_option, toggle_reveal,
+    toggle_send_hidden, use_generated, AuthMode, CardDraft, Category, CustomFieldDraft,
+    GeneratorOption, GeneratorTarget, IdentityDraft, Location, SendDraft, SshDraft, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -34,6 +36,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         generator(s, dark)
     } else if s.help {
         help(s, dark)
+    } else if s.sends_open {
+        sends(s, dark)
     } else if s.create.is_some() {
         create_form(s, dark)
     } else if s.edit.is_some() {
@@ -73,6 +77,8 @@ fn help(_s: &State, dark: bool) -> El {
         ("h / l", "Change category"),
         ("/", "Focus search"),
         ("n", "Create a new item"),
+        ("g", "Generate a password"),
+        ("s", "Open Sends"),
         ("?", "Toggle this help"),
         ("Esc", "Close a form or this help"),
     ];
@@ -142,8 +148,12 @@ fn labeled_input(
                     if matches!(event.key, Key::Escape) {
                         if s.create.is_some() {
                             cancel_create(s);
-                        } else {
+                        } else if s.edit.is_some() {
                             cancel_edit(s);
+                        } else if s.send_form.is_some() {
+                            cancel_send(s);
+                        } else {
+                            return false;
                         }
                         true
                     } else {
@@ -197,8 +207,12 @@ fn multiline_field(
                     if matches!(event.key, Key::Escape) {
                         if s.create.is_some() {
                             cancel_create(s);
-                        } else {
+                        } else if s.edit.is_some() {
                             cancel_edit(s);
+                        } else if s.send_form.is_some() {
+                            cancel_send(s);
+                        } else {
+                            return false;
                         }
                         true
                     } else {
@@ -1027,6 +1041,295 @@ fn edit_form(s: &State, dark: bool) -> El {
     )
 }
 
+fn sends(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    if let Some(draft) = s.send_form.as_ref() {
+        return send_form(s, draft, dark);
+    }
+
+    let header = row()
+        .key("sends-header")
+        .w_full()
+        .gap(10.0)
+        .child(text("Sends").font(WINDOW_TITLE).color(t.text))
+        .child(el().grow(1.0))
+        .child(action("sends-back", "Back", dark, close_sends))
+        .child(action("sends-refresh", "Refresh", dark, |s| {
+            dispatch(s, Request::ListSends)
+        }))
+        .child(action("sends-new", "New send", dark, new_send));
+
+    let mut list = col()
+        .key("send-list")
+        .w(300.0)
+        .h_full()
+        .padding(12.0)
+        .gap(4.0)
+        .fill(t.card)
+        .border(1.0, t.card_border)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        });
+    for row in &s.sends {
+        let active = s.send_selected.as_deref() == Some(row.id.as_str());
+        let id = row.id.clone();
+        let status = if row.disabled { "Disabled" } else { "Active" };
+        list = list.child(
+            el().key(format!("send-row-{}", row.id))
+                .h(58.0)
+                .px(10.0)
+                .radius(8.0)
+                .role("button")
+                .label(format!("{}, {status}", row.name))
+                .checked(active)
+                .focusable(true)
+                .fill(if active {
+                    selected_row(dark)
+                } else {
+                    Color::TRANSPARENT
+                })
+                .hover(t.hover)
+                .press(t.press)
+                .cursor(Cursor::Pointer)
+                .on_press(move |state: &mut State| select_send(state, id.clone()))
+                .child(
+                    col()
+                        .gap(3.0)
+                        .child(
+                            text(row.name.clone())
+                                .font(ROW_TITLE)
+                                .color(t.text)
+                                .truncate(),
+                        )
+                        .child(text(status).font(META).color(if row.disabled {
+                            t.text_secondary
+                        } else {
+                            accent(dark)
+                        })),
+                ),
+        );
+    }
+
+    let detail = match s
+        .sends
+        .iter()
+        .find(|row| s.send_selected.as_deref() == Some(row.id.as_str()))
+    {
+        Some(send) => {
+            let id = send.id.clone();
+            let copy_id = id.clone();
+            let disable_id = id.clone();
+            let delete_id = id.clone();
+            let has_link = crate::backend::send_url(&id).is_some();
+            let mut view = col()
+                .key("send-detail")
+                .grow(1.0)
+                .gap(14.0)
+                .padding(20.0)
+                .fill(t.bg)
+                .child(text(send.name.clone()).font(WINDOW_TITLE).color(t.text))
+                .child(field(
+                    "Status",
+                    if send.disabled { "Disabled" } else { "Active" },
+                    dark,
+                ))
+                .child(field(
+                    "Expires",
+                    if send.expiration.is_empty() {
+                        "Never"
+                    } else {
+                        &send.expiration
+                    },
+                    dark,
+                ))
+                .child(field(
+                    "Accesses",
+                    &if send.max_access == 0 {
+                        format!("{} / unlimited", send.access_count)
+                    } else {
+                        format!("{} / {}", send.access_count, send.max_access)
+                    },
+                    dark,
+                ))
+                .child(field(
+                    "Link",
+                    if has_link {
+                        "Available (copy to clipboard)"
+                    } else {
+                        "Unavailable"
+                    },
+                    dark,
+                ))
+                .child(row().gap(8.0).child(action(
+                    &format!("send-copy-link-{id}"),
+                    "Copy link",
+                    dark,
+                    move |state| copy_send(state, copy_id.clone()),
+                )));
+            if !send.disabled {
+                view = view.child(action(
+                    &format!("send-disable-{disable_id}"),
+                    "Disable send",
+                    dark,
+                    move |state| disable_send(state, disable_id.clone()),
+                ));
+            }
+            view = view.child(action(
+                &format!("send-delete-{delete_id}"),
+                "Delete send",
+                dark,
+                move |state| request_delete_send(state, delete_id.clone()),
+            ));
+            if s.send_pending_delete.as_deref() == Some(send.id.as_str()) {
+                view = view.child(
+                    col()
+                        .key("send-delete-confirm")
+                        .gap(8.0)
+                        .padding(12.0)
+                        .radius(8.0)
+                        .fill(t.card)
+                        .child(text("Delete this send permanently?").color(t.text))
+                        .child(
+                            row()
+                                .gap(8.0)
+                                .child(action(
+                                    "send-delete-cancel",
+                                    "Cancel",
+                                    dark,
+                                    cancel_delete_send,
+                                ))
+                                .child(action(
+                                    "send-delete-confirm-button",
+                                    "Delete",
+                                    dark,
+                                    confirm_delete_send,
+                                )),
+                        ),
+                );
+            }
+            view
+        }
+        None => col()
+            .key("send-detail")
+            .grow(1.0)
+            .center()
+            .gap(8.0)
+            .fill(t.bg)
+            .child(text("No send selected").font(WINDOW_TITLE).color(t.text))
+            .child(
+                text(if s.sends.is_empty() {
+                    s.send_error.as_deref().unwrap_or("No sends yet.")
+                } else {
+                    "Select a send to see its details."
+                })
+                .font(ROW_SUBTITLE)
+                .color(t.text_secondary),
+            ),
+    };
+
+    col()
+        .key("sends-screen")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .padding(16.0)
+        .gap(12.0)
+        .fill(t.bg)
+        .child(header)
+        .child(
+            row()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .gap(12.0)
+                .child(list)
+                .child(detail),
+        )
+}
+
+fn send_form(s: &State, draft: &SendDraft, dark: bool) -> El {
+    let header_extra = row()
+        .gap(8.0)
+        .child(action("send-form-back", "Back", dark, cancel_send));
+    let body = col()
+        .gap(14.0)
+        .child(labeled_input(
+            &draft.name,
+            "send-name",
+            "Name",
+            "Optional send name",
+            dark,
+            |state| &mut state.send_form.as_mut().unwrap().name,
+            submit_send,
+        ))
+        .child(multiline_field(
+            &draft.text,
+            "send-text",
+            MultilineStyle {
+                label: "Text to share",
+                placeholder: "Paste the text to share",
+                height: 120.0,
+                revealed_secure: true,
+            },
+            dark,
+            |state| &mut state.send_form.as_mut().unwrap().text,
+        ))
+        .child(action(
+            "send-hidden-toggle",
+            if draft.hidden {
+                "Hide text after reading: On"
+            } else {
+                "Hide text after reading: Off"
+            },
+            dark,
+            toggle_send_hidden,
+        ))
+        .child(
+            row()
+                .gap(12.0)
+                .child(labeled_input(
+                    &draft.max_access,
+                    "send-max-access",
+                    "Maximum accesses",
+                    "Unlimited",
+                    dark,
+                    |state| &mut state.send_form.as_mut().unwrap().max_access,
+                    submit_send,
+                ))
+                .child(labeled_input(
+                    &draft.expiration,
+                    "send-expiration",
+                    "Expires at",
+                    "ISO 8601 date",
+                    dark,
+                    |state| &mut state.send_form.as_mut().unwrap().expiration,
+                    submit_send,
+                )),
+        )
+        .child(labeled_input(
+            &draft.password,
+            "send-password",
+            "Password (optional)",
+            "Require a password to open",
+            dark,
+            |state| &mut state.send_form.as_mut().unwrap().password,
+            submit_send,
+        ));
+    let footer = row()
+        .gap(8.0)
+        .child(action("send-cancel", "Cancel", dark, cancel_send))
+        .child(action("send-submit", "Create send", dark, submit_send));
+    form_panel(
+        "send-form",
+        "New send",
+        dark,
+        header_extra,
+        body,
+        footer,
+        s.form_error.as_deref(),
+    )
+}
+
 fn top_bar(s: &State, dark: bool) -> El {
     let t = tok::theme(dark);
     let search = text_input(&s.query, type_::BODY)
@@ -1081,6 +1384,7 @@ fn top_bar(s: &State, dark: bool) -> El {
                 s.dark_override = Some(!dark);
             },
         ))
+        .child(action("sends", "Sends", dark, open_sends))
         .child(action("sync", "Sync", dark, |s| dispatch(s, Request::Sync)))
         .child(action("generate", "Generate", dark, |s| {
             open_generator(s, GeneratorTarget::None)
