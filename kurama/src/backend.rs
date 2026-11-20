@@ -116,6 +116,13 @@ pub enum Request {
         filename: String,
         preview: bool,
     },
+    Delete {
+        id: String,
+        permanent: bool,
+    },
+    Restore {
+        id: String,
+    },
     SetFavorite {
         id: String,
         favorite: bool,
@@ -214,6 +221,8 @@ pub enum Event {
     Details(ItemDetails),
     Revealed { item_id: String, key: String },
     AttachmentOpened { filename: String, preview: bool },
+    Deleted { id: String, permanent: bool },
+    Restored { id: String },
     Notice(String),
     Totp(TotpMeta),
     FavoriteChanged { id: String, favorite: bool },
@@ -295,6 +304,24 @@ pub fn perform(request: Request) -> Event {
             preview,
         } => match attachment(&item_id, &attachment_id, &filename, preview) {
             Ok(filename) => Event::AttachmentOpened { filename, preview },
+            Err(error) => Event::Error(error),
+        },
+        Request::Delete { id, permanent } => {
+            let request = json!({
+                "action": "delete_item",
+                "ids": [id.clone()],
+                "permanent": permanent
+            });
+            match call(request) {
+                Ok(_) => Event::Deleted { id, permanent },
+                Err(error) => Event::Error(error),
+            }
+        }
+        Request::Restore { id } => match call(json!({
+            "action": "restore_item",
+            "id": id.clone()
+        })) {
+            Ok(_) => Event::Restored { id },
             Err(error) => Event::Error(error),
         },
         Request::SetFavorite { id, favorite } => {

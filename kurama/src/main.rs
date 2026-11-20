@@ -264,6 +264,50 @@ mod tests {
     }
 
     #[test]
+    fn details_offer_delete_and_restore_actions() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.details.as_mut().unwrap().fields.clear();
+            state.requests = Some(tx.clone());
+        });
+        rt.frame(0.0);
+        let (x, y) = rt.find("delete-item").expect("delete button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::Delete { id, permanent } if id == "1" && !permanent
+        )));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_trash(state);
+            state.requests = Some(tx.clone());
+        });
+        rt.frame(0.0);
+        assert!(rt.find("restore-item").is_some());
+        let (x, y) = rt.find("delete-item").expect("permanent delete button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        assert!(rx.try_iter().next().is_none());
+        assert_eq!(
+            rt.state.notice.as_deref(),
+            Some("Click again to delete permanently")
+        );
+        let (x, y) = rt.find("delete-item").expect("confirm delete button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::Delete { id, permanent } if id == "trash-1" && permanent
+        )));
+    }
+
+    #[test]
     fn arrow_keys_move_item_selection() {
         let mut rt = runtime(state::scene_populated);
         rt.on_key = Some(on_key);

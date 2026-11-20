@@ -7,9 +7,9 @@ use rune::{
 use crate::backend::{revealed_value, totp_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
-    copy_field, dispatch, move_selection, open_attachment, open_trash, select_category,
-    select_folder, select_item, set_favorite, submit_quick_unlock, submit_search, submit_unlock,
-    toggle_reveal, Category, Location, State,
+    copy_field, delete_item, dispatch, move_selection, open_attachment, open_trash, restore_item,
+    select_category, select_folder, select_item, set_favorite, submit_quick_unlock, submit_search,
+    submit_unlock, toggle_reveal, Category, Location, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -600,6 +600,30 @@ fn details(s: &State, dark: bool) -> El {
             fields = fields.child(row().gap(10.0).center_y().child(value).child(buttons));
         }
     }
+
+    let in_trash = s.location == Location::Trash;
+    fields = fields.child(
+        row()
+            .key("detail-actions")
+            .gap(8.0)
+            .child(if in_trash {
+                action("restore-item", "Restore", dark, restore_item)
+            } else {
+                el()
+            })
+            .child(action(
+                "delete-item",
+                if s.pending_delete.as_deref() == Some(item.id.as_str()) {
+                    "Confirm delete"
+                } else if in_trash {
+                    "Delete forever"
+                } else {
+                    "Delete"
+                },
+                dark,
+                move |state| delete_item(state, in_trash),
+            )),
+    );
 
     col()
         .key("details")

@@ -89,6 +89,7 @@ pub struct State {
     pub busy: bool,
     pub notice: Option<String>,
     pub approvals: Vec<Approval>,
+    pub pending_delete: Option<String>,
     pub dark_override: Option<bool>,
     rows_version: u64,
     visible_cache: RefCell<Option<VisibleCache>>,
@@ -117,6 +118,7 @@ impl Default for State {
             busy: true,
             notice: None,
             approvals: Vec::new(),
+            pending_delete: None,
             dark_override: None,
             rows_version: 0,
             visible_cache: RefCell::new(None),
@@ -280,6 +282,7 @@ pub fn select_item(state: &mut State, id: String) {
         return;
     }
     state.selected = Some(id);
+    state.pending_delete = None;
     clear_reveal(state);
     request_details(state);
 }
@@ -325,6 +328,26 @@ pub fn open_attachment(state: &mut State, attachment_id: String, filename: Strin
             preview,
         },
     );
+}
+
+pub fn delete_item(state: &mut State, permanent: bool) {
+    let Some(id) = state.selected.clone() else {
+        return;
+    };
+    if permanent && state.pending_delete.as_deref() != Some(id.as_str()) {
+        state.pending_delete = Some(id);
+        state.notice = Some("Click again to delete permanently".to_owned());
+        return;
+    }
+    state.pending_delete = None;
+    dispatch(state, Request::Delete { id, permanent });
+}
+
+pub fn restore_item(state: &mut State) {
+    let Some(id) = state.selected.clone() else {
+        return;
+    };
+    dispatch(state, Request::Restore { id });
 }
 
 pub fn copy_field(state: &State, key: &str, label: &str, sensitive: bool) {
@@ -383,6 +406,7 @@ fn leave_trash(state: &mut State) -> bool {
     state.folder = None;
     state.query.clear();
     state.rows.clear();
+    state.pending_delete = None;
     state.selected = None;
     state.details = None;
     clear_reveal(state);
@@ -515,6 +539,7 @@ fn visible_fingerprint(state: &State) -> u64 {
         approval.key_name.hash(&mut hasher);
         approval.client.hash(&mut hasher);
     }
+    state.pending_delete.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -644,6 +669,47 @@ fn apply(state: &mut State, event: Event) {
             } else {
                 format!("Saved {filename}")
             });
+        }
+        Event::Deleted { id, permanent } => {
+            state.pending_delete = None;
+            state.rows.retain(|row| row.id != id);
+            state.snapshot.items.retain(|row| row.id != id);
+            if state.selected.as_deref() == Some(id.as_str()) {
+                state.selected = None;
+                state.details = None;
+                clear_reveal(state);
+            }
+            state.bump_rows_version();
+            state.notice = Some(if permanent {
+                "Item permanently deleted".to_owned()
+            } else {
+                "Item moved to trash".to_owned()
+            });
+            send_quiet(
+                state,
+                if state.location == Location::Trash {
+                    Request::Trash
+                } else {
+                    Request::Refresh
+                },
+            );
+        }
+        Event::Restored { id } => {
+            state.pending_delete = None;
+            state.rows.retain(|row| row.id != id);
+            state.snapshot.items.retain(|row| row.id != id);
+            if state.location == Location::Trash {
+                state.location = Location::Vault;
+                state.query.clear();
+            }
+            if state.selected.as_deref() == Some(id.as_str()) {
+                state.selected = None;
+                state.details = None;
+                clear_reveal(state);
+            }
+            state.bump_rows_version();
+            state.notice = Some("Item restored".to_owned());
+            send_quiet(state, Request::Refresh);
         }
         Event::Totp(meta) => {
             if state.selected.as_deref() == Some(meta.item_id.as_str()) {
@@ -927,6 +993,67 @@ mod tests {
 
         apply(&mut state, Event::Notice("Copied Password".to_owned()));
         assert_eq!(state.notice.as_deref(), Some("Copied Password"));
+    }
+
+    #[test]
+    fn delete_and_restore_actions_queue_requests_and_update_rows() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+
+        delete_item(&mut state, false);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            Request::Delete { id, permanent } if id == "1" && !permanent
+        )));
+        apply(
+            &mut state,
+            Event::Deleted {
+                id: "1".to_owned(),
+                permanent: false,
+            },
+        );
+        assert!(state.rows.iter().all(|row| row.id != "1"));
+        assert_eq!(state.notice.as_deref(), Some("Item moved to trash"));
+        assert!(rx
+            .try_iter()
+            .any(|request| matches!(request, Request::Refresh)));
+
+        let mut state = State::default();
+        scene_trash(&mut state);
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        delete_item(&mut state, true);
+        assert!(rx.try_iter().next().is_none());
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Click again to delete permanently")
+        );
+        delete_item(&mut state, true);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            Request::Delete { id, permanent } if id == "trash-1" && permanent
+        )));
+
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        restore_item(&mut state);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            Request::Restore { id } if id == "trash-1"
+        )));
+        apply(
+            &mut state,
+            Event::Restored {
+                id: "trash-1".to_owned(),
+            },
+        );
+        assert_eq!(state.location, Location::Vault);
+        assert_eq!(state.notice.as_deref(), Some("Item restored"));
+        assert!(rx
+            .try_iter()
+            .any(|request| matches!(request, Request::Refresh)));
     }
 
     #[test]
