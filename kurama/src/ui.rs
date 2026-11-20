@@ -190,7 +190,7 @@ fn settings(s: &State, dark: bool) -> El {
                         .grow(1.0)
                         .shrink()
                         .min_h(0.0)
-                        .pb(16.0)
+                        .pb(24.0)
                         .child(settings_sidebar(dark, s.settings_section))
                         .child(
                             col()
@@ -201,8 +201,10 @@ fn settings(s: &State, dark: bool) -> El {
                                 .scroll(ScrollSpec {
                                     stick_bottom: false,
                                 })
+                                .scroll_edge_fade(20.0)
+                                .scroll_margin(24.0)
                                 .padding(24.0)
-                                .pb(32.0)
+                                .pb(48.0)
                                 .gap(18.0)
                                 .child(detail),
                         ),

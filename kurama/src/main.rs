@@ -32,6 +32,8 @@ const HOST_COMMANDS: &[&str] = &[
 
 fn main() -> ExitCode {
     rune::set_app_id("dev.kurama.Kurama");
+    #[cfg(debug_assertions)]
+    std::env::set_var("RUNE_PERF_WARN", "0");
 
     let mut args = std::env::args_os();
     args.next();
