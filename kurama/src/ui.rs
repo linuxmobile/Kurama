@@ -7,9 +7,9 @@ use rune::{
 use crate::backend::{revealed_value, totp_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
-    copy_field, dispatch, move_selection, open_trash, select_category, select_folder, select_item,
-    set_favorite, submit_quick_unlock, submit_search, submit_unlock, toggle_reveal, Category,
-    Location, State,
+    copy_field, dispatch, move_selection, open_attachment, open_trash, select_category,
+    select_folder, select_item, set_favorite, submit_quick_unlock, submit_search, submit_unlock,
+    toggle_reveal, Category, Location, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -557,6 +557,48 @@ fn details(s: &State, dark: bool) -> El {
             },
             dark,
         ));
+    }
+    if let Some(details) = s.details.as_ref().filter(|details| details.id == item.id) {
+        for attachment in &details.attachments {
+            let label = if attachment.size.is_empty() {
+                attachment.filename.clone()
+            } else {
+                format!("{} · {}", attachment.filename, attachment.size)
+            };
+            let value = field("Attachment", &label, dark)
+                .grow(1.0)
+                .key(format!("attachment-field-{}", attachment.id));
+            let id = attachment.id.clone();
+            let filename = attachment.filename.clone();
+            let preview_id = id.clone();
+            let preview_filename = filename.clone();
+            let download_id = id.clone();
+            let download_filename = filename.clone();
+            let buttons = row()
+                .gap(6.0)
+                .child(action(
+                    &format!("preview-attachment-{id}"),
+                    "Preview",
+                    dark,
+                    move |state| {
+                        open_attachment(state, preview_id.clone(), preview_filename.clone(), true)
+                    },
+                ))
+                .child(action(
+                    &format!("download-attachment-{id}"),
+                    "Download",
+                    dark,
+                    move |state| {
+                        open_attachment(
+                            state,
+                            download_id.clone(),
+                            download_filename.clone(),
+                            false,
+                        )
+                    },
+                ));
+            fields = fields.child(row().gap(10.0).center_y().child(value).child(buttons));
+        }
     }
 
     col()

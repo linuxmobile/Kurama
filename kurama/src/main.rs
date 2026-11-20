@@ -101,7 +101,7 @@ mod tests {
     use crate::backend::{Approval, FieldValue, ItemField};
     use rune::{Env, Mods, Runtime};
 
-    fn runtime(scene: fn(&mut State)) -> Runtime<State> {
+    fn runtime(scene: impl FnOnce(&mut State)) -> Runtime<State> {
         let mut state = State::default();
         scene(&mut state);
         Runtime::new(
@@ -218,6 +218,49 @@ mod tests {
         rt.pointer_up(x, y);
         rt.frame(0.0);
         assert_eq!(rt.take_url_requests(), ["https://github.com"]);
+    }
+
+    #[test]
+    fn attachments_show_metadata_and_actions() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.details.as_mut().unwrap().fields.clear();
+            state.requests = Some(tx.clone());
+        });
+        rt.frame(0.0);
+        for key in [
+            "attachment-field-att-1",
+            "preview-attachment-att-1",
+            "download-attachment-att-1",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+        let shown = rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("field-value-Attachment"))
+            .expect("attachment field text")
+            .text
+            .expect("attachment metadata");
+        assert!(shown.contains("notes.txt"));
+        assert!(shown.contains("1.2 KB"));
+
+        let (x, y) = rt
+            .find("download-attachment-att-1")
+            .expect("download button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::Attachment {
+                item_id,
+                attachment_id,
+                filename,
+                preview,
+            } if item_id == "1" && attachment_id == "att-1" && filename == "notes.txt" && !preview
+        )));
     }
 
     #[test]

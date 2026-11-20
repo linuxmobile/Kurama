@@ -92,7 +92,7 @@ pub struct State {
     pub dark_override: Option<bool>,
     rows_version: u64,
     visible_cache: RefCell<Option<VisibleCache>>,
-    requests: Option<Sender<Request>>,
+    pub(crate) requests: Option<Sender<Request>>,
     events: Option<Receiver<Event>>,
     event_cursor: u64,
     event_timer: f64,
@@ -310,6 +310,21 @@ fn clear_reveal(state: &mut State) {
     if let Some(totp) = state.totp.take() {
         clear_totp(&totp.item_id);
     }
+}
+
+pub fn open_attachment(state: &mut State, attachment_id: String, filename: String, preview: bool) {
+    let Some(item_id) = state.selected.clone() else {
+        return;
+    };
+    dispatch(
+        state,
+        Request::Attachment {
+            item_id,
+            attachment_id,
+            filename,
+            preview,
+        },
+    );
 }
 
 pub fn copy_field(state: &State, key: &str, label: &str, sensitive: bool) {
@@ -623,6 +638,13 @@ fn apply(state: &mut State, event: Event) {
             send_quiet(state, Request::Refresh);
         }
         Event::Notice(message) => state.notice = Some(message),
+        Event::AttachmentOpened { filename, preview } => {
+            state.notice = Some(if preview {
+                format!("Previewing {filename}")
+            } else {
+                format!("Saved {filename}")
+            });
+        }
         Event::Totp(meta) => {
             if state.selected.as_deref() == Some(meta.item_id.as_str()) {
                 state.totp_timer = 0.0;
@@ -714,6 +736,11 @@ pub fn scene_populated(state: &mut State) {
                 value: FieldValue::Text("2026-01-02T03:04:05Z".to_owned()),
             },
         ],
+        attachments: vec![crate::backend::AttachmentMeta {
+            id: "att-1".to_owned(),
+            filename: "notes.txt".to_owned(),
+            size: "1.2 KB".to_owned(),
+        }],
     });
     state.totp = Some(TotpMeta {
         item_id: "1".to_owned(),
@@ -903,6 +930,50 @@ mod tests {
     }
 
     #[test]
+    fn attachment_actions_queue_requests_and_show_notices() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+
+        open_attachment(&mut state, "att-1".to_owned(), "notes.txt".to_owned(), true);
+        open_attachment(
+            &mut state,
+            "att-2".to_owned(),
+            "receipt.pdf".to_owned(),
+            false,
+        );
+        let requests: Vec<_> = rx.try_iter().collect();
+        assert!(requests.iter().any(|request| matches!(
+            request,
+            Request::Attachment { item_id, attachment_id, filename, preview }
+                if item_id == "1" && attachment_id == "att-1" && filename == "notes.txt" && *preview
+        )));
+        assert!(requests.iter().any(|request| matches!(
+            request,
+            Request::Attachment { item_id, attachment_id, filename, preview }
+                if item_id == "1" && attachment_id == "att-2" && filename == "receipt.pdf" && !preview
+        )));
+
+        apply(
+            &mut state,
+            Event::AttachmentOpened {
+                filename: "notes.txt".to_owned(),
+                preview: true,
+            },
+        );
+        assert_eq!(state.notice.as_deref(), Some("Previewing notes.txt"));
+        apply(
+            &mut state,
+            Event::AttachmentOpened {
+                filename: "receipt.pdf".to_owned(),
+                preview: false,
+            },
+        );
+        assert_eq!(state.notice.as_deref(), Some("Saved receipt.pdf"));
+    }
+
+    #[test]
     fn reveal_uses_a_key_and_hide_clears_the_value() {
         let _guard = backend::REVEAL_TEST_LOCK
             .lock()
@@ -978,6 +1049,7 @@ mod tests {
             Event::Details(ItemDetails {
                 id: "1".to_owned(),
                 fields: Vec::new(),
+                attachments: Vec::new(),
             }),
         );
         assert!(state.details.is_none());
@@ -989,6 +1061,7 @@ mod tests {
                 label: "Username".to_owned(),
                 value: FieldValue::Text("ops@example.com".to_owned()),
             }],
+            attachments: Vec::new(),
         };
         apply(&mut state, Event::Details(details.clone()));
         assert_eq!(state.details, Some(details));

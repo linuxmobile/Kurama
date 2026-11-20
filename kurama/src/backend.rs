@@ -44,11 +44,20 @@ pub struct ItemField {
     pub value: FieldValue,
 }
 
+/// Non-secret attachment metadata shown in the item inspector.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct AttachmentMeta {
+    pub id: String,
+    pub filename: String,
+    pub size: String,
+}
+
 /// Metadata-only view of one decrypted vault item.
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
 pub struct ItemDetails {
     pub id: String,
     pub fields: Vec<ItemField>,
+    pub attachments: Vec<AttachmentMeta>,
 }
 
 /// Non-secret view of the daemon's `status` response.
@@ -100,6 +109,12 @@ pub enum Request {
     },
     Totp {
         item_id: String,
+    },
+    Attachment {
+        item_id: String,
+        attachment_id: String,
+        filename: String,
+        preview: bool,
     },
     SetFavorite {
         id: String,
@@ -198,6 +213,7 @@ pub enum Event {
     Trash(Vec<VaultRow>),
     Details(ItemDetails),
     Revealed { item_id: String, key: String },
+    AttachmentOpened { filename: String, preview: bool },
     Notice(String),
     Totp(TotpMeta),
     FavoriteChanged { id: String, favorite: bool },
@@ -270,6 +286,15 @@ pub fn perform(request: Request) -> Event {
                 stash_totp(&item_id, code);
                 Event::Totp(meta)
             }
+            Err(error) => Event::Error(error),
+        },
+        Request::Attachment {
+            item_id,
+            attachment_id,
+            filename,
+            preview,
+        } => match attachment(&item_id, &attachment_id, &filename, preview) {
+            Ok(filename) => Event::AttachmentOpened { filename, preview },
             Err(error) => Event::Error(error),
         },
         Request::SetFavorite { id, favorite } => {
@@ -425,7 +450,62 @@ fn details(id: &str) -> Result<ItemDetails, String> {
     Ok(ItemDetails {
         id: id.to_owned(),
         fields: item_fields(item),
+        attachments: attachment_metadata(item),
     })
+}
+
+fn attachment_metadata(item: &Value) -> Vec<AttachmentMeta> {
+    item.get("attachments")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| {
+                    let id = value.get("id")?.as_str()?;
+                    let filename = first_text(value, &["fileName", "filename", "name"]);
+                    if filename.is_empty() {
+                        return None;
+                    }
+                    let size = first_text(value, &["sizeName"]);
+                    let size = if size.is_empty() {
+                        value.get("size").map(Value::to_string).unwrap_or_default()
+                    } else {
+                        size
+                    };
+                    Some(AttachmentMeta {
+                        id: id.to_owned(),
+                        filename,
+                        size,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn attachment(
+    item_id: &str,
+    attachment_id: &str,
+    filename: &str,
+    preview: bool,
+) -> Result<String, String> {
+    let response = kurama_host::attachment::get_attachment(
+        item_id,
+        attachment_id,
+        filename,
+        None,
+        preview,
+        preview,
+        None,
+        None,
+        false,
+    );
+    if !response.ok {
+        return Err(response
+            .error
+            .unwrap_or_else(|| "Attachment action failed".to_owned()));
+    }
+    Ok(response.filename.unwrap_or_else(|| filename.to_owned()))
 }
 
 fn item_fields(item: &Value) -> Vec<ItemField> {
@@ -790,6 +870,27 @@ mod tests {
         let debug = format!("{:?}", items);
         assert!(!debug.contains("super-secret"));
         assert!(!debug.contains("private note"));
+    }
+
+    #[test]
+    fn attachments_keep_metadata_but_drop_keys() {
+        let item = json!({
+            "attachments": [{
+                "id": "att-1",
+                "fileName": "receipt.pdf",
+                "sizeName": "2.4 KB",
+                "key": "attachment-secret-key",
+                "url": "https://vault.example.com/attachments/att-1"
+            }]
+        });
+        let attachments = attachment_metadata(&item);
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].id, "att-1");
+        assert_eq!(attachments[0].filename, "receipt.pdf");
+        assert_eq!(attachments[0].size, "2.4 KB");
+        let debug = format!("{attachments:?}");
+        assert!(!debug.contains("attachment-secret-key"));
+        assert!(!debug.contains("vault.example.com"));
     }
 
     #[test]
