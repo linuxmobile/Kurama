@@ -4,7 +4,7 @@
 //! consistent with the rest of the platform. The type scale is defined here in
 //! one place rather than repeated across views.
 
-use rune::{Color, TextStyle, tok};
+use rune::{tok, Color, TextStyle};
 
 pub const WINDOW_TITLE: TextStyle = TextStyle::new(21.0, 650.0);
 pub const SECTION_TITLE: TextStyle = TextStyle::new(12.0, 650.0);

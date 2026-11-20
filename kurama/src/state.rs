@@ -1,10 +1,8 @@
-//! Application state and the update flow between the UI and backend worker.
-
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use rune::{Tx, Waker, edit::TextEdit};
+use rune::{edit::TextEdit, Tx, Waker};
 
-use crate::backend::{self, Event, Request, Snapshot, VaultRow};
+use crate::backend::{self, Approval, Event, Request, Snapshot, VaultRow};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
@@ -61,9 +59,12 @@ pub struct State {
     pub selected: Option<String>,
     pub busy: bool,
     pub notice: Option<String>,
+    pub approvals: Vec<Approval>,
     pub dark_override: Option<bool>,
     requests: Option<Sender<Request>>,
     events: Option<Receiver<Event>>,
+    event_cursor: u64,
+    event_timer: f64,
 }
 
 impl Default for State {
@@ -76,15 +77,17 @@ impl Default for State {
             selected: None,
             busy: true,
             notice: None,
+            approvals: Vec::new(),
             dark_override: None,
             requests: None,
             events: None,
+            event_cursor: 0,
+            event_timer: 0.0,
         }
     }
 }
 
 impl State {
-    /// Rows matching the current search and category filters.
     pub fn visible(&self) -> Vec<&VaultRow> {
         let query = self.query.text.trim().to_lowercase();
         self.rows
@@ -119,10 +122,14 @@ pub fn dispatch(state: &mut State, request: Request) {
             return;
         }
     }
-    // No worker (headless scenes and tests): show the missing bridge instead of
-    // silently dropping the action.
     state.busy = false;
     state.notice = Some("Backend worker is unavailable.".to_owned());
+}
+
+fn send_quiet(state: &State, request: Request) {
+    if let Some(sender) = &state.requests {
+        let _ = sender.send(request);
+    }
 }
 
 /// Start the worker once, on the app's setup hook. Every backend call is made
@@ -147,37 +154,82 @@ pub fn setup(state: &mut State, wake: Waker) {
     let _ = request_tx.send(Request::Refresh);
 }
 
-pub fn poll(state: &mut State, _seconds: f64, _tx: &mut Tx) -> bool {
-    let Some(events) = &state.events else { return false };
-    let mut changed = false;
-    for event in events.try_iter() {
-        changed = true;
-        state.busy = false;
-        match event {
-            Event::Snapshot(snapshot) => {
-                let changed_vault =
-                    (state.snapshot.status == "unlocked") != (snapshot.status == "unlocked");
-                state.rows = snapshot.items.clone();
-                state.snapshot = snapshot;
-                state.notice = None;
-                if changed_vault {
-                    state.selected = None;
-                    state.query.clear();
-                }
-                if state.selected.is_none() {
-                    state.selected = state.rows.first().map(|item| item.id.clone());
-                }
-            }
-            Event::Items(items) => {
-                state.rows = items;
-                if state.selected.is_none() {
-                    state.selected = state.rows.first().map(|item| item.id.clone());
-                }
-            }
-            Event::Error(message) => state.notice = Some(message),
-        }
+pub fn poll(state: &mut State, seconds: f64, _tx: &mut Tx) -> bool {
+    state.event_timer += seconds;
+    if state.event_timer >= 1.0 {
+        state.event_timer = 0.0;
+        send_quiet(
+            state,
+            Request::Events {
+                since: state.event_cursor,
+            },
+        );
     }
-    changed
+
+    let Some(events) = &state.events else {
+        return false;
+    };
+    let queued: Vec<Event> = events.try_iter().collect();
+    if queued.is_empty() {
+        return false;
+    }
+    for event in queued {
+        apply(state, event);
+    }
+    true
+}
+
+fn apply(state: &mut State, event: Event) {
+    state.busy = false;
+    match event {
+        Event::Snapshot(snapshot) => {
+            let changed_vault =
+                (state.snapshot.status == "unlocked") != (snapshot.status == "unlocked");
+            state.rows = snapshot.items.clone();
+            state.snapshot = snapshot;
+            state.notice = None;
+            if changed_vault {
+                state.selected = None;
+                state.query.clear();
+            }
+            if state.selected.is_none() {
+                state.selected = state.rows.first().map(|item| item.id.clone());
+            }
+        }
+        Event::Items(items) => {
+            state.rows = items;
+            if state.selected.is_none() {
+                state.selected = state.rows.first().map(|item| item.id.clone());
+            }
+        }
+        Event::Notices { cursor, notices } => {
+            state.event_cursor = state.event_cursor.max(cursor);
+            let mut refresh = false;
+            let mut approvals = false;
+            for notice in notices {
+                if matches!(notice.kind.as_str(), "status" | "sync") {
+                    refresh = true;
+                }
+                if notice.approval_id.is_some() {
+                    approvals = true;
+                }
+                state.notice = Some(notice.message);
+            }
+            if approvals {
+                send_quiet(state, Request::Approvals);
+            }
+            if refresh {
+                send_quiet(state, Request::Refresh);
+            }
+        }
+        Event::Approvals(items) => {
+            state.approvals = items;
+            if !state.approvals.is_empty() {
+                state.notice = Some("SSH approval requested".to_owned());
+            }
+        }
+        Event::Error(message) => state.notice = Some(message),
+    }
 }
 
 pub fn submit_search(state: &mut State, _tx: &mut Tx) {
@@ -212,26 +264,42 @@ pub fn scene_locked(state: &mut State) {
 
 pub fn scene_disconnected(state: &mut State) {
     state.busy = false;
-    state.notice = Some("Omawarden daemon is not running.".to_owned());
+    state.notice = Some("Kurama backend is not running.".to_owned());
 }
 
 fn fixtures() -> Vec<VaultRow> {
     [
-        ("1", "GitHub", "dev@example.com", "login", true, "Development"),
-        ("2", "Cloud console", "ops@example.com", "login", false, "Work"),
+        (
+            "1",
+            "GitHub",
+            "dev@example.com",
+            "login",
+            true,
+            "Development",
+        ),
+        (
+            "2",
+            "Cloud console",
+            "ops@example.com",
+            "login",
+            false,
+            "Work",
+        ),
         ("3", "Recovery codes", "", "note", false, "Personal"),
         ("4", "Laptop SSH key", "ed25519", "ssh_key", false, ""),
     ]
     .into_iter()
-    .map(|(id, name, subtitle, type_name, favorite, folder)| VaultRow {
-        id: id.to_owned(),
-        name: name.to_owned(),
-        subtitle: subtitle.to_owned(),
-        type_name: type_name.to_owned(),
-        favorite,
-        folder: folder.to_owned(),
-        updated: "2026-01-02T03:04:05Z".to_owned(),
-    })
+    .map(
+        |(id, name, subtitle, type_name, favorite, folder)| VaultRow {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            subtitle: subtitle.to_owned(),
+            type_name: type_name.to_owned(),
+            favorite,
+            folder: folder.to_owned(),
+            updated: "2026-01-02T03:04:05Z".to_owned(),
+        },
+    )
     .collect()
 }
 
@@ -255,6 +323,51 @@ mod tests {
     fn selected_item_uses_backend_id() {
         let mut state = State::default();
         scene_populated(&mut state);
-        assert_eq!(state.selected_item().map(|item| item.id.as_str()), Some("1"));
+        assert_eq!(
+            state.selected_item().map(|item| item.id.as_str()),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn backend_notices_advance_cursor_and_request_followups() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        apply(
+            &mut state,
+            Event::Notices {
+                cursor: 5,
+                notices: vec![
+                    backend::Notice {
+                        kind: "status".to_owned(),
+                        message: "Vault unlocked".to_owned(),
+                        approval_id: None,
+                    },
+                    backend::Notice {
+                        kind: "approval".to_owned(),
+                        message: "SSH approval requested".to_owned(),
+                        approval_id: Some(9),
+                    },
+                ],
+            },
+        );
+        assert_eq!(state.event_cursor, 5);
+        assert_eq!(state.notice.as_deref(), Some("SSH approval requested"));
+        let requests: Vec<Request> = rx.try_iter().collect();
+        assert!(requests.iter().any(|r| matches!(r, Request::Refresh)));
+        assert!(requests.iter().any(|r| matches!(r, Request::Approvals)));
+
+        apply(
+            &mut state,
+            Event::Approvals(vec![Approval {
+                id: 9,
+                title: "Sign a Git commit?".to_owned(),
+                action: "SSH login".to_owned(),
+                key_name: "Laptop key".to_owned(),
+                client: "git (ssh)".to_owned(),
+            }]),
+        );
+        assert_eq!(state.approvals.len(), 1);
     }
 }

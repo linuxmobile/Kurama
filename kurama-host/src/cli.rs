@@ -1,20 +1,18 @@
-use clap::{Parser, Subcommand};
-use omawarden::attachment::get_attachment;
-use omawarden::auth::AuthManager;
-use omawarden::clipboard::ClipboardManager;
-use omawarden::config::{ConfigManager, ConfigUpdateOptions};
-use omawarden::daemon::{
-    ensure_daemon_running, run_daemon_server, send_daemon_request, DaemonState,
-};
-use omawarden::health::check_system_health;
-use omawarden::keyring::KeyringManager;
-use omawarden::ssh::{
+use crate::attachment::get_attachment;
+use crate::auth::AuthManager;
+use crate::clipboard::ClipboardManager;
+use crate::config::{ConfigManager, ConfigUpdateOptions};
+use crate::daemon::{ensure_daemon_running, run_daemon_server, send_daemon_request, DaemonState};
+use crate::health::check_system_health;
+use crate::keyring::KeyringManager;
+use crate::ssh::{
     generate_keypair, parse_private_key, write_keypair_files, write_keypair_files_named,
     SshAlgorithm,
 };
-use omawarden::storage::StorageManager;
-use omawarden::totp::generate_totp;
-use omawarden::vault::VaultManager;
+use crate::storage::StorageManager;
+use crate::totp::generate_totp;
+use crate::vault::VaultManager;
+use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -36,8 +34,8 @@ fn parse_cli_bool(v: &str) -> Result<bool, String> {
 }
 
 /// Auth output can carry a raw access token in `session`. Piped callers (the
-/// QML helper) depend on it; an interactive terminal would only leave it
-/// behind in scrollback, so redact it there.
+/// desktop app and scripts) depend on it; an interactive terminal would only
+/// leave it behind in scrollback, so redact it there.
 fn print_json_redacting_session<T: serde::Serialize>(value: &T) {
     let mut val = serde_json::to_value(value).unwrap_or(Value::Null);
     if io::stdout().is_terminal() {
@@ -52,9 +50,9 @@ fn print_json_redacting_session<T: serde::Serialize>(value: &T) {
 
 #[derive(Parser)]
 #[command(
-    name = "omawarden",
+    name = "kurama",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), " ", env!("BUILD_DATE"), ")"),
-    about = "High-performance helper CLI and daemon for the Omawarden desktop app"
+    about = "Backend host and CLI for the Kurama desktop app"
 )]
 struct Cli {
     #[arg(long, value_name = "CONFIG_PATH", help = "Path to config.json")]
@@ -164,7 +162,7 @@ enum Commands {
         #[command(subcommand)]
         action: SendAction,
     },
-    #[command(about = "Run omawarden background daemon")]
+    #[command(about = "Run kurama background daemon")]
     Daemon {
         #[arg(long)]
         auto_lock: Option<u64>,
@@ -650,14 +648,14 @@ fn read_auth_payload() -> (String, Option<String>, Option<i32>, Option<String>) 
     parse_auth_payload(&buffer)
 }
 
-fn main() -> ExitCode {
+pub fn run() -> ExitCode {
     // Disable process tracing (ptrace) and core dump generation for memory
     // defense. Fail-open is accepted (a desktop helper should not refuse to
     // run over prctl), but never silently: without this the whole process
     // stays ptraceable and core-dumpable.
-    if let Err(e) = omawarden::locked::disable_dumpable() {
-        omawarden::log_error!(
-            "omawarden:locked",
+    if let Err(e) = crate::locked::disable_dumpable() {
+        crate::log_error!(
+            "kurama:locked",
             "Could not disable ptrace/core dumps (prctl PR_SET_DUMPABLE: {e}); tracing protections are INACTIVE for this process"
         );
     }
@@ -677,9 +675,7 @@ fn main() -> ExitCode {
             let storage_mgr = match cli.config.as_deref() {
                 Some(cp) => {
                     if let Some(parent) = cp.parent() {
-                        StorageManager::new(
-                            parent.join(omawarden::storage::DEFAULT_STORAGE_FILENAME),
-                        )
+                        StorageManager::new(parent.join(crate::storage::DEFAULT_STORAGE_FILENAME))
                     } else {
                         StorageManager::default()
                     }
@@ -687,10 +683,7 @@ fn main() -> ExitCode {
                 None => StorageManager::default(),
             };
             let state = Arc::new(DaemonState::new(storage_mgr, auto_lock_mins));
-            println!(
-                "Starting omawarden daemon (auto_lock: {}m)...",
-                auto_lock_mins
-            );
+            println!("Starting kurama daemon (auto_lock: {}m)...", auto_lock_mins);
             if let Err(e) = run_daemon_server(state) {
                 eprintln!("Daemon server error: {}", e);
                 ExitCode::FAILURE
@@ -764,7 +757,7 @@ fn main() -> ExitCode {
                     Some(cp) => {
                         if let Some(parent) = cp.parent() {
                             StorageManager::new(
-                                parent.join(omawarden::storage::DEFAULT_STORAGE_FILENAME),
+                                parent.join(crate::storage::DEFAULT_STORAGE_FILENAME),
                             )
                         } else {
                             StorageManager::default()
@@ -919,8 +912,8 @@ fn main() -> ExitCode {
                 } else {
                     "auto".to_string()
                 };
-                omawarden::log_info!(
-                    "omawarden:config",
+                crate::log_info!(
+                    "kurama:config",
                     "Updated configuration (log_level: {}, server_url: {}, identity_url: {}).",
                     cfg.log_level,
                     safe_url,
@@ -958,7 +951,7 @@ fn main() -> ExitCode {
                     }
                 }
                 None => {
-                    eprintln!("The omawarden daemon is not responding.");
+                    eprintln!("The kurama daemon is not responding.");
                     ExitCode::FAILURE
                 }
             }
@@ -971,8 +964,8 @@ fn main() -> ExitCode {
         }
 
         Commands::Send { action } => {
-            let client_ctx = omawarden::api::resolve_effective_client_context(None);
-            omawarden::daemon::ensure_daemon_running();
+            let client_ctx = crate::api::resolve_effective_client_context(None);
+            crate::daemon::ensure_daemon_running();
             let resp = match action {
                 SendAction::List => {
                     send_daemon_request(&json!({"action": "send_list", "client": client_ctx}))
@@ -1029,7 +1022,7 @@ fn main() -> ExitCode {
             );
             match action {
                 AuthAction::Status => {
-                    omawarden::daemon::ensure_daemon_running();
+                    crate::daemon::ensure_daemon_running();
                     let st = auth_mgr.get_status(false);
                     println!("{}", serde_json::to_string_pretty(&st).unwrap());
                     ExitCode::SUCCESS
@@ -1130,8 +1123,8 @@ fn main() -> ExitCode {
 
                             effective_provider = Some(chosen_provider);
                             if chosen_provider == 7 {
-                                omawarden::log_info!(
-                                    "omawarden:auth",
+                                crate::log_info!(
+                                    "kurama:auth",
                                     "Requesting WebAuthn challenge from server..."
                                 );
                                 res = auth_mgr.login_password(&email, &pwd, None, Some(7), None);
@@ -1239,7 +1232,7 @@ fn main() -> ExitCode {
                     }
                 }
                 AuthAction::Fido2Status => {
-                    let status = omawarden::webauthn::check_fido2_status();
+                    let status = crate::webauthn::check_fido2_status();
                     let res = serde_json::json!({
                         "ok": true,
                         "status": status.as_str()
@@ -1253,7 +1246,7 @@ fn main() -> ExitCode {
                     } else {
                         read_secret_stdin()
                     };
-                    omawarden::daemon::ensure_daemon_running();
+                    crate::daemon::ensure_daemon_running();
                     let res = auth_mgr.unlock(&pwd);
                     print_json_redacting_session(&res);
                     if res.ok {
@@ -1263,13 +1256,13 @@ fn main() -> ExitCode {
                     }
                 }
                 AuthAction::QuickUnlock => {
-                    omawarden::daemon::ensure_daemon_running();
+                    crate::daemon::ensure_daemon_running();
                     let resp = send_daemon_request(&json!({ "action": "quick_unlock" }))
                         .unwrap_or_else(|| {
                             json!({
                                 "ok": false,
                                 "status": "locked",
-                                "error": "omawarden daemon is not running."
+                                "error": "kurama daemon is not running."
                             })
                         });
                     print_json_redacting_session(&resp);
@@ -1329,8 +1322,8 @@ fn main() -> ExitCode {
         }
 
         Commands::Vault { action } => {
-            let client_ctx = omawarden::api::resolve_effective_client_context(None);
-            omawarden::daemon::ensure_daemon_running();
+            let client_ctx = crate::api::resolve_effective_client_context(None);
+            crate::daemon::ensure_daemon_running();
             let vault_mgr = VaultManager::with_identity_url(
                 &cfg.server_url,
                 cfg.identity_url.as_deref(),
@@ -1339,8 +1332,8 @@ fn main() -> ExitCode {
             );
             match action {
                 VaultAction::Sync => {
-                    let client_ctx = omawarden::api::resolve_effective_client_context(None);
-                    omawarden::daemon::ensure_daemon_running();
+                    let client_ctx = crate::api::resolve_effective_client_context(None);
+                    crate::daemon::ensure_daemon_running();
                     let mut sync_req = json!({ "action": "sync" });
                     if let Some(ref ctx) = client_ctx {
                         sync_req["client"] = json!(ctx);
@@ -1380,7 +1373,7 @@ fn main() -> ExitCode {
                     }
                 }
                 VaultAction::List { category } => {
-                    omawarden::daemon::ensure_daemon_running();
+                    crate::daemon::ensure_daemon_running();
                     let st = send_daemon_request(&json!({ "action": "status" }));
                     let is_unlocked = st
                         .as_ref()
@@ -1392,7 +1385,7 @@ fn main() -> ExitCode {
                             "{}",
                             serde_json::to_string_pretty(&json!({
                                 "ok": false,
-                                "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first."
+                                "error": "Vault is locked. Please unlock using 'kurama auth unlock' first."
                             }))
                             .unwrap()
                         );
@@ -1405,9 +1398,8 @@ fn main() -> ExitCode {
                                 println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
                                 return ExitCode::FAILURE;
                             }
-                            if let Ok(items) = serde_json::from_value::<
-                                Vec<omawarden::vault::VaultItem>,
-                            >(daemon_resp)
+                            if let Ok(items) =
+                                serde_json::from_value::<Vec<crate::vault::VaultItem>>(daemon_resp)
                             {
                                 let filtered = vault_mgr.search(&items, "", category.as_deref());
                                 println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
@@ -1421,7 +1413,7 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 VaultAction::Search { query, category } => {
-                    omawarden::daemon::ensure_daemon_running();
+                    crate::daemon::ensure_daemon_running();
                     let st = send_daemon_request(&json!({ "action": "status" }));
                     let is_unlocked = st
                         .as_ref()
@@ -1433,7 +1425,7 @@ fn main() -> ExitCode {
                             "{}",
                             serde_json::to_string_pretty(&json!({
                                 "ok": false,
-                                "error": "Vault is locked. Please unlock using 'omawarden auth unlock' first."
+                                "error": "Vault is locked. Please unlock using 'kurama auth unlock' first."
                             }))
                             .unwrap()
                         );
@@ -1449,9 +1441,8 @@ fn main() -> ExitCode {
                                 println!("{}", serde_json::to_string_pretty(&daemon_resp).unwrap());
                                 return ExitCode::FAILURE;
                             }
-                            if let Ok(items) = serde_json::from_value::<
-                                Vec<omawarden::vault::VaultItem>,
-                            >(daemon_resp)
+                            if let Ok(items) =
+                                serde_json::from_value::<Vec<crate::vault::VaultItem>>(daemon_resp)
                             {
                                 println!("{}", serde_json::to_string_pretty(&items).unwrap());
                                 return ExitCode::SUCCESS;
@@ -1737,7 +1728,7 @@ fn main() -> ExitCode {
                         "{}",
                         serde_json::to_string_pretty(&json!({
                             "ok": false,
-                            "error": "Missing item query or action flag (--clear / --stdin). See 'omawarden copy --help'."
+                            "error": "Missing item query or action flag (--clear / --stdin). See 'kurama copy --help'."
                         }))
                         .unwrap()
                     );
@@ -1745,7 +1736,7 @@ fn main() -> ExitCode {
                 }
             };
 
-            omawarden::daemon::ensure_daemon_running();
+            crate::daemon::ensure_daemon_running();
             let st = send_daemon_request(&json!({ "action": "status" }));
             let is_unlocked = st
                 .as_ref()
@@ -1759,7 +1750,7 @@ fn main() -> ExitCode {
                 None,
                 None,
             );
-            let item: Option<omawarden::vault::VaultItem> = if is_unlocked {
+            let item: Option<crate::vault::VaultItem> = if is_unlocked {
                 let daemon_res = send_daemon_request(&json!({
                     "action": "get_item",
                     "query": query
@@ -1774,7 +1765,7 @@ fn main() -> ExitCode {
                 match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
                     Ok(user_key) => {
                         let storage = vault_mgr.storage_mgr.load();
-                        let items = omawarden::api::decrypt_sync_ciphers_with_context(
+                        let items = crate::api::decrypt_sync_ciphers_with_context(
                             &storage.ciphers,
                             &storage.folders,
                             &storage.organizations,
@@ -1842,7 +1833,7 @@ fn main() -> ExitCode {
                     .and_then(|l| l.get("totp"))
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                if let Some(t_res) = omawarden::totp::generate_totp(seed, None, 6, 30) {
+                if let Some(t_res) = crate::totp::generate_totp(seed, None, 6, 30) {
                     ("totp", t_res.code, true)
                 } else {
                     println!(
@@ -2011,7 +2002,7 @@ fn main() -> ExitCode {
                                     res.get("name").and_then(|v| v.as_str()).map(String::from);
                                 let id = res.get("id").and_then(|v| v.as_str()).map(String::from);
                                 (
-                                    Some(omawarden::totp::TotpResult { code, ttl, period }),
+                                    Some(crate::totp::TotpResult { code, ttl, period }),
                                     if let (Some(id), Some(name)) = (id, name) {
                                         Some((id, name))
                                     } else {
@@ -2034,11 +2025,11 @@ fn main() -> ExitCode {
                 let is_uri = q.starts_with("otpauth://") || q.starts_with("otpauth-migration://");
                 if is_uri {
                     eprintln!(
-                        "Error: Passing otpauth URIs or secrets in CLI arguments is forbidden (violates Zero-Argv security policy).\nPipe secret via STDIN instead: echo '<otpauth_uri>' | omawarden totp --stdin"
+                        "Error: Passing otpauth URIs or secrets in CLI arguments is forbidden (violates Zero-Argv security policy).\nPipe secret via STDIN instead: echo '<otpauth_uri>' | kurama totp --stdin"
                     );
                     return ExitCode::FAILURE;
                 } else {
-                    omawarden::daemon::ensure_daemon_running();
+                    crate::daemon::ensure_daemon_running();
                     let st = send_daemon_request(&json!({ "action": "status" }));
                     let is_unlocked = st
                         .as_ref()
@@ -2052,7 +2043,7 @@ fn main() -> ExitCode {
                         None,
                         None,
                     );
-                    let item: Option<omawarden::vault::VaultItem> = if is_unlocked {
+                    let item: Option<crate::vault::VaultItem> = if is_unlocked {
                         let daemon_res = send_daemon_request(&json!({
                             "action": "get_item",
                             "query": q,
@@ -2068,7 +2059,7 @@ fn main() -> ExitCode {
                         match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
                             Ok(user_key) => {
                                 let storage = vault_mgr.storage_mgr.load();
-                                let items = omawarden::api::decrypt_sync_ciphers_with_context(
+                                let items = crate::api::decrypt_sync_ciphers_with_context(
                                     &storage.ciphers,
                                     &storage.folders,
                                     &storage.organizations,
@@ -2128,7 +2119,7 @@ fn main() -> ExitCode {
                                     res.get("name").and_then(|v| v.as_str()).map(String::from);
                                 let id = res.get("id").and_then(|v| v.as_str()).map(String::from);
                                 (
-                                    Some(omawarden::totp::TotpResult { code, ttl, period }),
+                                    Some(crate::totp::TotpResult { code, ttl, period }),
                                     if let (Some(id), Some(name)) = (id, name) {
                                         Some((id, name))
                                     } else {
@@ -2227,7 +2218,7 @@ fn main() -> ExitCode {
                 }
             }
             AttachmentAction::Clean { item_id } => {
-                omawarden::attachment::clear_preview_attachments(item_id.as_deref());
+                crate::attachment::clear_preview_attachments(item_id.as_deref());
                 println!("{}", serde_json::json!({ "ok": true, "status": "cleaned" }));
                 ExitCode::SUCCESS
             }
@@ -2249,7 +2240,7 @@ fn main() -> ExitCode {
                     folder,
                     out_dir,
                 } => {
-                    omawarden::daemon::ensure_daemon_running();
+                    crate::daemon::ensure_daemon_running();
                     let keypair = match generate_keypair(algorithm, comment.as_deref()) {
                         Ok(k) => k,
                         Err(e) => {
@@ -2286,7 +2277,7 @@ fn main() -> ExitCode {
                                     notes.as_deref(),
                                     folder.as_deref(),
                                     &user_key,
-                                    omawarden::api::resolve_effective_client_context(None).as_ref(),
+                                    crate::api::resolve_effective_client_context(None).as_ref(),
                                 ) {
                                     Ok(item) => Some(json!(item)),
                                     Err(e) => {
@@ -2331,8 +2322,8 @@ fn main() -> ExitCode {
                                 });
                             }
                             Err(e) => {
-                                omawarden::log_warn!(
-                                    "omawarden:ssh",
+                                crate::log_warn!(
+                                    "kurama:ssh",
                                     "Failed to write exported files to {:?}: {}",
                                     dest_dir,
                                     e
@@ -2361,7 +2352,7 @@ fn main() -> ExitCode {
                     notes,
                     folder,
                 } => {
-                    omawarden::daemon::ensure_daemon_running();
+                    crate::daemon::ensure_daemon_running();
                     let raw_priv = if stdin || private_key.is_none() {
                         let mut buffer = String::new();
                         let _ = io::stdin().read_to_string(&mut buffer);
@@ -2430,7 +2421,7 @@ fn main() -> ExitCode {
                                     notes.as_deref(),
                                     folder.as_deref(),
                                     &user_key,
-                                    omawarden::api::resolve_effective_client_context(None).as_ref(),
+                                    crate::api::resolve_effective_client_context(None).as_ref(),
                                 ) {
                                     Ok(item) => Some(json!(item)),
                                     Err(e) => {
@@ -2480,7 +2471,7 @@ fn main() -> ExitCode {
                     public_only,
                     private_only: _,
                 } => {
-                    omawarden::daemon::ensure_daemon_running();
+                    crate::daemon::ensure_daemon_running();
                     let st = send_daemon_request(&json!({ "action": "status" }));
                     let is_unlocked = st
                         .as_ref()
@@ -2488,7 +2479,7 @@ fn main() -> ExitCode {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
 
-                    let item: Option<omawarden::vault::VaultItem> = if is_unlocked {
+                    let item: Option<crate::vault::VaultItem> = if is_unlocked {
                         let daemon_res = send_daemon_request(&json!({
                             "action": "get_ssh_key",
                             "query": query
@@ -2503,7 +2494,7 @@ fn main() -> ExitCode {
                         match ensure_unlocked_user_key(&vault_mgr, &cfg.server_url) {
                             Ok(user_key) => {
                                 let storage = vault_mgr.storage_mgr.load();
-                                let items = omawarden::api::decrypt_sync_ciphers_with_context(
+                                let items = crate::api::decrypt_sync_ciphers_with_context(
                                     &storage.ciphers,
                                     &storage.folders,
                                     &storage.organizations,
@@ -2645,14 +2636,14 @@ fn main() -> ExitCode {
             json,
         } => {
             let secret_res = if passphrase {
-                let options = omawarden::generator::PassphraseOptions {
+                let options = crate::generator::PassphraseOptions {
                     words,
                     separator,
                     capitalize,
                 };
-                omawarden::generator::generate_passphrase(&options)
+                crate::generator::generate_passphrase(&options)
             } else {
-                let options = omawarden::generator::PasswordOptions {
+                let options = crate::generator::PasswordOptions {
                     length,
                     uppercase: !no_uppercase,
                     lowercase: !no_lowercase,
@@ -2662,7 +2653,7 @@ fn main() -> ExitCode {
                     min_numbers,
                     min_special,
                 };
-                omawarden::generator::generate_password(&options)
+                crate::generator::generate_password(&options)
             };
 
             let secret = match secret_res {
@@ -2743,19 +2734,19 @@ fn main() -> ExitCode {
 fn ensure_unlocked_user_key(
     vault_mgr: &VaultManager,
     _server_url: &str,
-) -> Result<omawarden::crypto::SymmetricCryptoKey, String> {
+) -> Result<crate::crypto::SymmetricCryptoKey, String> {
     if let Some(key) = vault_mgr.get_user_key() {
         return Ok(key);
     }
 
     let st = vault_mgr.storage_mgr.load();
     if st.enc_user_key.is_none() {
-        return Err("Account not logged in. Please run 'omawarden auth login' first.".to_string());
+        return Err("Account not logged in. Please run 'kurama auth login' first.".to_string());
     }
 
     let (pwd, ..) = read_auth_payload();
     if pwd.is_empty() {
-        return Err("Vault is locked. Please unlock the vault first using 'omawarden auth unlock' or provide Master Password.".to_string());
+        return Err("Vault is locked. Please unlock the vault first using 'kurama auth unlock' or provide Master Password.".to_string());
     }
 
     let user_key = vault_mgr
@@ -2868,15 +2859,14 @@ mod tests {
     #[test]
     fn test_cli_daemon_auto_lock_arg_parsing() {
         // Without --auto-lock flag, auto_lock should be None so it can inherit from config
-        let cli_default = Cli::try_parse_from(["omawarden", "daemon"]).unwrap();
+        let cli_default = Cli::try_parse_from(["kurama", "daemon"]).unwrap();
         match cli_default.command {
             Commands::Daemon { auto_lock } => assert_eq!(auto_lock, None),
             _ => panic!("Expected Commands::Daemon"),
         }
 
         // With --auto-lock flag, auto_lock should be Some(N)
-        let cli_explicit =
-            Cli::try_parse_from(["omawarden", "daemon", "--auto-lock", "45"]).unwrap();
+        let cli_explicit = Cli::try_parse_from(["kurama", "daemon", "--auto-lock", "45"]).unwrap();
         match cli_explicit.command {
             Commands::Daemon { auto_lock } => assert_eq!(auto_lock, Some(45)),
             _ => panic!("Expected Commands::Daemon"),
@@ -2885,7 +2875,7 @@ mod tests {
 
     #[test]
     fn test_cli_check_updates_arg_parsing() {
-        let cli_default = Cli::try_parse_from(["omawarden", "config", "set"]).unwrap();
+        let cli_default = Cli::try_parse_from(["kurama", "config", "set"]).unwrap();
         match cli_default.command {
             Commands::Config {
                 action: ConfigAction::Set { check_updates, .. },
@@ -2894,8 +2884,7 @@ mod tests {
         }
 
         let cli_false =
-            Cli::try_parse_from(["omawarden", "config", "set", "--check-updates", "false"])
-                .unwrap();
+            Cli::try_parse_from(["kurama", "config", "set", "--check-updates", "false"]).unwrap();
         match cli_false.command {
             Commands::Config {
                 action: ConfigAction::Set { check_updates, .. },
@@ -2904,7 +2893,7 @@ mod tests {
         }
 
         let cli_true =
-            Cli::try_parse_from(["omawarden", "config", "set", "--check-updates", "true"]).unwrap();
+            Cli::try_parse_from(["kurama", "config", "set", "--check-updates", "true"]).unwrap();
         match cli_true.command {
             Commands::Config {
                 action: ConfigAction::Set { check_updates, .. },
@@ -2916,7 +2905,7 @@ mod tests {
     #[test]
     fn test_cli_show_website_icons_arg_parsing() {
         // Without the flag, show_website_icons should be None so config keeps its value
-        let cli_default = Cli::try_parse_from(["omawarden", "config", "set"]).unwrap();
+        let cli_default = Cli::try_parse_from(["kurama", "config", "set"]).unwrap();
         match cli_default.command {
             Commands::Config {
                 action:
@@ -2927,14 +2916,9 @@ mod tests {
             _ => panic!("Expected Commands::Config with ConfigAction::Set"),
         }
 
-        let cli_false = Cli::try_parse_from([
-            "omawarden",
-            "config",
-            "set",
-            "--show-website-icons",
-            "false",
-        ])
-        .unwrap();
+        let cli_false =
+            Cli::try_parse_from(["kurama", "config", "set", "--show-website-icons", "false"])
+                .unwrap();
         match cli_false.command {
             Commands::Config {
                 action:
@@ -2946,7 +2930,7 @@ mod tests {
         }
 
         let cli_true =
-            Cli::try_parse_from(["omawarden", "config", "set", "--show-website-icons", "true"])
+            Cli::try_parse_from(["kurama", "config", "set", "--show-website-icons", "true"])
                 .unwrap();
         match cli_true.command {
             Commands::Config {
@@ -2961,7 +2945,7 @@ mod tests {
 
     #[test]
     fn test_cli_max_attachment_size_arg_parsing() {
-        let cli_default = Cli::try_parse_from(["omawarden", "config", "set"]).unwrap();
+        let cli_default = Cli::try_parse_from(["kurama", "config", "set"]).unwrap();
         match cli_default.command {
             Commands::Config {
                 action:
@@ -2974,7 +2958,7 @@ mod tests {
         }
 
         let cli_custom =
-            Cli::try_parse_from(["omawarden", "config", "set", "--max-attachment-size", "250"])
+            Cli::try_parse_from(["kurama", "config", "set", "--max-attachment-size", "250"])
                 .unwrap();
         match cli_custom.command {
             Commands::Config {
@@ -2990,7 +2974,7 @@ mod tests {
 
     #[test]
     fn test_cli_client_cert_and_key_arg_parsing() {
-        let cli_default = Cli::try_parse_from(["omawarden", "config", "set"]).unwrap();
+        let cli_default = Cli::try_parse_from(["kurama", "config", "set"]).unwrap();
         match cli_default.command {
             Commands::Config {
                 action:
@@ -3007,7 +2991,7 @@ mod tests {
         }
 
         let cli_custom = Cli::try_parse_from([
-            "omawarden",
+            "kurama",
             "config",
             "set",
             "--client-cert",
@@ -3034,7 +3018,7 @@ mod tests {
 
     #[test]
     fn test_cli_totp_stdin_and_query_arg_parsing() {
-        let cli_stdin = Cli::try_parse_from(["omawarden", "totp", "--stdin"]).unwrap();
+        let cli_stdin = Cli::try_parse_from(["kurama", "totp", "--stdin"]).unwrap();
         match cli_stdin.command {
             Commands::Totp { stdin, query, .. } => {
                 assert!(stdin);
@@ -3043,7 +3027,7 @@ mod tests {
             _ => panic!("Expected Commands::Totp"),
         }
 
-        let cli_query = Cli::try_parse_from(["omawarden", "totp", "my-github-item"]).unwrap();
+        let cli_query = Cli::try_parse_from(["kurama", "totp", "my-github-item"]).unwrap();
         match cli_query.command {
             Commands::Totp { stdin, query, .. } => {
                 assert!(!stdin);
@@ -3057,22 +3041,18 @@ mod tests {
     fn test_cli_zero_argv_sensitive_args_rejected() {
         // Assert --session is rejected
         assert!(
-            Cli::try_parse_from(["omawarden", "--session", "dummy_token", "vault", "sync"])
-                .is_err()
+            Cli::try_parse_from(["kurama", "--session", "dummy_token", "vault", "sync"]).is_err()
         );
         assert!(
-            Cli::try_parse_from(["omawarden", "vault", "sync", "--session", "dummy_token"])
-                .is_err()
+            Cli::try_parse_from(["kurama", "vault", "sync", "--session", "dummy_token"]).is_err()
         );
 
         // Assert --secret is rejected from totp
-        assert!(
-            Cli::try_parse_from(["omawarden", "totp", "--secret", "JBSWY3DPEHPK3PXP"]).is_err()
-        );
+        assert!(Cli::try_parse_from(["kurama", "totp", "--secret", "JBSWY3DPEHPK3PXP"]).is_err());
 
         // Assert --code is rejected from auth login-password
         assert!(Cli::try_parse_from([
-            "omawarden",
+            "kurama",
             "auth",
             "login-password",
             "--email",
@@ -3085,7 +3065,7 @@ mod tests {
 
     #[test]
     fn test_cli_generate_password_default_and_flags() {
-        let cli_default = Cli::try_parse_from(["omawarden", "generate"]).unwrap();
+        let cli_default = Cli::try_parse_from(["kurama", "generate"]).unwrap();
         match cli_default.command {
             Commands::Generate {
                 length,
@@ -3111,7 +3091,7 @@ mod tests {
         }
 
         let cli_custom = Cli::try_parse_from([
-            "omawarden",
+            "kurama",
             "generate",
             "-l",
             "32",
@@ -3143,7 +3123,7 @@ mod tests {
     #[test]
     fn test_cli_generate_passphrase_flags() {
         let cli = Cli::try_parse_from([
-            "omawarden",
+            "kurama",
             "generate",
             "--passphrase",
             "-w",

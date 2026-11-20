@@ -49,7 +49,7 @@ pub struct Config {
     pub client_key_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_cert_server: Option<String>,
-    /// Serve the vault's SSH keys on $XDG_RUNTIME_DIR/omawarden-ssh-agent.sock.
+    /// Serve the vault's SSH keys on $XDG_RUNTIME_DIR/kurama-ssh-agent.sock.
     #[serde(default)]
     pub ssh_agent_enabled: bool,
     /// When to confirm signatures: "always", "first-use" (until logout) or "never".
@@ -147,19 +147,30 @@ pub fn migrate_config_file(legacy_path: &Path, target_path: &Path) {
 }
 
 pub fn resolve_default_config_path() -> PathBuf {
-    if let Ok(custom_dir) = env::var("OMAWARDEN_CONFIG_DIR") {
-        if !custom_dir.trim().is_empty() {
-            return PathBuf::from(custom_dir.trim()).join(DEFAULT_CONFIG_FILENAME);
-        }
-    }
-
     let xdg_config = env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
             PathBuf::from(home).join(".config")
         });
-    xdg_config.join("omawarden").join(DEFAULT_CONFIG_FILENAME)
+    let target = xdg_config.join("kurama").join(DEFAULT_CONFIG_FILENAME);
+    migrate_config_file(
+        &xdg_config.join("omawarden").join(DEFAULT_CONFIG_FILENAME),
+        &target,
+    );
+
+    if let Ok(custom_dir) = env::var("OMAWARDEN_CONFIG_DIR") {
+        if !custom_dir.trim().is_empty() {
+            return PathBuf::from(custom_dir.trim()).join(DEFAULT_CONFIG_FILENAME);
+        }
+    }
+    if let Ok(custom_dir) = env::var("KURAMA_CONFIG_DIR") {
+        if !custom_dir.trim().is_empty() {
+            return PathBuf::from(custom_dir.trim()).join(DEFAULT_CONFIG_FILENAME);
+        }
+    }
+
+    target
 }
 
 impl Default for ConfigManager {
@@ -288,7 +299,7 @@ impl ConfigManager {
             crate::attachment::clear_preview_attachments(None);
 
             crate::log_info!(
-                "omawarden:config",
+                "kurama:config",
                 "Bitwarden server URL changed to '{}'. Previous session, API credentials, and vault cache purged.",
                 cfg.server_url
             );
@@ -563,7 +574,7 @@ case "$cmd" in
         fi
         ;;
     clear)
-        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+        if [ -z "$key" ] || [ "$key" = "__service=kurama" ]; then
             rm -f "${{STORE_DIR}}"/*
         else
             rm -f "${{STORE_DIR}}/${{key}}"*
@@ -1140,8 +1151,8 @@ esac
         let config_mgr = ConfigManager::default();
         let path_str = config_mgr.config_path.to_string_lossy();
         assert!(
-            path_str.ends_with("omawarden/config.json"),
-            "Config file path must end with omawarden/config.json, was: {}",
+            path_str.ends_with("kurama/config.json"),
+            "Config file path must end with kurama/config.json, was: {}",
             path_str
         );
     }

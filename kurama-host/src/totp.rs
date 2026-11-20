@@ -181,7 +181,7 @@ pub fn generate_totp(
     let code_str = format!("{:0width$}", code_val, width = digits as usize);
 
     crate::log_info!(
-        "omawarden:totp",
+        "kurama:totp",
         "Generated TOTP token (ttl: {}s, period: {}s).",
         ttl,
         period

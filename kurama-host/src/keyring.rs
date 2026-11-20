@@ -2,9 +2,10 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 /// Kept for credential compatibility with existing vault sessions.
-pub const SERVICE_NAME: &str = "omarchy-bitwarden";
+pub const SERVICE_NAME: &str = "kurama";
+pub const LEGACY_SERVICE_NAME: &str = "omarchy-bitwarden";
 pub const ACCOUNT_NAME: &str = "session";
-pub const LABEL: &str = "Omawarden Session";
+pub const LABEL: &str = "Kurama Session";
 pub const KIND_ACCESS_TOKEN: &str = "access_token";
 pub const KIND_REFRESH_TOKEN: &str = "refresh_token";
 pub const KIND_API_SECRET: &str = "api_secret";
@@ -19,7 +20,7 @@ mod native {
         match keyring::Entry::new(service, account).and_then(|entry| entry.set_password(value)) {
             Ok(_) => true,
             Err(err) => {
-                crate::log_warn!("omawarden:keyring", "credential store write failed: {err}");
+                crate::log_warn!("kurama:keyring", "credential store write failed: {err}");
                 false
             }
         }
@@ -30,7 +31,7 @@ mod native {
         match keyring::Entry::new(service, account).and_then(|entry| entry.get_password()) {
             Ok(value) => Some(value),
             Err(err) => {
-                crate::log_warn!("omawarden:keyring", "credential store read failed: {err}");
+                crate::log_warn!("kurama:keyring", "credential store read failed: {err}");
                 None
             }
         }
@@ -43,7 +44,7 @@ mod native {
         match keyring::Entry::new(service, account).and_then(|entry| entry.delete_password()) {
             Ok(_) => true,
             Err(err) => {
-                crate::log_warn!("omawarden:keyring", "credential store delete failed: {err}");
+                crate::log_warn!("kurama:keyring", "credential store delete failed: {err}");
                 false
             }
         }
@@ -90,7 +91,7 @@ impl KeyringManager {
             return false;
         }
         let label = format!(
-            "Omawarden {}",
+            "Kurama {}",
             if kind == KIND_REFRESH_TOKEN {
                 "Refresh Token"
             } else {
@@ -137,11 +138,18 @@ impl KeyringManager {
         if kind.is_empty() || norm_url.is_empty() {
             return None;
         }
+        if let Some(token) = self.lookup_token(SERVICE_NAME, kind, &norm_url) {
+            return Some(token);
+        }
+        self.lookup_token(LEGACY_SERVICE_NAME, kind, &norm_url)
+    }
+
+    fn lookup_token(&self, service: &str, kind: &str, norm_url: &str) -> Option<String> {
         let output = Command::new(&self.secret_tool_path)
             .args([
                 "lookup",
                 "service",
-                SERVICE_NAME,
+                service,
                 "kind",
                 kind,
                 "server_url",
@@ -157,9 +165,8 @@ impl KeyringManager {
             }
         }
 
-        // Backwards compatibility fallback: lookup un-scoped token from older versions
         let legacy = Command::new(&self.secret_tool_path)
-            .args(["lookup", "service", SERVICE_NAME, "kind", kind])
+            .args(["lookup", "service", service, "kind", kind])
             .output()
             .ok()?;
 
@@ -183,7 +190,7 @@ impl KeyringManager {
         if kind.is_empty() || norm_url.is_empty() {
             return false;
         }
-        match Command::new(&self.secret_tool_path)
+        let first = Command::new(&self.secret_tool_path)
             .args([
                 "clear",
                 "service",
@@ -193,11 +200,21 @@ impl KeyringManager {
                 "server_url",
                 norm_url,
             ])
-            .output()
-        {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
-        }
+            .output();
+        let second = Command::new(&self.secret_tool_path)
+            .args([
+                "clear",
+                "service",
+                LEGACY_SERVICE_NAME,
+                "kind",
+                kind,
+                "server_url",
+                norm_url,
+            ])
+            .output();
+        first
+            .and_then(|o| second.map(|s| o.status.success() || s.status.success()))
+            .unwrap_or(false)
     }
 
     pub fn store_api_secret(&self, server_url: &str, client_id: &str, secret: &str) -> bool {
@@ -214,7 +231,7 @@ impl KeyringManager {
         if secret.is_empty() || norm_cid.is_empty() || norm_url.is_empty() {
             return false;
         }
-        let label = "Omawarden API Secret";
+        let label = "Kurama API Secret";
         let mut child = match Command::new(&self.secret_tool_path)
             .args([
                 "store",
@@ -499,7 +516,7 @@ case "$cmd" in
         fi
         ;;
     clear)
-        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+        if [ -z "$key" ] || [ "$key" = "__service=kurama" ]; then
             rm -f "${{STORE_DIR}}"/*
         else
             rm -f "${{STORE_DIR}}/${{key}}"*
@@ -619,7 +636,7 @@ case "$cmd" in
         fi
         ;;
     clear)
-        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+        if [ -z "$key" ] || [ "$key" = "__service=kurama" ]; then
             rm -f "${{STORE_DIR}}"/*
         else
             rm -f "${{STORE_DIR}}/${{key}}"*
@@ -705,7 +722,7 @@ case "$cmd" in
         fi
         ;;
     clear)
-        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+        if [ -z "$key" ] || [ "$key" = "__service=kurama" ]; then
             rm -f "${{STORE_DIR}}"/*
         else
             rm -f "${{STORE_DIR}}/${{key}}"*
@@ -824,7 +841,7 @@ case "$cmd" in
         fi
         ;;
     clear)
-        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+        if [ -z "$key" ] || [ "$key" = "__service=kurama" ]; then
             rm -f "${{STORE_DIR}}"/*
         else
             rm -f "${{STORE_DIR}}/${{key}}"*

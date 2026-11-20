@@ -229,7 +229,7 @@ impl EnvironmentUrls {
             let host = parsed.host_str().unwrap_or("").to_lowercase();
             if parsed.scheme() == "http" && !is_loopback_host(&host) {
                 crate::log_warn!(
-                    "omawarden:api",
+                    "kurama:api",
                     "Plaintext HTTP is forbidden for remote server host '{}'. Upgrading to HTTPS to protect credentials in transit.",
                     host
                 );
@@ -295,7 +295,7 @@ impl EnvironmentUrls {
                     let host = parsed.host_str().unwrap_or("").to_lowercase();
                     if parsed.scheme() == "http" && !is_loopback_host(&host) {
                         crate::log_warn!(
-                            "omawarden:api",
+                            "kurama:api",
                             "Plaintext HTTP is forbidden for remote identity host '{}'. Upgrading to HTTPS to protect credentials in transit.",
                             host
                         );
@@ -452,24 +452,23 @@ pub fn format_user_agent(context: Option<&ClientContext>) -> String {
     };
     if let Some(ctx) = context.filter(|c| c.is_valid()) {
         format!(
-            "{}/{} (Omawarden/{}; Bitwarden/{}; {})",
+            "{}/{} (Kurama/{}; Bitwarden/{}; {})",
             ctx.name, ctx.version, engine_version, BITWARDEN_COMPAT_VERSION, os
         )
     } else {
         format!(
-            "Omawarden/{} (Bitwarden/{}; {})",
+            "Kurama/{} (Bitwarden/{}; {})",
             engine_version, BITWARDEN_COMPAT_VERSION, os
         )
     }
 }
 
 /// Default application client identity used by non-interactive callers.
-pub const DEFAULT_CLIENT_NAME: &str = "Omawarden_Desktop";
+pub const DEFAULT_CLIENT_NAME: &str = "Kurama_Desktop";
 
 /// Path to an optional JSON file providing a custom client identity.
 pub fn get_default_client_context_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("OMAWARDEN_CLIENT_CONTEXT_PATH").filter(|s| !s.is_empty())
-    {
+    if let Some(path) = std::env::var_os("KURAMA_CLIENT_CONTEXT_PATH").filter(|s| !s.is_empty()) {
         return Some(PathBuf::from(path));
     }
     let config_dir = std::env::var_os("XDG_CONFIG_HOME")
@@ -480,7 +479,7 @@ pub fn get_default_client_context_path() -> Option<PathBuf> {
                 .filter(|s| !s.is_empty())
                 .map(|home| PathBuf::from(home).join(".config"))
         })?;
-    Some(config_dir.join("omawarden").join("client.json"))
+    Some(config_dir.join("kurama").join("client.json"))
 }
 
 /// Reads a client identity from a JSON file with `client_name`/`client_version`
@@ -773,7 +772,7 @@ pub fn build_http_client_for_url_with_config(
     let mut default_headers = reqwest::header::HeaderMap::new();
     let ua_str = format_user_agent(client_context);
     let ua_val = reqwest::header::HeaderValue::from_str(&ua_str).unwrap_or_else(|_| {
-        reqwest::header::HeaderValue::from_static("Omawarden (Bitwarden/2026.7.0)")
+        reqwest::header::HeaderValue::from_static("Kurama (Bitwarden/2026.7.0)")
     });
     default_headers.insert(reqwest::header::USER_AGENT, ua_val);
     default_headers.insert(
@@ -820,7 +819,7 @@ pub fn build_http_client_for_url_with_config(
                 }
                 Err(e) => {
                     crate::log_error!(
-                        "omawarden:api",
+                        "kurama:api",
                         "Failed to load client mTLS identity for origin '{}': {}",
                         cert_server,
                         e
@@ -3715,7 +3714,7 @@ mod tests {
                         .unwrap_or_default()
                 };
                 let expected_ua = format!(
-                    "user-agent: Omawarden/{} (Bitwarden/2026.7.0; {})",
+                    "user-agent: Kurama/{} (Bitwarden/2026.7.0; {})",
                     env!("CARGO_PKG_VERSION"),
                     os_label
                 );
@@ -3737,7 +3736,7 @@ mod tests {
 
     #[test]
     fn test_client_context_validation_and_crlf_rejection() {
-        let valid1 = ClientContext::new("Omawarden_Desktop", "0.11.2");
+        let valid1 = ClientContext::new("Kurama_Desktop", "0.11.2");
         assert!(valid1.is_valid());
 
         let valid2 = ClientContext::new("my-custom-client.v1", "1.0.0-beta.2");
@@ -3749,7 +3748,7 @@ mod tests {
         let injection_ver = ClientContext::new("valid_name", "1.0\nSet-Cookie: evil");
         assert!(!injection_ver.is_valid());
 
-        let space_name = ClientContext::new("Omawarden Desktop", "0.11.2");
+        let space_name = ClientContext::new("Kurama Desktop", "0.11.2");
         assert!(!space_name.is_valid());
 
         let colon_name = ClientContext::new("client:foo", "1.0");
@@ -3784,18 +3783,15 @@ mod tests {
         let cli_ua = format_user_agent(None);
         assert_eq!(
             cli_ua,
-            format!(
-                "Omawarden/{} (Bitwarden/2026.7.0; {})",
-                engine_ver, os_label
-            )
+            format!("Kurama/{} (Bitwarden/2026.7.0; {})", engine_ver, os_label)
         );
 
-        let ui_ctx = ClientContext::new("Omawarden_Desktop", "0.11.2");
+        let ui_ctx = ClientContext::new("Kurama_Desktop", "0.11.2");
         let ui_ua = format_user_agent(Some(&ui_ctx));
         assert_eq!(
             ui_ua,
             format!(
-                "Omawarden_Desktop/0.11.2 (Omawarden/{}; Bitwarden/2026.7.0; {})",
+                "Kurama_Desktop/0.11.2 (Kurama/{}; Bitwarden/2026.7.0; {})",
                 engine_ver, os_label
             )
         );
@@ -3804,10 +3800,7 @@ mod tests {
         let fallback_ua = format_user_agent(Some(&invalid_ctx));
         assert_eq!(
             fallback_ua,
-            format!(
-                "Omawarden/{} (Bitwarden/2026.7.0; {})",
-                engine_ver, os_label
-            )
+            format!("Kurama/{} (Bitwarden/2026.7.0; {})", engine_ver, os_label)
         );
     }
 
@@ -3881,7 +3874,7 @@ mod tests {
     #[test]
     fn test_build_http_client_with_context_wire_headers() {
         use std::io::{Read, Write};
-        let ctx = ClientContext::new("Omawarden_Desktop", "0.11.2");
+        let ctx = ClientContext::new("Kurama_Desktop", "0.11.2");
         let client = build_http_client_with_context(Duration::from_secs(5), Some(&ctx));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -3902,7 +3895,7 @@ mod tests {
                         .unwrap_or_default()
                 };
                 let expected_ua = format!(
-                    "user-agent: Omawarden_Desktop/0.11.2 (Omawarden/{}; Bitwarden/2026.7.0; {})",
+                    "user-agent: Kurama_Desktop/0.11.2 (Kurama/{}; Bitwarden/2026.7.0; {})",
                     env!("CARGO_PKG_VERSION"),
                     os_label
                 );
@@ -4092,7 +4085,7 @@ MLC62jYKG2dIdS5jh3VtXQlyr7M6wIWLQCcezPkA8/AsmC3w8fsbz7Zj2qTzke+z
     fn test_build_http_client_for_url_origin_gating() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let cfg_dir = dir.path().join("omawarden");
+        let cfg_dir = dir.path().join("kurama");
         std::fs::create_dir_all(&cfg_dir).unwrap();
 
         let cert_file = cfg_dir.join("client.crt");

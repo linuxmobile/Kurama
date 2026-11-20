@@ -1,8 +1,8 @@
 [package]
-name = "omawarden"
+name = "kurama-host"
 version = "0.11.0"
 edition = "2021"
-description = "High-performance and low memory Bitwarden CLI (Designed for Omarchy Plugin)"
+description = "Backend host for the Kurama desktop vault UI"
 authors = ["icyleaf"]
 
 [dependencies]

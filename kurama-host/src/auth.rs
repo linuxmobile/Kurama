@@ -283,7 +283,7 @@ impl AuthManager {
             if is_jwt_expired(tok) {
                 if !has_refresh && !has_api_secret {
                     crate::log_warn!(
-                        "omawarden:auth",
+                        "kurama:auth",
                         "Stored session token has expired and cannot be renewed. Invalidation required."
                     );
                     self.keyring_mgr.clear_token(s_url, KIND_ACCESS_TOKEN);
@@ -372,14 +372,10 @@ impl AuthManager {
         two_factor_provider: Option<i32>,
         new_device_otp: Option<&str>,
     ) -> AuthResult {
-        crate::log_info!(
-            "omawarden:auth",
-            "Starting login with password for {}",
-            email
-        );
+        crate::log_info!("kurama:auth", "Starting login with password for {}", email);
         if !self.keyring_mgr.is_available() {
             let err_msg = "System keyring is not available. Keyring is required to securely store authentication tokens.";
-            crate::log_error!("omawarden:auth", "{}", err_msg);
+            crate::log_error!("kurama:auth", "{}", err_msg);
             return AuthResult {
                 ok: false,
                 status: Some("unauthenticated".to_string()),
@@ -409,7 +405,7 @@ impl AuthManager {
                 providers2,
             }) => {
                 crate::log_info!(
-                    "omawarden:auth",
+                    "kurama:auth",
                     "Two-factor authentication required for {}",
                     email
                 );
@@ -424,7 +420,7 @@ impl AuthManager {
                             crate::webauthn::parse_webauthn_challenge(p2, &self.server_url)
                         {
                             crate::log_info!(
-                                "omawarden:auth",
+                                "kurama:auth",
                                 "Attempting FIDO2 WebAuthn assertion with security key..."
                             );
                             match crate::webauthn::create_webauthn_two_factor_token(&ch) {
@@ -439,7 +435,7 @@ impl AuthManager {
                                 }
                                 Err(e) => {
                                     crate::log_warn!(
-                                        "omawarden:auth",
+                                        "kurama:auth",
                                         "WebAuthn assertion failed: {}",
                                         e
                                     );
@@ -508,7 +504,7 @@ impl AuthManager {
             }
             Err(crate::api::ApiError::NewDeviceVerificationRequired) => {
                 crate::log_info!(
-                    "omawarden:auth",
+                    "kurama:auth",
                     "New device verification required for {}",
                     email
                 );
@@ -532,7 +528,7 @@ impl AuthManager {
                     || err_msg.to_lowercase().contains("two-factor")
                     || err_msg.to_lowercase().contains("two factor")
                     || err_msg.to_lowercase().contains("2fa");
-                crate::log_warn!("omawarden:auth", "Login failed for {}: {}", email, err_msg);
+                crate::log_warn!("kurama:auth", "Login failed for {}: {}", email, err_msg);
                 return AuthResult {
                     ok: false,
                     status: Some("unauthenticated".to_string()),
@@ -559,7 +555,7 @@ impl AuthManager {
 
         if !self.keyring_mgr.is_available() {
             let err_msg = "System keyring is not available. Keyring is required to securely store authentication tokens.";
-            crate::log_error!("omawarden:auth", "{}", err_msg);
+            crate::log_error!("kurama:auth", "{}", err_msg);
             return AuthResult {
                 ok: false,
                 status: Some("unauthenticated".to_string()),
@@ -577,7 +573,7 @@ impl AuthManager {
             &token_resp.access_token,
         ) {
             let err_msg = "Failed to store access token in system keyring.";
-            crate::log_error!("omawarden:auth", "{}", err_msg);
+            crate::log_error!("kurama:auth", "{}", err_msg);
             return AuthResult {
                 ok: false,
                 status: Some("unauthenticated".to_string()),
@@ -597,7 +593,7 @@ impl AuthManager {
                 self.keyring_mgr
                     .clear_token(&self.server_url, KIND_ACCESS_TOKEN);
                 let err_msg = "Failed to store refresh token in system keyring.";
-                crate::log_error!("omawarden:auth", "{}", err_msg);
+                crate::log_error!("kurama:auth", "{}", err_msg);
                 return AuthResult {
                     ok: false,
                     status: Some("unauthenticated".to_string()),
@@ -657,7 +653,7 @@ impl AuthManager {
         }));
 
         crate::log_info!(
-            "omawarden:auth",
+            "kurama:auth",
             "Login successful for {}. Initial sync retrieved {} ciphers.",
             email,
             storage.ciphers.len()
@@ -682,13 +678,13 @@ impl AuthManager {
 
     pub fn login_apikey(&self, client_id: &str, client_secret: &str) -> AuthResult {
         crate::log_info!(
-            "omawarden:auth",
+            "kurama:auth",
             "Starting login with API Key client_id: {}",
             client_id
         );
         if !self.keyring_mgr.is_available() {
             let err_msg = "System keyring is not available. Keyring is required to securely store authentication tokens.";
-            crate::log_error!("omawarden:auth", "{}", err_msg);
+            crate::log_error!("kurama:auth", "{}", err_msg);
             return AuthResult {
                 ok: false,
                 status: Some("unauthenticated".to_string()),
@@ -703,7 +699,7 @@ impl AuthManager {
             Ok(r) => r,
             Err(e) => {
                 let err_msg = sanitize_auth_error(Some(&e.to_string()));
-                crate::log_warn!("omawarden:auth", "API key login failed: {}", err_msg);
+                crate::log_warn!("kurama:auth", "API key login failed: {}", err_msg);
                 return AuthResult {
                     ok: false,
                     status: Some("unauthenticated".to_string()),
@@ -727,7 +723,7 @@ impl AuthManager {
 
         if !self.keyring_mgr.is_available() {
             let err_msg = "System keyring is not available. Keyring is required to securely store authentication tokens.";
-            crate::log_error!("omawarden:auth", "{}", err_msg);
+            crate::log_error!("kurama:auth", "{}", err_msg);
             return AuthResult {
                 ok: false,
                 status: Some("unauthenticated".to_string()),
@@ -748,7 +744,7 @@ impl AuthManager {
             .store_token(s_url, KIND_ACCESS_TOKEN, &token_resp.access_token)
         {
             let err_msg = "Failed to store access token in system keyring.";
-            crate::log_error!("omawarden:auth", "{}", err_msg);
+            crate::log_error!("kurama:auth", "{}", err_msg);
             return AuthResult {
                 ok: false,
                 status: Some("unauthenticated".to_string()),
@@ -765,7 +761,7 @@ impl AuthManager {
             {
                 self.keyring_mgr.clear_token(s_url, KIND_ACCESS_TOKEN);
                 let err_msg = "Failed to store refresh token in system keyring.";
-                crate::log_error!("omawarden:auth", "{}", err_msg);
+                crate::log_error!("kurama:auth", "{}", err_msg);
                 return AuthResult {
                     ok: false,
                     status: Some("unauthenticated".to_string()),
@@ -783,7 +779,7 @@ impl AuthManager {
             self.keyring_mgr.clear_token(s_url, KIND_ACCESS_TOKEN);
             self.keyring_mgr.clear_token(s_url, KIND_REFRESH_TOKEN);
             let err_msg = "Failed to store API secret in system keyring.";
-            crate::log_error!("omawarden:auth", "{}", err_msg);
+            crate::log_error!("kurama:auth", "{}", err_msg);
             return AuthResult {
                 ok: false,
                 status: Some("unauthenticated".to_string()),
@@ -859,7 +855,7 @@ impl AuthManager {
             }
         }
 
-        crate::log_info!("omawarden:auth", "API key authentication successful.");
+        crate::log_info!("kurama:auth", "API key authentication successful.");
 
         AuthResult {
             ok: true,
@@ -878,10 +874,10 @@ impl AuthManager {
                 ..Default::default()
             };
         }
-        crate::log_info!("omawarden:auth", "Unlocking vault with master password...");
+        crate::log_info!("kurama:auth", "Unlocking vault with master password...");
         let storage = self.storage_mgr.load();
         if storage.enc_user_key.is_none() {
-            crate::log_warn!("omawarden:auth", "Account is not logged in.");
+            crate::log_warn!("kurama:auth", "Account is not logged in.");
             return AuthResult {
                 ok: false,
                 status: Some("unauthenticated".to_string()),
@@ -923,7 +919,7 @@ impl AuthManager {
                     "password": password
                 }));
 
-                crate::log_info!("omawarden:auth", "Vault unlocked successfully.");
+                crate::log_info!("kurama:auth", "Vault unlocked successfully.");
 
                 AuthResult {
                     ok: true,
@@ -933,7 +929,7 @@ impl AuthManager {
             }
             Err(e) => {
                 let err_msg = sanitize_auth_error(Some(&e.to_string()));
-                crate::log_warn!("omawarden:auth", "Unlock failed: {}", err_msg);
+                crate::log_warn!("kurama:auth", "Unlock failed: {}", err_msg);
                 AuthResult {
                     ok: false,
                     status: Some("locked".to_string()),
@@ -957,7 +953,7 @@ impl AuthManager {
             "action": "lock"
         }));
         crate::attachment::clear_preview_attachments(None);
-        crate::log_info!("omawarden:auth", "Vault locked.");
+        crate::log_info!("kurama:auth", "Vault locked.");
         AuthResult {
             ok: true,
             status: Some("locked".to_string()),
@@ -981,7 +977,7 @@ impl AuthManager {
         }));
         crate::attachment::clear_preview_attachments(None);
         crate::log_info!(
-            "omawarden:auth",
+            "kurama:auth",
             "Account logged out and all keyring credentials cleared."
         );
         AuthResult {
@@ -1455,7 +1451,7 @@ case "$cmd" in
         fi
         ;;
     clear)
-        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+        if [ -z "$key" ] || [ "$key" = "__service=kurama" ]; then
             rm -f "${{STORE_DIR}}"/*
         else
             rm -f "${{STORE_DIR}}/${{key}}"*
@@ -1560,7 +1556,7 @@ case "$cmd" in
         fi
         ;;
     clear)
-        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+        if [ -z "$key" ] || [ "$key" = "__service=kurama" ]; then
             rm -f "${{STORE_DIR}}"/*
         else
             rm -f "${{STORE_DIR}}/${{key}}"*
@@ -2367,7 +2363,7 @@ esac
         let old_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
         std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
 
-        let socket_path = runtime_dir.join("omawarden.sock");
+        let socket_path = runtime_dir.join("kurama.sock");
 
         let unix_listener = UnixListener::bind(&socket_path).unwrap();
         let stop_daemon = Arc::new(AtomicBool::new(false));

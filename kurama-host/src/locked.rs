@@ -89,7 +89,7 @@ impl<const N: usize> LockedMemory<N> {
                     // ping (`memory_locked: false`), where it survives the
                     // daemonized process's null stderr.
                     crate::log_error!(
-                        "omawarden:locked",
+                        "kurama:locked",
                         "mlock failed ({}); SECRET MEMORY IS NOT LOCKED: operating in unlocked-memory fallback mode (check ulimit -l / memlock rlimit)",
                         err
                     );

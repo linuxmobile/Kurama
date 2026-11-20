@@ -24,10 +24,10 @@ impl Sandbox {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_omawarden"))
+        Command::new(env!("CARGO_BIN_EXE_kurama-host"))
             .args(args)
-            .env("OMAWARDEN_CONFIG_DIR", self.path("config"))
-            .env("OMAWARDEN_DATA_DIR", self.path("data"))
+            .env("KURAMA_CONFIG_DIR", self.path("config"))
+            .env("KURAMA_DATA_DIR", self.path("data"))
             .env("XDG_RUNTIME_DIR", self.path("runtime"))
             .env("HOME", self.path("home"))
             .env_remove("SSH_AUTH_SOCK")
@@ -43,7 +43,7 @@ impl Sandbox {
 
     /// Ask a running daemon to exit.
     fn stop_daemon(&self) {
-        let socket = self.path("runtime").join("omawarden.sock");
+        let socket = self.path("runtime").join("kurama.sock");
         if let Ok(mut stream) = UnixStream::connect(socket) {
             let _ = stream.write_all(b"{\"action\":\"stop\"}\n");
             let mut reply = String::new();
@@ -124,7 +124,7 @@ fn the_ssh_agent_commands_talk_to_the_daemon() {
     assert_eq!(status["enabled"], true);
     assert_eq!(status["confirm"], "first-use");
     let socket = status["socket"].as_str().unwrap();
-    assert!(Path::new(socket).ends_with("omawarden-ssh-agent.sock"));
+    assert!(Path::new(socket).ends_with("kurama-ssh-agent.sock"));
     assert!(Path::new(socket).exists());
 
     let pending = json(&sb.stdout(&["ssh-agent", "pending"]));
@@ -161,7 +161,7 @@ fn a_blocked_agent_socket_does_not_stop_the_daemon() {
     // Something that isn't ours sits where the socket goes.
     std::os::unix::fs::symlink(
         "/tmp/elsewhere",
-        sb.path("runtime").join("omawarden-ssh-agent.sock"),
+        sb.path("runtime").join("kurama-ssh-agent.sock"),
     )
     .unwrap();
     let status = json(&sb.stdout(&["ssh-agent", "status"]));
@@ -173,7 +173,7 @@ fn a_blocked_agent_socket_does_not_stop_the_daemon() {
 fn the_command_fails_when_the_daemon_cannot_start() {
     let sb = Sandbox::new();
     // A directory sits where the daemon's socket goes, so it can't bind.
-    std::fs::create_dir(sb.path("runtime").join("omawarden.sock")).unwrap();
+    std::fs::create_dir(sb.path("runtime").join("kurama.sock")).unwrap();
     let out = sb.run(&["ssh-agent", "status"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("not responding"));
@@ -186,7 +186,7 @@ fn a_locked_daemon_from_another_build_is_replaced() {
 
     let sb = Sandbox::new();
     sb.stdout(&["config", "set", "--ssh-agent", "true"]);
-    let socket = sb.path("runtime").join("omawarden.sock");
+    let socket = sb.path("runtime").join("kurama.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     // An old daemon: locked, so it may be replaced. It exits on `stop`.
     let old_daemon = std::thread::spawn(move || {

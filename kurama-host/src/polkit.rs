@@ -3,8 +3,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// polkit action registered by the packaged policy file. Keep in sync with
-/// `packaging/io.github.linuxmobile.omawarden.policy`.
-pub const POLKIT_ACTION_ID: &str = "io.github.linuxmobile.omawarden.unlock";
+/// `packaging/io.github.linuxmobile.kurama.policy`.
+pub const POLKIT_ACTION_ID: &str = "io.github.linuxmobile.kurama.unlock";
 /// Directories polkitd scans for action definitions. This mirrors the list
 /// compiled into polkitd, not just the packaged path: /usr/local is where a
 /// manual install of the shipped policy lands, /etc holds local copies or
@@ -86,10 +86,9 @@ fn process_subject() -> Option<String> {
 /// Run `pkcheck` for the daemon's own process subject.
 ///
 /// The daemon runs inside the user session, so the session's polkit agent
-/// (Omarchy's shell ships one) shows the system unlock dialog, which honours
-/// fingerprint auth where PAM is configured for it. Exit code 1 means the
-/// subject is not authorized; anything else is treated as polkit being
-/// unavailable rather than a denial.
+/// shows the system unlock dialog, which honours fingerprint auth where PAM is
+/// configured for it. Exit code 1 means the subject is not authorized; anything
+/// else is treated as polkit being unavailable rather than a denial.
 pub fn check(action_id: &str, binary: &Path, timeout: Duration) -> PolkitOutcome {
     // Fail closed when the unambiguous subject cannot be built: a bare-pid
     // fallback would be the racy form pkcheck(1) warns about.
@@ -214,7 +213,7 @@ exit {exit_code}
     fn test_policy_filename_derives_namespace() {
         assert_eq!(
             policy_filename(POLKIT_ACTION_ID),
-            "io.github.linuxmobile.omawarden.policy"
+            "io.github.linuxmobile.kurama.policy"
         );
         assert_eq!(policy_filename("a.b"), "a.policy");
     }

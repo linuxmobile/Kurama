@@ -6,6 +6,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,7 +20,7 @@ use std::os::unix::process::CommandExt;
 ///
 /// Precedence:
 /// 1. `XDG_RUNTIME_DIR`: Verified to exist, owned by current UID, and not a symlink.
-/// 2. Fallback: Creates an isolated `/tmp/omawarden-runtime-{uid}/` directory with mode `0700`.
+/// 2. Fallback: Creates an isolated `/tmp/kurama-runtime-{uid}/` directory with mode `0700`.
 ///
 /// Tests never resolve to the login session's `/run/user/{uid}`: some send `stop`
 /// or start a daemon, which would lock the user's real vault and drop their SSH agent.
@@ -39,13 +40,19 @@ pub fn get_runtime_dir() -> PathBuf {
         }
     }
 
-    let fallback = env::temp_dir().join(format!("omawarden-runtime-{}", current_uid));
+    let fallback = env::temp_dir().join(format!("kurama-runtime-{}", current_uid));
     let _ = crate::fs_util::create_secure_dir_all(&fallback, 0o700);
     fallback
 }
 
 pub fn get_socket_path() -> PathBuf {
-    get_runtime_dir().join("omawarden.sock")
+    let dir = get_runtime_dir();
+    let target = dir.join("kurama.sock");
+    let legacy = dir.join("omawarden.sock");
+    if !target.exists() && legacy.exists() {
+        return legacy;
+    }
+    target
 }
 
 /// Validates that a socket file (and its parent directory) is owned by the current UID
@@ -135,7 +142,7 @@ pub fn ensure_daemon_running() {
         let check = check_running_daemon(&resp, env!("GIT_HASH"));
         if check == DaemonCheck::Defer {
             crate::log_info!(
-                "omawarden:daemon",
+                "kurama:daemon",
                 "Running daemon is from another build but the vault is unlocked; keeping it until it locks"
             );
         }
@@ -189,7 +196,7 @@ pub fn send_daemon_request(req: &Value) -> Option<Value> {
 
     if let Err(e) = validate_socket_path(&socket_path) {
         crate::log_error!(
-            "omawarden:daemon",
+            "kurama:daemon",
             "Refusing to connect to socket {}: {}",
             socket_path.display(),
             e
@@ -202,7 +209,7 @@ pub fn send_daemon_request(req: &Value) -> Option<Value> {
     // Mutual SO_PEERCRED verification: client verifies that server process UID matches current UID
     if let Err(e) = verify_peer_credentials(&stream) {
         crate::log_error!(
-            "omawarden:daemon",
+            "kurama:daemon",
             "Refusing to send request: server peer UID verification failed: {}",
             e
         );
@@ -264,6 +271,10 @@ pub struct DaemonState {
     /// watchdog tick. Suspend time accumulates in BOOTTIME only, so a growing
     /// delta is a deterministic resume-edge detector (no D-Bus needed).
     pub last_boot_delta_secs: Mutex<Option<u64>>,
+    /// UI-independent event log. Desktop clients poll `events` instead of
+    /// registering shell callbacks, so the daemon never depends on a view.
+    pub events: Mutex<Vec<Value>>,
+    pub event_cursor: AtomicU64,
 }
 
 /// What locked the session. Sleep is treated harder than a screen lock
@@ -326,7 +337,35 @@ impl DaemonState {
             polkit_policy_registered,
             session_anchor: Mutex::new(None),
             last_boot_delta_secs: Mutex::new(None),
+            events: Mutex::new(Vec::new()),
+            event_cursor: AtomicU64::new(0),
         }
+    }
+
+    /// Record a non-secret event for polled UI clients.
+    pub fn record_event(&self, kind: &str, fields: Value) {
+        let id = self.event_cursor.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut event = fields;
+        if let Some(object) = event.as_object_mut() {
+            object.insert("id".to_owned(), json!(id));
+            object.insert("kind".to_owned(), json!(kind));
+        }
+        let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        if events.len() >= 128 {
+            events.remove(0);
+        }
+        events.push(event);
+    }
+
+    pub fn events_since(&self, since: u64) -> Value {
+        let cursor = self.event_cursor.load(Ordering::Relaxed);
+        let events = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        let pending: Vec<Value> = events
+            .iter()
+            .filter(|event| event.get("id").and_then(Value::as_u64).unwrap_or(0) > since)
+            .cloned()
+            .collect();
+        json!({ "ok": true, "events": pending, "cursor": cursor })
     }
 
     /// CLOCK_BOOTTIME minus CLOCK_MONOTONIC in whole seconds. The two clocks
@@ -383,7 +422,7 @@ impl DaemonState {
             return false;
         }
         crate::log_info!(
-            "omawarden:daemon",
+            "kurama:daemon",
             "Suspend detected (boottime drift); wiping quick unlock retention"
         );
         // lock() is the hard path: wipes the retained key AND locks.
@@ -506,7 +545,7 @@ impl DaemonState {
                 };
                 if strike >= MAX_QUICK_UNLOCK_FAILURES {
                     crate::log_warn!(
-                        "omawarden:daemon",
+                        "kurama:daemon",
                         "Quick unlock denied {} times; wiping retained key",
                         strike
                     );
@@ -518,7 +557,7 @@ impl DaemonState {
                 return Err("System authentication was denied.");
             }
             crate::polkit::PolkitOutcome::Unavailable(reason) => {
-                crate::log_warn!("omawarden:daemon", "polkit unavailable: {}", reason);
+                crate::log_warn!("kurama:daemon", "polkit unavailable: {}", reason);
                 return Err("System authentication is unavailable right now.");
             }
         }
@@ -540,7 +579,7 @@ impl DaemonState {
                 Ok(count)
             }
             Err(e) => {
-                crate::log_error!("omawarden:daemon", "Quick unlock restore failed: {}", e);
+                crate::log_error!("kurama:daemon", "Quick unlock restore failed: {}", e);
                 Err("Quick unlock failed to restore the vault.")
             }
         }
@@ -576,7 +615,7 @@ impl DaemonState {
             && (self.vault_mgr.is_unlocked() || self.vault_mgr.quick_unlock_available())
         {
             crate::log_info!(
-                "omawarden:daemon",
+                "kurama:daemon",
                 "Maximum session lifetime reached; locking vault and wiping retention"
             );
             self.lock();
@@ -604,7 +643,7 @@ impl DaemonState {
 
             if max_lifetime_expired {
                 crate::log_info!(
-                    "omawarden:daemon",
+                    "kurama:daemon",
                     "Maximum session lifetime reached; locking vault"
                 );
                 self.lock();
@@ -632,7 +671,7 @@ impl DaemonState {
             if idle_expired {
                 // Idle timeout is a soft lock: with quick unlock enabled the
                 // key is retained for a later polkit check (ADR-0025).
-                crate::log_info!("omawarden:daemon", "Idle timeout elapsed; locking vault");
+                crate::log_info!("kurama:daemon", "Idle timeout elapsed; locking vault");
                 self.soft_lock();
                 return true;
             }
@@ -657,7 +696,7 @@ impl DaemonState {
                 LockSignal::Sleep => {
                     // A suspend must never leave the key retained.
                     crate::log_info!(
-                        "omawarden:daemon",
+                        "kurama:daemon",
                         "System is going to sleep; hard-locking vault"
                     );
                     self.lock();
@@ -698,6 +737,7 @@ impl DaemonState {
         let _ = crate::clipboard::ClipboardManager::default()
             .without_detached_worker()
             .clear();
+        self.record_event("status", json!({ "status": "locked" }));
     }
 
     /// Soft lock (ADR-0025): purges decrypted state but retains the user key
@@ -717,6 +757,7 @@ impl DaemonState {
         let _ = crate::clipboard::ClipboardManager::default()
             .without_detached_worker()
             .clear();
+        self.record_event("status", json!({ "status": "locked", "mode": "soft" }));
     }
 
     pub fn unlock(&self, password: &str) -> Result<usize, String> {
@@ -813,7 +854,7 @@ pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
     fs::set_permissions(&socket_path, perms)?;
 
     if let Err(e) = crate::ssh_agent::apply(&state) {
-        crate::log_error!("omawarden:daemon", "SSH agent failed to start: {}", e);
+        crate::log_error!("kurama:daemon", "SSH agent failed to start: {}", e);
     }
 
     let state_clone = state.clone();
@@ -1004,7 +1045,7 @@ pub fn is_system_or_screen_locked() -> bool {
 fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<()> {
     if let Err(e) = verify_peer_credentials(&stream) {
         crate::log_error!(
-            "omawarden:daemon",
+            "kurama:daemon",
             "Client connection rejected: peer credential check failed: {}",
             e
         );
@@ -1084,6 +1125,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         "ping" => json!({
             "ok": true,
             "pong": true,
+            "component": crate::HOST_COMPONENT,
             "version": env!("CARGO_PKG_VERSION"),
             "commit": env!("GIT_HASH"),
             "unlocked": is_unlocked,
@@ -1105,6 +1147,7 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             std::process::exit(0);
         }
         "status" => state.vault_mgr.get_status(),
+        "events" => state.events_since(req.get("since").and_then(Value::as_u64).unwrap_or(0)),
         // SSH agent confirmations: the overlay lists pending prompts and answers them.
         "ssh_agent_apply" => match crate::ssh_agent::apply(&state) {
             Ok(_) => json!({ "ok": true, "running": crate::ssh_agent::is_running(&state) }),
@@ -1129,22 +1172,26 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         "unlock" => {
             let pwd = req.get("password").and_then(|v| v.as_str()).unwrap_or("");
             match state.unlock(pwd) {
-                Ok(count) => json!({
-                    "ok": true,
-                    "status": "unlocked",
-                    "items_count": count,
-                }),
-                Err(e) => json!({ "ok": false, "status": "locked", "error": e }),
+                Ok(count) => {
+                    state.record_event("status", json!({ "status": "unlocked" }));
+                    json!({ "ok": true, "status": "unlocked", "items_count": count })
+                }
+                Err(e) => {
+                    state.record_event("error", json!({ "message": "Vault unlock failed" }));
+                    json!({ "ok": false, "status": "locked", "error": e })
+                }
             }
         }
         // ADR-0025: system-authentication re-unlock from the retained key.
         "quick_unlock" => match state.perform_quick_unlock() {
-            Ok(count) => json!({
-                "ok": true,
-                "status": "unlocked",
-                "items_count": count,
-            }),
-            Err(reason) => json!({ "ok": false, "status": "locked", "error": reason }),
+            Ok(count) => {
+                state.record_event("status", json!({ "status": "unlocked" }));
+                json!({ "ok": true, "status": "unlocked", "items_count": count })
+            }
+            Err(reason) => {
+                state.record_event("error", json!({ "message": "Quick unlock failed" }));
+                json!({ "ok": false, "status": "locked", "error": reason })
+            }
         },
         // Config side-effect: drop the retained key without locking.
         "wipe_quick_unlock" => {
@@ -1175,10 +1222,19 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
             crate::attachment::clear_preview_attachments(None);
             json!({ "ok": true, "status": "locked" })
         }
-        "sync" => match state.sync_with_client(client_context.as_ref()) {
-            Ok(count) => json!({ "ok": true, "ciphers_count": count }),
-            Err(e) => json!({ "ok": false, "error": e }),
-        },
+        "sync" => {
+            state.record_event("sync", json!({ "phase": "started" }));
+            match state.sync_with_client(client_context.as_ref()) {
+                Ok(count) => {
+                    state.record_event("sync", json!({ "phase": "completed", "count": count }));
+                    json!({ "ok": true, "ciphers_count": count })
+                }
+                Err(e) => {
+                    state.record_event("error", json!({ "message": "Vault sync failed" }));
+                    json!({ "ok": false, "error": e })
+                }
+            }
+        }
         "favorite_item" => {
             let ids: Vec<String> = req
                 .get("ids")
@@ -1740,6 +1796,7 @@ mod tests {
             "totp",
             "set_auto_lock",
             "unknown_action",
+            "events",
             "",
         ] {
             assert!(
@@ -1774,6 +1831,52 @@ mod tests {
         // Explicit touch: true must override passive actions
         let req_touch_true = json!({ "action": "ping", "touch": true });
         assert!(should_touch_activity("ping", &req_touch_true));
+    }
+
+    #[test]
+    fn test_events_action_reports_queued_events() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(DaemonState::new(
+            StorageManager::new(dir.path().join("daemon_data.json")),
+            15,
+        ));
+        let send_req = |req: Value| -> Value {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let st = state.clone();
+            let handle = std::thread::spawn(move || {
+                let _ = handle_client(server, st);
+            });
+            client.write_all(format!("{}\n", req).as_bytes()).unwrap();
+            let mut reader = BufReader::new(client);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            handle.join().unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        let initial = send_req(json!({ "action": "events" }));
+        assert_eq!(initial["ok"], true);
+        assert_eq!(initial["cursor"], 0);
+        assert_eq!(initial["events"].as_array().unwrap().len(), 0);
+
+        state.record_event("status", json!({ "status": "unlocked" }));
+        state.record_event(
+            "approval",
+            json!({ "prompt_id": 7, "view": "ssh-approval" }),
+        );
+
+        let pending = send_req(json!({ "action": "events", "since": 0 }));
+        assert_eq!(pending["cursor"], 2);
+        let events = pending["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["id"], 1);
+        assert_eq!(events[0]["kind"], "status");
+        assert_eq!(events[1]["id"], 2);
+        assert_eq!(events[1]["kind"], "approval");
+        assert_eq!(events[1]["prompt_id"], 7);
+
+        let empty = send_req(json!({ "action": "events", "since": 2 }));
+        assert_eq!(empty["events"].as_array().unwrap().len(), 0);
     }
 
     #[test]
@@ -1847,9 +1950,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let runtime = tempdir().unwrap();
         let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
         std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
 
         let state = Arc::new(DaemonState::new(
             StorageManager::new(dir.path().join("daemon_data.json")),
@@ -1877,7 +1980,7 @@ mod tests {
         assert_eq!(res["running"], false);
         assert_eq!(
             res["socket"],
-            json!(runtime.path().join("omawarden-ssh-agent.sock"))
+            json!(runtime.path().join("kurama-ssh-agent.sock"))
         );
 
         // Enabled: applying binds the socket.
@@ -1934,7 +2037,7 @@ mod tests {
 
         for (k, v) in [
             ("XDG_RUNTIME_DIR", old_runtime),
-            ("OMAWARDEN_CONFIG_DIR", old_config),
+            ("KURAMA_CONFIG_DIR", old_config),
         ] {
             match v {
                 Some(v) => std::env::set_var(k, v),
@@ -2117,8 +2220,8 @@ mod tests {
     fn test_suspend_drift_wipes_retained_key_while_soft_locked() {
         let _lock = crate::env_lock();
         let dir = tempdir().unwrap();
-        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
         let state = DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
         // The daemon caches the setting at startup; tests mirror the
         // set_quick_unlock IPC instead of rewriting config.json (which the
@@ -2144,8 +2247,8 @@ mod tests {
         assert!(!state.vault_mgr.is_unlocked());
 
         old_config.map_or_else(
-            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+            || std::env::remove_var("KURAMA_CONFIG_DIR"),
+            |v| std::env::set_var("KURAMA_CONFIG_DIR", v),
         );
     }
 
@@ -2163,8 +2266,8 @@ mod tests {
     fn test_session_anchor_ceiling_wipes_retained_key_while_soft_locked() {
         let _lock = crate::env_lock();
         let dir = tempdir().unwrap();
-        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
         let state = DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
         state.set_quick_unlock_enabled(true);
 
@@ -2189,8 +2292,8 @@ mod tests {
         );
 
         old_config.map_or_else(
-            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+            || std::env::remove_var("KURAMA_CONFIG_DIR"),
+            |v| std::env::set_var("KURAMA_CONFIG_DIR", v),
         );
     }
 
@@ -2200,9 +2303,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let runtime = tempdir().unwrap();
         let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
         std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
 
         let _vault = crate::vault::tests::seeded_vault(dir.path(), "master-pw");
         let mut daemon_state =
@@ -2242,8 +2345,8 @@ mod tests {
             |v| std::env::set_var("XDG_RUNTIME_DIR", v),
         );
         old_config.map_or_else(
-            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+            || std::env::remove_var("KURAMA_CONFIG_DIR"),
+            |v| std::env::set_var("KURAMA_CONFIG_DIR", v),
         );
     }
 
@@ -2286,8 +2389,8 @@ mod tests {
         // slot for any later restore to pick up.
         let _lock = crate::env_lock();
         let dir = tempdir().unwrap();
-        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
 
         let mut cfg = crate::config::ConfigManager::default().load();
         cfg.quick_unlock = false;
@@ -2321,8 +2424,8 @@ mod tests {
         );
 
         old_config.map_or_else(
-            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+            || std::env::remove_var("KURAMA_CONFIG_DIR"),
+            |v| std::env::set_var("KURAMA_CONFIG_DIR", v),
         );
     }
 
@@ -2334,8 +2437,8 @@ mod tests {
         // could never be spent and would just sit in memory.
         let _lock = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
-        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
 
         let mut daemon_state =
             DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
@@ -2361,8 +2464,8 @@ mod tests {
         assert!(!state.quick_unlock_ready());
 
         old_config.map_or_else(
-            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+            || std::env::remove_var("KURAMA_CONFIG_DIR"),
+            |v| std::env::set_var("KURAMA_CONFIG_DIR", v),
         );
     }
 
@@ -2370,8 +2473,8 @@ mod tests {
     fn test_sleep_signal_hard_locks_and_screen_signal_soft_locks() {
         let _lock = crate::env_lock();
         let dir = tempdir().unwrap();
-        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
         let mut daemon_state =
             DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
         // Retention requires a usable feature, not just the setting: pin the
@@ -2404,8 +2507,8 @@ mod tests {
         );
 
         old_config.map_or_else(
-            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+            || std::env::remove_var("KURAMA_CONFIG_DIR"),
+            |v| std::env::set_var("KURAMA_CONFIG_DIR", v),
         );
     }
 
@@ -2414,9 +2517,9 @@ mod tests {
         let _lock = crate::env_lock();
         let dir = tempdir().unwrap();
         let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
         std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("runtime"));
-        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
         let state = Arc::new(DaemonState::new(
             StorageManager::new(dir.path().join("daemon_data.json")),
             15,
@@ -2458,8 +2561,8 @@ mod tests {
             |v| std::env::set_var("XDG_RUNTIME_DIR", v),
         );
         old_config.map_or_else(
-            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+            || std::env::remove_var("KURAMA_CONFIG_DIR"),
+            |v| std::env::set_var("KURAMA_CONFIG_DIR", v),
         );
     }
 
@@ -2468,9 +2571,9 @@ mod tests {
         let _lock = crate::env_lock();
         let dir = tempdir().unwrap();
         let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
         std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("runtime"));
-        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
         let mut daemon_state =
             DaemonState::new(StorageManager::new(dir.path().join("data.json")), 15);
         daemon_state.polkit_binary = std::path::PathBuf::new();
@@ -2526,8 +2629,8 @@ mod tests {
             |v| std::env::set_var("XDG_RUNTIME_DIR", v),
         );
         old_config.map_or_else(
-            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+            || std::env::remove_var("KURAMA_CONFIG_DIR"),
+            |v| std::env::set_var("KURAMA_CONFIG_DIR", v),
         );
     }
 
@@ -2537,9 +2640,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let runtime = tempdir().unwrap();
         let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
         std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
 
         // A real login on disk so a successful polkit check can restore.
         let _vault = crate::vault::tests::seeded_vault(dir.path(), "master-pw");
@@ -2634,8 +2737,8 @@ exit $(cat {})
             |v| std::env::set_var("XDG_RUNTIME_DIR", v),
         );
         old_config.map_or_else(
-            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+            || std::env::remove_var("KURAMA_CONFIG_DIR"),
+            |v| std::env::set_var("KURAMA_CONFIG_DIR", v),
         );
     }
 
@@ -2649,9 +2752,9 @@ exit $(cat {})
         let dir = tempdir().unwrap();
         let runtime = tempdir().unwrap();
         let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
         std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
 
         let state = Arc::new(DaemonState::new(
             StorageManager::new(dir.path().join("daemon_data.json")),
@@ -2721,8 +2824,8 @@ exit $(cat {})
             |v| std::env::set_var("XDG_RUNTIME_DIR", v),
         );
         old_config.map_or_else(
-            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+            || std::env::remove_var("KURAMA_CONFIG_DIR"),
+            |v| std::env::set_var("KURAMA_CONFIG_DIR", v),
         );
     }
 
@@ -2730,8 +2833,8 @@ exit $(cat {})
     fn test_poisoned_busy_mutex_does_not_jam_quick_unlock() {
         let _lock = crate::env_lock();
         let dir = tempdir().unwrap();
-        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
 
         // A real login on disk so the post-polkit restore can succeed.
         let _vault = crate::vault::tests::seeded_vault(dir.path(), "master-pw");
@@ -2771,8 +2874,8 @@ exit $(cat {})
         );
 
         old_config.map_or_else(
-            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+            || std::env::remove_var("KURAMA_CONFIG_DIR"),
+            |v| std::env::set_var("KURAMA_CONFIG_DIR", v),
         );
     }
 
@@ -2780,8 +2883,8 @@ exit $(cat {})
     fn test_ping_advertises_quick_unlock_only_when_ready() {
         let _lock = crate::env_lock();
         let dir = tempdir().unwrap();
-        let old_config = std::env::var_os("OMAWARDEN_CONFIG_DIR");
-        std::env::set_var("OMAWARDEN_CONFIG_DIR", dir.path());
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
         let mut daemon_state =
             DaemonState::new(StorageManager::new(dir.path().join("daemon_data.json")), 15);
         // No polkit binary resolvable at startup: never ready, even with the
@@ -2854,8 +2957,8 @@ exit $(cat {})
             |v| std::env::set_var("XDG_RUNTIME_DIR", v),
         );
         old_config.map_or_else(
-            || std::env::remove_var("OMAWARDEN_CONFIG_DIR"),
-            |v| std::env::set_var("OMAWARDEN_CONFIG_DIR", v),
+            || std::env::remove_var("KURAMA_CONFIG_DIR"),
+            |v| std::env::set_var("KURAMA_CONFIG_DIR", v),
         );
     }
 
@@ -2896,7 +2999,7 @@ exit $(cat {})
         let symlink_dir = dir.path().join("symlink_runtime");
         std::os::unix::fs::symlink(&real_dir, &symlink_dir).unwrap();
 
-        let socket_in_symlink_parent = symlink_dir.join("omawarden.sock");
+        let socket_in_symlink_parent = symlink_dir.join("kurama.sock");
         let err = validate_socket_path(&socket_in_symlink_parent);
         assert!(err.is_err());
         assert_eq!(
@@ -3027,7 +3130,7 @@ exit $(cat {})
         let res_valid = send_req(json!({
             "action": "sync",
             "client": {
-                "name": "Omawarden_Desktop",
+                "name": "Kurama_Desktop",
                 "version": "0.11.2"
             }
         }));

@@ -97,14 +97,14 @@ pub fn is_safe_path_component(s: &str) -> bool {
 pub fn get_preview_dir(item_id: Option<&str>) -> PathBuf {
     let base = if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
         PathBuf::from(runtime_dir)
-            .join("omawarden")
+            .join("kurama")
             .join("attachments")
     } else {
         #[cfg(unix)]
         let uid = unsafe { libc::getuid() };
         #[cfg(not(unix))]
         let uid = 1000;
-        PathBuf::from(format!("/tmp/omawarden-{}/attachments", uid))
+        PathBuf::from(format!("/tmp/kurama-{}/attachments", uid))
     };
 
     match item_id {
@@ -122,7 +122,7 @@ pub fn clear_preview_attachments(item_id: Option<&str>) {
     if let Some(id) = item_id {
         if !is_safe_path_component(id) {
             crate::log_warn!(
-                "omawarden:attachment",
+                "kurama:attachment",
                 "Refusing preview cleanup for unsafe item id"
             );
             return;
@@ -133,11 +133,11 @@ pub fn clear_preview_attachments(item_id: Option<&str>) {
     if dir.exists() {
         let _ = fs::remove_dir_all(&dir);
     }
-    // Also clean up legacy /tmp/omawarden/attachments if present
+    // Also clean up legacy /tmp/kurama/attachments if present
     let legacy_dir = if let Some(id) = item_id {
-        PathBuf::from("/tmp/omawarden/attachments").join(id)
+        PathBuf::from("/tmp/kurama/attachments").join(id)
     } else {
-        PathBuf::from("/tmp/omawarden/attachments")
+        PathBuf::from("/tmp/kurama/attachments")
     };
     if legacy_dir.exists() {
         let _ = fs::remove_dir_all(&legacy_dir);
@@ -318,7 +318,7 @@ pub fn get_attachment(
                 );
             } else {
                 crate::log_warn!(
-                    "omawarden:attachment",
+                    "kurama:attachment",
                     "Cached attachment {:?} is dirty or un-decrypted ciphertext. Purging and re-downloading.",
                     dest_path
                 );
@@ -340,7 +340,7 @@ pub fn get_attachment(
                 );
             } else {
                 crate::log_warn!(
-                    "omawarden:attachment",
+                    "kurama:attachment",
                     "Cached attachment {:?} is dirty or un-decrypted ciphertext. Purging and re-downloading.",
                     dest_path
                 );
@@ -374,7 +374,7 @@ pub fn get_attachment(
         Ok(c) => c,
         Err(e) => {
             let err_msg = format!("Failed to build HTTP client for attachment download: {}", e);
-            crate::log_error!("omawarden:attachment", "{}", err_msg);
+            crate::log_error!("kurama:attachment", "{}", err_msg);
             return AttachmentResponse {
                 ok: false,
                 error: Some(err_msg),
@@ -400,7 +400,7 @@ pub fn get_attachment(
             || r.status() == reqwest::StatusCode::FORBIDDEN
         {
             crate::log_warn!(
-                "omawarden:attachment",
+                "kurama:attachment",
                 "HTTP {} for item {} attachment {}. Attempting token refresh.",
                 r.status(),
                 item_id,
@@ -414,7 +414,7 @@ pub fn get_attachment(
             ) {
                 active_token = new_token;
                 crate::log_info!(
-                    "omawarden:attachment",
+                    "kurama:attachment",
                     "Token refresh successful, retrying download."
                 );
 
@@ -423,7 +423,7 @@ pub fn get_attachment(
                     .header("Authorization", format!("Bearer {}", active_token))
                     .send();
             } else {
-                crate::log_error!("omawarden:attachment", "Token renewal failed.");
+                crate::log_error!("kurama:attachment", "Token renewal failed.");
             }
         }
     }
@@ -439,7 +439,7 @@ pub fn get_attachment(
                 Ok(b) => b,
                 Err(e) => {
                     let err_msg = format!("Failed to read attachment response bytes: {}", e);
-                    crate::log_error!("omawarden:attachment", "{}", err_msg);
+                    crate::log_error!("kurama:attachment", "{}", err_msg);
                     return AttachmentResponse {
                         ok: false,
                         error: Some(err_msg),
@@ -499,7 +499,7 @@ pub fn get_attachment(
                         Err(e) => {
                             let err_msg =
                                 format!("Failed to connect to attachment storage URL: {}", e);
-                            crate::log_error!("omawarden:attachment", "{}", err_msg);
+                            crate::log_error!("kurama:attachment", "{}", err_msg);
                             return AttachmentResponse {
                                 ok: false,
                                 error: Some(err_msg),
@@ -519,7 +519,7 @@ pub fn get_attachment(
                             "Failed to fetch attachment from storage (HTTP {})",
                             blob_resp.status()
                         );
-                        crate::log_error!("omawarden:attachment", "{}", err_msg);
+                        crate::log_error!("kurama:attachment", "{}", err_msg);
                         return AttachmentResponse {
                             ok: false,
                             error: Some(err_msg),
@@ -543,7 +543,7 @@ pub fn get_attachment(
                         Err(e) => {
                             let err_msg =
                                 format!("Failed to read attachment bytes from storage: {}", e);
-                            crate::log_error!("omawarden:attachment", "{}", err_msg);
+                            crate::log_error!("kurama:attachment", "{}", err_msg);
                             return AttachmentResponse {
                                 ok: false,
                                 error: Some(err_msg),
@@ -566,7 +566,7 @@ pub fn get_attachment(
                                 raw_bytes.len(),
                                 expected_len
                             );
-                            crate::log_error!("omawarden:attachment", "{}", err_msg);
+                            crate::log_error!("kurama:attachment", "{}", err_msg);
                             return AttachmentResponse {
                                 ok: false,
                                 error: Some(err_msg),
@@ -589,7 +589,7 @@ pub fn get_attachment(
                                 raw_bytes.len(),
                                 exp
                             );
-                            crate::log_error!("omawarden:attachment", "{}", err_msg);
+                            crate::log_error!("kurama:attachment", "{}", err_msg);
                             return AttachmentResponse {
                                 ok: false,
                                 error: Some(err_msg),
@@ -617,7 +617,7 @@ pub fn get_attachment(
                             body_bytes.len(),
                             expected_len
                         );
-                        crate::log_error!("omawarden:attachment", "{}", err_msg);
+                        crate::log_error!("kurama:attachment", "{}", err_msg);
                         return AttachmentResponse {
                             ok: false,
                             error: Some(err_msg),
@@ -639,7 +639,7 @@ pub fn get_attachment(
                             body_bytes.len(),
                             exp
                         );
-                        crate::log_error!("omawarden:attachment", "{}", err_msg);
+                        crate::log_error!("kurama:attachment", "{}", err_msg);
                         return AttachmentResponse {
                             ok: false,
                             error: Some(err_msg),
@@ -659,7 +659,7 @@ pub fn get_attachment(
         }
         Ok(r) => {
             let err_msg = format!("Server returned HTTP {}", r.status());
-            crate::log_error!("omawarden:attachment", "{}", err_msg);
+            crate::log_error!("kurama:attachment", "{}", err_msg);
             return AttachmentResponse {
                 ok: false,
                 error: Some(err_msg),
@@ -674,7 +674,7 @@ pub fn get_attachment(
         }
         Err(e) => {
             let err_msg = format!("Network download failed: {}", e);
-            crate::log_error!("omawarden:attachment", "{}", err_msg);
+            crate::log_error!("kurama:attachment", "{}", err_msg);
             return AttachmentResponse {
                 ok: false,
                 error: Some(err_msg),
@@ -1401,8 +1401,8 @@ mod tests {
         let data_json = data_dir.path().join("data.json");
         std::fs::write(&data_json, format!(r#"{{"server_url":"{}"}}"#, server_url)).unwrap();
 
-        let old_data_dir = std::env::var("OMAWARDEN_DATA_DIR").ok();
-        std::env::set_var("OMAWARDEN_DATA_DIR", data_dir.path());
+        let old_data_dir = std::env::var("KURAMA_DATA_DIR").ok();
+        std::env::set_var("KURAMA_DATA_DIR", data_dir.path());
 
         let res = get_attachment(
             "item_large",
@@ -1417,9 +1417,9 @@ mod tests {
         );
 
         if let Some(old) = old_data_dir {
-            std::env::set_var("OMAWARDEN_DATA_DIR", old);
+            std::env::set_var("KURAMA_DATA_DIR", old);
         } else {
-            std::env::remove_var("OMAWARDEN_DATA_DIR");
+            std::env::remove_var("KURAMA_DATA_DIR");
         }
 
         assert!(!res.ok);
@@ -1468,7 +1468,7 @@ mod tests {
 
         // Set up temporary config directory with 1MB max_attachment_size_mb
         let config_dir = tempfile::tempdir().unwrap();
-        let cfg_dir = config_dir.path().join("omawarden");
+        let cfg_dir = config_dir.path().join("kurama");
         std::fs::create_dir_all(&cfg_dir).unwrap();
         let config_json = cfg_dir.join("config.json");
         std::fs::write(&config_json, r#"{"max_attachment_size_mb": 1}"#).unwrap();
@@ -1479,9 +1479,9 @@ mod tests {
         std::fs::write(&data_json, format!(r#"{{"server_url":"{}"}}"#, server_url)).unwrap();
 
         let old_config_dir = std::env::var("XDG_CONFIG_HOME").ok();
-        let old_data_dir = std::env::var("OMAWARDEN_DATA_DIR").ok();
+        let old_data_dir = std::env::var("KURAMA_DATA_DIR").ok();
         std::env::set_var("XDG_CONFIG_HOME", config_dir.path());
-        std::env::set_var("OMAWARDEN_DATA_DIR", data_dir.path());
+        std::env::set_var("KURAMA_DATA_DIR", data_dir.path());
 
         let res = get_attachment(
             "item_stream",
@@ -1501,9 +1501,9 @@ mod tests {
             std::env::remove_var("XDG_CONFIG_HOME");
         }
         if let Some(old) = old_data_dir {
-            std::env::set_var("OMAWARDEN_DATA_DIR", old);
+            std::env::set_var("KURAMA_DATA_DIR", old);
         } else {
-            std::env::remove_var("OMAWARDEN_DATA_DIR");
+            std::env::remove_var("KURAMA_DATA_DIR");
         }
 
         assert!(!res.ok);

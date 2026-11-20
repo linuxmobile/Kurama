@@ -317,7 +317,7 @@ pub fn perform_fido2_assertion(
         cd_hash_b64, challenge_data.rp_id, cred_id_b64
     );
 
-    crate::log_info!("omawarden:auth", "Waiting for security key touch...");
+    crate::log_info!("kurama:auth", "Waiting for security key touch...");
     let output = run_fido2_assert(device_path, &stdin_payload, true)?;
 
     if !output.status.success() {
@@ -326,7 +326,7 @@ pub fn perform_fido2_assertion(
     }
 
     crate::log_info!(
-        "omawarden:auth",
+        "kurama:auth",
         "Security key verified. Authenticating with server..."
     );
 

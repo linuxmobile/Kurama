@@ -433,7 +433,7 @@ impl VaultManager {
         self.purge_decrypted_state();
         if retained {
             crate::log_info!(
-                "omawarden:vault",
+                "kurama:vault",
                 "Soft-locked vault; user key retained for quick unlock."
             );
         }
@@ -524,7 +524,7 @@ impl VaultManager {
                     validated_by_private_key = true;
                     if parsed.decrypt(&key).is_err() {
                         crate::log_warn!(
-                            "omawarden:vault",
+                            "kurama:vault",
                             "Retained key fails to decrypt the private key; wiping quick unlock"
                         );
                         self.wipe_quick_unlock();
@@ -578,7 +578,7 @@ impl VaultManager {
             }
             if candidates > 0 && !decrypted_any {
                 crate::log_warn!(
-                    "omawarden:vault",
+                    "kurama:vault",
                     "Retained key fails to decrypt any personal cipher; wiping quick unlock"
                 );
                 self.wipe_quick_unlock();
@@ -605,7 +605,7 @@ impl VaultManager {
                 };
                 if !matches {
                     crate::log_warn!(
-                        "omawarden:vault",
+                        "kurama:vault",
                         "Retained key cannot be verified against this vault; wiping quick unlock"
                     );
                     self.wipe_quick_unlock();
@@ -626,7 +626,7 @@ impl VaultManager {
             != epoch_before
         {
             crate::log_warn!(
-                "omawarden:vault",
+                "kurama:vault",
                 "Vault was locked during quick unlock; aborting restore"
             );
             return Err("The vault was locked during unlock. Try again.".to_string());
@@ -643,7 +643,7 @@ impl VaultManager {
                 != epoch_before
             {
                 crate::log_warn!(
-                    "omawarden:vault",
+                    "kurama:vault",
                     "Vault was locked during quick unlock; aborting restore"
                 );
                 return Err("The vault was locked during unlock. Try again.".to_string());
@@ -667,7 +667,7 @@ impl VaultManager {
         }
 
         crate::log_info!(
-            "omawarden:vault",
+            "kurama:vault",
             "Quick-unlocked vault; {} items restored.",
             count
         );
@@ -678,7 +678,7 @@ impl VaultManager {
         let fresh_storage = self.storage_mgr.load();
         if fresh_storage.enc_user_key.is_none() {
             crate::log_error!(
-                "omawarden:vault",
+                "kurama:vault",
                 "Account not logged in or missing encryption keys."
             );
             return Err("Account not logged in or missing encryption keys.".to_string());
@@ -688,7 +688,7 @@ impl VaultManager {
             .storage_mgr
             .unlock_user_key(password, &fresh_storage)
             .map_err(|e| {
-                crate::log_warn!("omawarden:vault", "Unlock user key failed: {:?}", e);
+                crate::log_warn!("kurama:vault", "Unlock user key failed: {:?}", e);
                 format!("Unlock failed: {:?}", e)
             })?;
 
@@ -727,7 +727,7 @@ impl VaultManager {
         }
 
         crate::log_info!(
-            "omawarden:vault",
+            "kurama:vault",
             "Decrypted and cached {} items in memory.",
             count
         );
@@ -743,7 +743,7 @@ impl VaultManager {
         client_context: Option<&ClientContext>,
     ) -> Result<usize, String> {
         crate::log_info!(
-            "omawarden:vault",
+            "kurama:vault",
             "Starting vault synchronization with server..."
         );
         let storage = self.storage_mgr.load();
@@ -768,7 +768,7 @@ impl VaultManager {
             Some(tok) if !crate::auth::is_jwt_expired(&tok) => tok,
             Some(_) => {
                 crate::log_info!(
-                    "omawarden:vault",
+                    "kurama:vault",
                     "Access token is expired, attempting renewal..."
                 );
                 self.renew_session_with_client(client_context)?
@@ -787,7 +787,7 @@ impl VaultManager {
                 if has_refresh || has_api_secret {
                     self.renew_session_with_client(client_context)?
                 } else {
-                    crate::log_error!("omawarden:vault", "Session token missing. Please log in.");
+                    crate::log_error!("kurama:vault", "Session token missing. Please log in.");
                     return Err("Session token missing. Please log in.".to_string());
                 }
             }
@@ -802,37 +802,29 @@ impl VaultManager {
                     || code == reqwest::StatusCode::FORBIDDEN =>
             {
                 crate::log_warn!(
-                    "omawarden:vault",
+                    "kurama:vault",
                     "HTTP {} on sync. Attempting session renewal...",
                     code
                 );
                 let renewed_token = self.renew_session_with_client(client_context)?;
                 client.sync_vault(&renewed_token).map_err(|e| {
-                    crate::log_error!(
-                        "omawarden:vault",
-                        "Sync failed after token renewal: {:?}",
-                        e
-                    );
+                    crate::log_error!("kurama:vault", "Sync failed after token renewal: {:?}", e);
                     format!("Sync failed: {:?}", e)
                 })?
             }
             Err(ApiError::Http(ref msg)) if msg.contains("401") || msg.contains("403") => {
                 crate::log_warn!(
-                    "omawarden:vault",
+                    "kurama:vault",
                     "HTTP 401/403 on sync. Attempting session renewal..."
                 );
                 let renewed_token = self.renew_session_with_client(client_context)?;
                 client.sync_vault(&renewed_token).map_err(|e| {
-                    crate::log_error!(
-                        "omawarden:vault",
-                        "Sync failed after token renewal: {:?}",
-                        e
-                    );
+                    crate::log_error!("kurama:vault", "Sync failed after token renewal: {:?}", e);
                     format!("Sync failed: {:?}", e)
                 })?
             }
             Err(e) => {
-                crate::log_error!("omawarden:vault", "Sync failed: {:?}", e);
+                crate::log_error!("kurama:vault", "Sync failed: {:?}", e);
                 return Err(format!("Sync failed: {:?}", e));
             }
         };
@@ -873,7 +865,7 @@ impl VaultManager {
         }
 
         crate::log_info!(
-            "omawarden:vault",
+            "kurama:vault",
             "Vault sync complete. {} ciphers, {} folders saved.",
             count,
             self.storage.read().map(|s| s.folders.len()).unwrap_or(0)
@@ -915,18 +907,18 @@ impl VaultManager {
         if let Some(ref ref_tok) = refresh_token {
             had_credentials = true;
             crate::log_info!(
-                "omawarden:vault",
+                "kurama:vault",
                 "Attempting session renewal via refresh token..."
             );
             match client.refresh_token_grant(ref_tok) {
                 Ok(tok_resp) => {
-                    crate::log_info!("omawarden:vault", "Token refresh grant successful.");
+                    crate::log_info!("kurama:vault", "Token refresh grant successful.");
                     self.persist_renewed_tokens(&tok_resp);
                     return Ok(tok_resp.access_token);
                 }
                 Err(ApiError::AuthFailed(msg)) => {
                     crate::log_warn!(
-                        "omawarden:vault",
+                        "kurama:vault",
                         "Refresh token grant rejected (auth failed: {}). Falling back to API credentials...",
                         msg
                     );
@@ -937,7 +929,7 @@ impl VaultManager {
                 | Err(ApiError::Http(msg))
                 | Err(ApiError::HttpStatus(_, msg)) => {
                     crate::log_warn!(
-                        "omawarden:vault",
+                        "kurama:vault",
                         "Refresh token grant encountered network or server error: {}. Falling back...",
                         msg
                     );
@@ -945,7 +937,7 @@ impl VaultManager {
                 }
                 Err(e) => {
                     crate::log_warn!(
-                        "omawarden:vault",
+                        "kurama:vault",
                         "Refresh token grant failed: {:?}. Falling back...",
                         e
                     );
@@ -959,13 +951,13 @@ impl VaultManager {
             if let Some(sec) = self.keyring_mgr.get_api_secret(s_url, cid) {
                 had_credentials = true;
                 crate::log_info!(
-                    "omawarden:vault",
+                    "kurama:vault",
                     "Attempting silent re-authentication via API key secret..."
                 );
                 match client.login_apikey(cid, &sec) {
                     Ok(tok_resp) => {
                         crate::log_info!(
-                            "omawarden:vault",
+                            "kurama:vault",
                             "Silent re-authentication via API key successful."
                         );
                         self.persist_renewed_tokens(&tok_resp);
@@ -973,7 +965,7 @@ impl VaultManager {
                     }
                     Err(ApiError::AuthFailed(msg)) => {
                         crate::log_error!(
-                            "omawarden:vault",
+                            "kurama:vault",
                             "API key silent re-auth rejected (auth failed: {})",
                             msg
                         );
@@ -984,7 +976,7 @@ impl VaultManager {
                     | Err(ApiError::Http(msg))
                     | Err(ApiError::HttpStatus(_, msg)) => {
                         crate::log_error!(
-                            "omawarden:vault",
+                            "kurama:vault",
                             "API key silent re-auth encountered network or server error: {}",
                             msg
                         );
@@ -994,11 +986,7 @@ impl VaultManager {
                         ));
                     }
                     Err(e) => {
-                        crate::log_error!(
-                            "omawarden:vault",
-                            "API key silent re-auth failed: {:?}",
-                            e
-                        );
+                        crate::log_error!("kurama:vault", "API key silent re-auth failed: {:?}", e);
                         last_error = Some(format!("API key login failed: {:?}", e));
                     }
                 }
@@ -1052,7 +1040,7 @@ impl VaultManager {
         }
 
         crate::log_error!(
-            "omawarden:vault",
+            "kurama:vault",
             "Keyring not available or failed to store renewed tokens. Locking session."
         );
         self.purge_credentials_and_lock();
@@ -1270,7 +1258,7 @@ impl VaultManager {
             Some(tok) if !crate::auth::is_jwt_expired(&tok) => tok,
             Some(_) => {
                 crate::log_info!(
-                    "omawarden:vault",
+                    "kurama:vault",
                     "Access token is expired for create_ssh_key, attempting renewal..."
                 );
                 self.renew_session_with_client(client_context)?
@@ -1337,7 +1325,7 @@ impl VaultManager {
                     || code == reqwest::StatusCode::FORBIDDEN =>
             {
                 crate::log_warn!(
-                    "omawarden:vault",
+                    "kurama:vault",
                     "HTTP {} creating SSH key. Attempting session renewal...",
                     code
                 );
@@ -1348,7 +1336,7 @@ impl VaultManager {
             }
             Err(ApiError::Http(ref msg)) if msg.contains("401") || msg.contains("403") => {
                 crate::log_warn!(
-                    "omawarden:vault",
+                    "kurama:vault",
                     "HTTP 401/403 creating SSH key. Attempting session renewal..."
                 );
                 let renewed = self.renew_session_with_client(client_context)?;
@@ -1384,7 +1372,7 @@ impl VaultManager {
         }
 
         crate::log_info!(
-            "omawarden:vault",
+            "kurama:vault",
             "Successfully created and stored SSH key '{}' ({})",
             decrypted_item.name,
             decrypted_item.id
@@ -2697,7 +2685,7 @@ case "$cmd" in
         fi
         ;;
     clear)
-        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+        if [ -z "$key" ] || [ "$key" = "__service=kurama" ]; then
             rm -f "${{STORE_DIR}}"/*
         else
             rm -f "${{STORE_DIR}}/${{key}}"*
@@ -2842,7 +2830,7 @@ case "$cmd" in
         fi
         ;;
     clear)
-        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+        if [ -z "$key" ] || [ "$key" = "__service=kurama" ]; then
             rm -f "${{STORE_DIR}}"/*
         else
             rm -f "${{STORE_DIR}}/${{key}}"*
@@ -2966,7 +2954,7 @@ case "$cmd" in
         fi
         ;;
     clear)
-        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+        if [ -z "$key" ] || [ "$key" = "__service=kurama" ]; then
             rm -f "${{STORE_DIR}}"/*
         else
             rm -f "${{STORE_DIR}}/${{key}}"*
@@ -3093,7 +3081,7 @@ case "$cmd" in
         fi
         ;;
     clear)
-        if [ -z "$key" ] || [ "$key" = "__service=omarchy-bitwarden" ]; then
+        if [ -z "$key" ] || [ "$key" = "__service=kurama" ]; then
             rm -f "${{STORE_DIR}}"/*
         else
             rm -f "${{STORE_DIR}}/${{key}}"*

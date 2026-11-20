@@ -1,6 +1,6 @@
-//! Bridge between Kurama and the existing omawarden backend.
+//! Bridge between Kurama and the `kurama-host` backend.
 //!
-//! All backend calls happen on a worker thread through omawarden's daemon IPC.
+//! All backend calls happen on a worker thread through the daemon IPC.
 //! The UI only ever sees the small, metadata-only structs below; vault secrets
 //! stay inside the daemon.
 
@@ -29,22 +29,44 @@ pub struct Snapshot {
     pub items_count: usize,
 }
 
+/// Non-secret status or error notice from the backend event log.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Notice {
+    pub kind: String,
+    pub message: String,
+    pub approval_id: Option<u64>,
+}
+
+/// Non-secret view of a pending SSH approval prompt.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Approval {
+    pub id: u64,
+    pub title: String,
+    pub action: String,
+    pub key_name: String,
+    pub client: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum Request {
     Refresh,
     Search(String),
     Sync,
     Lock,
+    Events { since: u64 },
+    Approvals,
 }
 
 #[derive(Debug)]
 pub enum Event {
     Snapshot(Snapshot),
     Items(Vec<VaultRow>),
+    Notices { cursor: u64, notices: Vec<Notice> },
+    Approvals(Vec<Approval>),
     Error(String),
 }
 
-const DAEMON_HINT: &str = "Omawarden daemon is not running. Start it with `omawarden daemon`.";
+const DAEMON_HINT: &str = "Kurama backend is not running. Start it with `kurama daemon`.";
 
 /// Perform a request on the worker thread and return the UI-facing result.
 pub fn perform(request: Request) -> Event {
@@ -73,11 +95,25 @@ pub fn perform(request: Request) -> Event {
             },
             Err(error) => Event::Error(error),
         },
+        Request::Events { since } => match call(json!({ "action": "events", "since": since })) {
+            Ok(response) => {
+                let (cursor, notices) = notices(&response);
+                Event::Notices { cursor, notices }
+            }
+            Err(_) => Event::Notices {
+                cursor: since,
+                notices: Vec::new(),
+            },
+        },
+        Request::Approvals => match call(json!({ "action": "ssh_agent_pending" })) {
+            Ok(response) => Event::Approvals(approvals(&response)),
+            Err(_) => Event::Approvals(Vec::new()),
+        },
     }
 }
 
 fn call(body: Value) -> Result<Value, String> {
-    let response = omawarden::daemon::send_daemon_request(&body).ok_or(DAEMON_HINT)?;
+    let response = kurama_host::daemon::send_daemon_request(&body).ok_or(DAEMON_HINT)?;
     if response.get("ok") == Some(&Value::Bool(false)) {
         let message = response
             .get("error")
@@ -90,7 +126,10 @@ fn call(body: Value) -> Result<Value, String> {
 
 fn snapshot() -> Result<Snapshot, String> {
     let status = call(json!({ "action": "status" }))?;
-    let state = status.get("status").and_then(Value::as_str).unwrap_or("unknown");
+    let state = status
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
     let items = if state == "unlocked" {
         rows(&call(json!({ "action": "list" }))?)?
     } else {
@@ -113,7 +152,7 @@ fn rows(response: &Value) -> Result<Vec<VaultRow>, String> {
     let Some(values) = response.as_array() else {
         return Err("Unexpected item list from backend".to_owned());
     };
-    Ok(values.iter().filter_map(|value| row(value)).collect())
+    Ok(values.iter().filter_map(row).collect())
 }
 
 fn row(value: &Value) -> Option<VaultRow> {
@@ -136,14 +175,84 @@ fn row(value: &Value) -> Option<VaultRow> {
         name: text(value, "name"),
         subtitle,
         type_name: text(value, "type_name"),
-        favorite: value.get("favorite").and_then(Value::as_bool).unwrap_or(false),
+        favorite: value
+            .get("favorite")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         folder: text(value, "folder_name"),
         updated: text(value, "updated_at"),
     })
 }
 
+fn notices(response: &Value) -> (u64, Vec<Notice>) {
+    let cursor = response.get("cursor").and_then(Value::as_u64).unwrap_or(0);
+    let values = response.get("events").and_then(Value::as_array);
+    let notices = values
+        .map(|values| values.iter().filter_map(notice).collect())
+        .unwrap_or_default();
+    (cursor, notices)
+}
+
+fn notice(event: &Value) -> Option<Notice> {
+    let kind = event.get("kind")?.as_str()?;
+    let (message, approval_id) = match kind {
+        "status" => match event.get("status").and_then(Value::as_str) {
+            Some("unlocked") => ("Vault unlocked", None),
+            Some("locked") => ("Vault locked", None),
+            _ => return None,
+        },
+        "sync" => match event.get("phase").and_then(Value::as_str) {
+            Some("started") => ("Syncing vault…", None),
+            Some("completed") => ("Vault synced", None),
+            _ => return None,
+        },
+        "error" => {
+            let detail = event.get("message").and_then(Value::as_str).unwrap_or("");
+            let message = match detail {
+                "Vault unlock failed" => "Vault unlock failed",
+                "Quick unlock failed" => "Quick unlock failed",
+                "Vault sync failed" => "Vault sync failed",
+                _ => "Backend request failed",
+            };
+            (message, None)
+        }
+        "approval" => (
+            "SSH approval requested",
+            event.get("prompt_id").and_then(Value::as_u64),
+        ),
+        _ => return None,
+    };
+    Some(Notice {
+        kind: kind.to_owned(),
+        message: message.to_owned(),
+        approval_id,
+    })
+}
+
+fn approvals(response: &Value) -> Vec<Approval> {
+    response
+        .get("prompts")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(approval).collect())
+        .unwrap_or_default()
+}
+
+fn approval(value: &Value) -> Option<Approval> {
+    Some(Approval {
+        id: value.get("id")?.as_u64()?,
+        title: text(value, "title"),
+        action: text(value, "action"),
+        key_name: text(value, "key_name"),
+        client: text(value, "client"),
+    })
+}
+
 fn text(value: &Value, key: &str) -> String {
-    value.get(key).and_then(Value::as_str).unwrap_or("").to_owned()
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -171,5 +280,49 @@ mod tests {
         let debug = format!("{:?}", items);
         assert!(!debug.contains("super-secret"));
         assert!(!debug.contains("private note"));
+    }
+
+    #[test]
+    fn events_keep_known_messages_only() {
+        let response = json!({
+            "ok": true,
+            "cursor": 6,
+            "events": [
+                { "id": 4, "kind": "status", "status": "unlocked" },
+                { "id": 5, "kind": "error", "message": "token=super-secret" },
+                { "id": 6, "kind": "approval", "prompt_id": 9, "view": "ssh-approval" },
+                { "id": 7, "kind": "unknown", "message": "ignored" }
+            ]
+        });
+        let (cursor, found) = notices(&response);
+        assert_eq!(cursor, 6);
+        assert_eq!(found.len(), 3);
+        assert_eq!(found[0].message, "Vault unlocked");
+        assert_eq!(found[1].message, "Backend request failed");
+        assert_eq!(found[2].approval_id, Some(9));
+        let debug = format!("{:?}", found);
+        assert!(!debug.contains("super-secret"));
+    }
+
+    #[test]
+    fn approvals_drop_command_and_fingerprint() {
+        let response = json!({
+            "ok": true,
+            "prompts": [{
+                "id": 7,
+                "title": "Sign a Git commit?",
+                "action": "SSH login as git@github.com",
+                "key_name": "Laptop key",
+                "client": "git (ssh)",
+                "command": "ssh git@github.com super-secret",
+                "fingerprint": "SHA256:secretfp"
+            }]
+        });
+        let found = approvals(&response);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].title, "Sign a Git commit?");
+        let debug = format!("{:?}", found);
+        assert!(!debug.contains("super-secret"));
+        assert!(!debug.contains("secretfp"));
     }
 }

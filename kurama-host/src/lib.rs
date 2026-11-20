@@ -1,6 +1,10 @@
+/// Name reported to Kurama for the backend component.
+pub const HOST_COMPONENT: &str = "kurama-host";
+
 pub mod api;
 pub mod attachment;
 pub mod auth;
+pub mod cli;
 pub mod clipboard;
 pub mod config;
 pub mod crypto;

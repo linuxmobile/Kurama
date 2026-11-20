@@ -65,19 +65,30 @@ pub fn migrate_storage_file(legacy_path: &Path, target_path: &Path) {
 }
 
 pub fn resolve_default_storage_path() -> PathBuf {
-    if let Ok(custom_dir) = env::var("OMAWARDEN_DATA_DIR") {
-        if !custom_dir.trim().is_empty() {
-            return PathBuf::from(custom_dir.trim()).join(DEFAULT_STORAGE_FILENAME);
-        }
-    }
-
     let xdg_data = env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
             PathBuf::from(home).join(".local").join("share")
         });
-    xdg_data.join("omawarden").join(DEFAULT_STORAGE_FILENAME)
+    let target = xdg_data.join("kurama").join(DEFAULT_STORAGE_FILENAME);
+    migrate_storage_file(
+        &xdg_data.join("omawarden").join(DEFAULT_STORAGE_FILENAME),
+        &target,
+    );
+
+    if let Ok(custom_dir) = env::var("OMAWARDEN_DATA_DIR") {
+        if !custom_dir.trim().is_empty() {
+            return PathBuf::from(custom_dir.trim()).join(DEFAULT_STORAGE_FILENAME);
+        }
+    }
+    if let Ok(custom_dir) = env::var("KURAMA_DATA_DIR") {
+        if !custom_dir.trim().is_empty() {
+            return PathBuf::from(custom_dir.trim()).join(DEFAULT_STORAGE_FILENAME);
+        }
+    }
+
+    target
 }
 
 impl Default for StorageManager {
@@ -251,8 +262,8 @@ mod tests {
         let storage_mgr = StorageManager::default();
         let path_str = storage_mgr.file_path.to_string_lossy();
         assert!(
-            path_str.ends_with("omawarden/data.json"),
-            "Storage file path must end with omawarden/data.json, was: {}",
+            path_str.ends_with("kurama/data.json"),
+            "Storage file path must end with kurama/data.json, was: {}",
             path_str
         );
     }

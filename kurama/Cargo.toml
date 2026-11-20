@@ -8,5 +8,5 @@ publish = false
 
 [dependencies]
 rune = { path = "../rune/crates/rune", default-features = true } # pinned checkout: 07f1ddde9a1d61def92e69f89beb28319a56bc17
-omawarden = { path = "../omawarden" }
+kurama-host = { path = "../kurama-host" }
 serde_json = "1"

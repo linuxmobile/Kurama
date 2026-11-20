@@ -2295,9 +2295,46 @@ dependencies = [
 name = "kurama"
 version = "0.1.0"
 dependencies = [
- "omawarden",
+ "kurama-host",
  "rune",
  "serde_json",
+]
+
+[[package]]
+name = "kurama-host"
+version = "0.11.0"
+dependencies = [
+ "aes 0.8.4",
+ "argon2",
+ "base32",
+ "base64 0.23.1",
+ "cbc 0.1.2",
+ "chrono",
+ "clap",
+ "hkdf 0.12.4",
+ "hmac 0.12.1",
+ "keyring",
+ "libc",
+ "pbkdf2",
+ "pkcs8 0.11.0",
+ "rand 0.8.8",
+ "rand_core 0.6.4",
+ "regex",
+ "reqwest",
+ "rpassword",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "signature",
+ "ssh-encoding",
+ "ssh-key",
+ "subtle",
+ "tokio",
+ "url",
+ "which",
+ "zeroize",
 ]
 
 [[package]]
@@ -3045,43 +3082,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "omawarden"
-version = "0.11.0"
-dependencies = [
- "aes 0.8.4",
- "argon2",
- "base32",
- "base64 0.23.1",
- "cbc 0.1.2",
- "chrono",
- "clap",
- "hkdf 0.12.4",
- "hmac 0.12.1",
- "keyring",
- "libc",
- "pbkdf2",
- "pkcs8 0.11.0",
- "rand 0.8.8",
- "rand_core 0.6.4",
- "regex",
- "reqwest",
- "rpassword",
- "rsa",
- "serde",
- "serde_json",
- "sha1",
- "sha2 0.10.9",
- "signature",
- "ssh-encoding",
- "ssh-key",
- "subtle",
- "tokio",
- "url",
- "which",
- "zeroize",
 ]
 
 [[package]]

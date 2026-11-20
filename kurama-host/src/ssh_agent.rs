@@ -1,6 +1,6 @@
 //! OpenSSH agent backed by the vault's SSH key items.
 //!
-//! The daemon listens on `$XDG_RUNTIME_DIR/omawarden-ssh-agent.sock` when
+//! The daemon listens on `$XDG_RUNTIME_DIR/kurama-ssh-agent.sock` when
 //! `ssh_agent_enabled` is set. Private keys are parsed only for the duration
 //! of a single signature. Signing asks for confirmation in the desktop app
 //! according to `ssh_agent_confirm`:
@@ -55,7 +55,7 @@ const UNLOCK_TIMEOUT: Duration = Duration::from_secs(60);
 const SSH_QUICK_UNLOCK_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub fn socket_path() -> PathBuf {
-    crate::daemon::get_runtime_dir().join("omawarden-ssh-agent.sock")
+    crate::daemon::get_runtime_dir().join("kurama-ssh-agent.sock")
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +335,7 @@ trait Host: Send + Sync + 'static {
         timeout: Duration,
         on_action: Box<dyn FnOnce(&str) + Send>,
     ) -> bool;
-    /// See [`summon_overlay`].
+    /// See [`summon_overlay`]. The daemon records an event for UI clients.
     fn summon_overlay(&self, payload: &serde_json::Value) -> bool;
     /// ADR-0025: attempt the polkit-backed quick unlock. False means the
     /// caller should fall back to the overlay summon.
@@ -381,6 +381,16 @@ impl Host for DaemonState {
         notify(title, body, actions, timeout, on_action)
     }
     fn summon_overlay(&self, payload: &serde_json::Value) -> bool {
+        if let Some(id) = payload.get("id").and_then(serde_json::Value::as_u64) {
+            let view = payload
+                .get("view")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("approval");
+            self.record_event(
+                "approval",
+                serde_json::json!({ "prompt_id": id, "view": view }),
+            );
+        }
         summon_overlay(payload)
     }
     fn try_quick_unlock(&self) -> bool {
@@ -403,7 +413,7 @@ pub fn apply(state: &Arc<DaemonState>) -> std::io::Result<bool> {
         // ends with the daemon.
         state.ssh_agent.running.store(false, Ordering::SeqCst);
         remove_socket();
-        crate::log_info!("omawarden:ssh-agent", "stopped");
+        crate::log_info!("kurama:ssh-agent", "stopped");
     }
     Ok(enabled)
 }
@@ -421,7 +431,7 @@ pub fn spawn(state: Arc<DaemonState>) -> std::io::Result<()> {
     }
     let listener = UnixListener::bind(&path)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    crate::log_info!("omawarden:ssh-agent", "listening on {}", path.display());
+    crate::log_info!("kurama:ssh-agent", "listening on {}", path.display());
     state.ssh_agent.running.store(true, Ordering::SeqCst);
     let host: Arc<dyn Host> = state;
     std::thread::spawn(move || {
@@ -446,11 +456,11 @@ fn accepted(host: &Arc<dyn Host>, stream: std::io::Result<UnixStream>) {
                     serve(&host, stream, peer)
                 });
                 if let Err(e) = served {
-                    crate::log_debug!("omawarden:ssh-agent", "client ended: {}", e);
+                    crate::log_debug!("kurama:ssh-agent", "client ended: {}", e);
                 }
             });
         }
-        Err(e) => crate::log_warn!("omawarden:ssh-agent", "accept failed: {}", e),
+        Err(e) => crate::log_warn!("kurama:ssh-agent", "accept failed: {}", e),
     }
 }
 
@@ -502,7 +512,7 @@ fn serve(host: &Arc<dyn Host>, mut stream: impl Read + Write, peer: Peer) -> std
                     send(&mut stream, SIGN_RESPONSE, &out)?;
                 }
                 Err(e) => {
-                    crate::log_info!("omawarden:ssh-agent", "signature refused: {}", e);
+                    crate::log_info!("kurama:ssh-agent", "signature refused: {}", e);
                     send(&mut stream, FAILURE, &[])?;
                 }
             },
@@ -2162,7 +2172,7 @@ mod tests {
         let _lock = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
         let _env = EnvVars::set(&[("XDG_RUNTIME_DIR", dir.path().as_os_str())]);
-        assert_eq!(socket_path(), dir.path().join("omawarden-ssh-agent.sock"));
+        assert_eq!(socket_path(), dir.path().join("kurama-ssh-agent.sock"));
     }
 
     #[test]
@@ -2713,7 +2723,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let bin = tempfile::tempdir().unwrap();
         let _env = EnvVars::set(&[
-            ("OMAWARDEN_CONFIG_DIR", dir.path().as_os_str()),
+            ("KURAMA_CONFIG_DIR", dir.path().as_os_str()),
             ("HOME", home.path().as_os_str()),
             ("PATH", path_with(bin.path()).as_os_str()),
         ]);
@@ -2739,6 +2749,16 @@ mod tests {
         host.record_activity();
         assert!(state.last_activity.lock().unwrap().elapsed() < Duration::from_secs(30));
         assert!(host.summon_overlay(&serde_json::json!({})));
+        assert!(host.summon_overlay(&serde_json::json!({
+            "view": "ssh-approval",
+            "id": 11
+        })));
+        {
+            let events = state.events.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["kind"], "approval");
+            assert_eq!(events[0]["prompt_id"], 11);
+        }
         assert!(Arc::ptr_eq(host.agent(), &state.ssh_agent));
     }
 
@@ -2769,7 +2789,7 @@ mod tests {
         let config = tempfile::tempdir().unwrap();
         let _env = EnvVars::set(&[
             ("XDG_RUNTIME_DIR", runtime.path().as_os_str()),
-            ("OMAWARDEN_CONFIG_DIR", config.path().as_os_str()),
+            ("KURAMA_CONFIG_DIR", config.path().as_os_str()),
         ]);
         let state = state_in(config.path());
         let enable = |on: bool| {
@@ -2824,7 +2844,7 @@ mod tests {
         let config = tempfile::tempdir().unwrap();
         let _env = EnvVars::set(&[
             ("XDG_RUNTIME_DIR", runtime.path().as_os_str()),
-            ("OMAWARDEN_CONFIG_DIR", config.path().as_os_str()),
+            ("KURAMA_CONFIG_DIR", config.path().as_os_str()),
         ]);
         let state = state_in(config.path());
         std::os::unix::fs::symlink("/tmp/elsewhere", socket_path()).unwrap();

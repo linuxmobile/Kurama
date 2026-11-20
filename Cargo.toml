@@ -3,7 +3,7 @@ resolver = "2"
 members = ["kurama"]
 # Both are independent packages with their own manifests/workspaces. Cargo must
 # resolve them on their own terms instead of inheriting this workspace's keys.
-exclude = ["rune", "omawarden"]
+exclude = ["rune", "kurama-host"]
 
 # Rune patches these crates; a dependency's [patch] table is not inherited by
 # the workspace that depends on it, so the app repeats them here. Keep them in

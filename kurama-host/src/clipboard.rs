@@ -82,7 +82,7 @@ impl ClipboardManager {
     pub fn copy_with_duration(&self, text: &str, sensitive: bool, timeout: Duration) -> bool {
         if !self.is_available() {
             crate::log_warn!(
-                "omawarden:clipboard",
+                "kurama:clipboard",
                 "Wayland clipboard utility '{}' not found in PATH. Please install 'wl-clipboard'.",
                 self.wl_copy_path
             );
@@ -103,7 +103,7 @@ impl ClipboardManager {
             Ok(c) => c,
             Err(e) => {
                 crate::log_error!(
-                    "omawarden:clipboard",
+                    "kurama:clipboard",
                     "Failed to spawn {}: {:?}",
                     self.wl_copy_path,
                     e
@@ -119,14 +119,14 @@ impl ClipboardManager {
         let success = match child.wait() {
             Ok(status) => status.success(),
             Err(e) => {
-                crate::log_error!("omawarden:clipboard", "wl-copy process error: {:?}", e);
+                crate::log_error!("kurama:clipboard", "wl-copy process error: {:?}", e);
                 false
             }
         };
 
         if success {
             crate::log_info!(
-                "omawarden:clipboard",
+                "kurama:clipboard",
                 "Copied content to clipboard (sensitive: {}, ttl: {:?})",
                 sensitive,
                 timeout
@@ -167,11 +167,11 @@ impl ClipboardManager {
         // 2. Detached worker process: ensures timeout survives CLI parent exit without /bin/sh
         if self.detach_worker && !cfg!(test) {
             if let Ok(current_exe) = std::env::current_exe() {
-                let is_omawarden = current_exe
+                let is_kurama = current_exe
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|name| name == "omawarden" || name.starts_with("omawarden-"));
-                if is_omawarden {
+                    .is_some_and(|name| name == "kurama" || name.starts_with("kurama-"));
+                if is_kurama {
                     let mut cmd = Command::new(&current_exe);
                     cmd.args([
                         "copy",
@@ -213,12 +213,12 @@ impl ClipboardManager {
             Ok(output) => {
                 let success = output.status.success();
                 if success {
-                    crate::log_info!("omawarden:clipboard", "Clipboard cleared.");
+                    crate::log_info!("kurama:clipboard", "Clipboard cleared.");
                 }
                 success
             }
             Err(e) => {
-                crate::log_error!("omawarden:clipboard", "Failed to clear clipboard: {:?}", e);
+                crate::log_error!("kurama:clipboard", "Failed to clear clipboard: {:?}", e);
                 false
             }
         }
