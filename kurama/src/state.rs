@@ -261,6 +261,8 @@ pub struct State {
     pub ssh_tools: Option<SshToolsDraft>,
     pub agent_running: bool,
     pub agent_socket: String,
+    pub syncing: bool,
+    pub sync_error: Option<String>,
     pub revealed: Option<String>,
     pub totp: Option<TotpMeta>,
     pub busy: bool,
@@ -308,6 +310,8 @@ impl Default for State {
             ssh_tools: None,
             agent_running: false,
             agent_socket: String::new(),
+            syncing: false,
+            sync_error: None,
             revealed: None,
             totp: None,
             busy: true,
@@ -401,6 +405,10 @@ impl State {
 }
 
 pub fn dispatch(state: &mut State, request: Request) {
+    if matches!(request, Request::Sync) {
+        state.syncing = true;
+        state.sync_error = None;
+    }
     if let Some(sender) = &state.requests {
         if sender.send(request).is_ok() {
             state.busy = true;
@@ -408,6 +416,7 @@ pub fn dispatch(state: &mut State, request: Request) {
             return;
         }
     }
+    state.syncing = false;
     state.busy = false;
     state.notice = Some("Backend worker is unavailable.".to_owned());
 }
@@ -1543,6 +1552,8 @@ fn visible_fingerprint(state: &State) -> u64 {
         .hash(&mut hasher);
     state.agent_running.hash(&mut hasher);
     state.agent_socket.hash(&mut hasher);
+    state.syncing.hash(&mut hasher);
+    state.sync_error.hash(&mut hasher);
     for send in &state.sends {
         send.id.hash(&mut hasher);
         send.name.hash(&mut hasher);
@@ -1650,46 +1661,58 @@ fn is_session_error(message: &str) -> bool {
         || lower.contains("403")
 }
 
+fn apply_snapshot(state: &mut State, snapshot: Snapshot) {
+    let changed_vault = (state.snapshot.status == "unlocked") != (snapshot.status == "unlocked");
+    let items = snapshot.items.clone();
+    state.snapshot = snapshot;
+    state.folders = folders_from(&items);
+    if changed_vault {
+        state.location = Location::Vault;
+        state.folder = None;
+        state.selected = None;
+        state.details = None;
+        state.edit = None;
+        state.create = None;
+        state.attachment_preview = None;
+        backend::clear_attachment_text();
+        clear_reveal(state);
+        state.query.clear();
+        state.password.replace_text("");
+    }
+    if state.location != Location::Trash {
+        state.rows = items;
+        state.bump_rows_version();
+    }
+    state.notice = None;
+    clear_reveal(state);
+    if state.selected.is_none() {
+        state.selected = state.rows.first().map(|item| item.id.clone());
+    }
+    request_details(state);
+    if state.snapshot.status == "unauthenticated" {
+        if state.auth.is_none() {
+            let server = state.snapshot.server.clone();
+            state.auth = Some(empty_auth_draft(&server));
+        }
+    } else {
+        state.auth = None;
+    }
+}
+
 fn apply(state: &mut State, event: Event) {
     state.busy = false;
     match event {
-        Event::Snapshot(snapshot) => {
-            let changed_vault =
-                (state.snapshot.status == "unlocked") != (snapshot.status == "unlocked");
-            let items = snapshot.items.clone();
-            state.snapshot = snapshot;
-            state.folders = folders_from(&items);
-            if changed_vault {
-                state.location = Location::Vault;
-                state.folder = None;
-                state.selected = None;
-                state.details = None;
-                state.edit = None;
-                state.create = None;
-                state.attachment_preview = None;
-                backend::clear_attachment_text();
-                clear_reveal(state);
-                state.query.clear();
-                state.password.replace_text("");
-            }
-            if state.location != Location::Trash {
-                state.rows = items;
-                state.bump_rows_version();
-            }
-            state.notice = None;
-            clear_reveal(state);
-            if state.selected.is_none() {
-                state.selected = state.rows.first().map(|item| item.id.clone());
-            }
-            request_details(state);
-            if state.snapshot.status == "unauthenticated" {
-                if state.auth.is_none() {
-                    let server = state.snapshot.server.clone();
-                    state.auth = Some(empty_auth_draft(&server));
-                }
-            } else {
-                state.auth = None;
-            }
+        Event::Snapshot(snapshot) => apply_snapshot(state, snapshot),
+        Event::Synced(snapshot) => {
+            apply_snapshot(state, snapshot);
+            state.syncing = false;
+            state.sync_error = None;
+            state.notice = Some("Vault synced".to_owned());
+        }
+        Event::SyncFailed(message) => {
+            state.syncing = false;
+            state.sync_error = Some(message.clone());
+            state.notice = Some(format!("Sync failed: {message}"));
         }
         Event::Auth(outcome) => apply_auth_outcome(state, outcome),
         Event::Generated {
@@ -2575,6 +2598,11 @@ pub fn scene_ssh_approval(state: &mut State) {
         client: "git (ssh)".to_owned(),
     }];
     state.notice = Some("SSH approval requested".to_owned());
+}
+
+pub fn scene_sync_error(state: &mut State) {
+    scene_populated(state);
+    apply(state, Event::SyncFailed("server offline".to_owned()));
 }
 
 pub fn scene_create_card(state: &mut State) {
@@ -3668,5 +3696,33 @@ mod tests {
             },
         );
         assert_eq!(state.notice.as_deref(), Some("SSH request approved"));
+    }
+
+    #[test]
+    fn sync_dispatches_track_success_and_failure() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        dispatch(&mut state, Request::Sync);
+        assert!(state.syncing);
+        assert!(matches!(rx.try_iter().next(), Some(Request::Sync)));
+
+        apply(
+            &mut state,
+            Event::Synced(Snapshot {
+                last_sync: "2026-04-01T00:00:00Z".to_owned(),
+                ..Snapshot::default()
+            }),
+        );
+        assert!(!state.syncing);
+        assert!(state.sync_error.is_none());
+        assert_eq!(state.notice.as_deref(), Some("Vault synced"));
+        assert_eq!(state.snapshot.last_sync, "2026-04-01T00:00:00Z");
+
+        dispatch(&mut state, Request::Sync);
+        apply(&mut state, Event::SyncFailed("server offline".to_owned()));
+        assert!(!state.syncing);
+        assert_eq!(state.sync_error.as_deref(), Some("server offline"));
+        assert_eq!(state.notice.as_deref(), Some("Sync failed: server offline"));
     }
 }

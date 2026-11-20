@@ -1687,7 +1687,12 @@ fn top_bar(s: &State, dark: bool) -> El {
         ))
         .child(action("sends", "Sends", dark, open_sends))
         .child(action("ssh-tools", "SSH keys", dark, open_ssh_tools))
-        .child(action("sync", "Sync", dark, |s| dispatch(s, Request::Sync)))
+        .child(action(
+            "sync",
+            if s.syncing { "Syncing…" } else { "Sync" },
+            dark,
+            |s| dispatch(s, Request::Sync),
+        ))
         .child(action("generate", "Generate", dark, |s| {
             open_generator(s, GeneratorTarget::None)
         }))
@@ -2317,8 +2322,12 @@ fn field(label: &str, value: &str, dark: bool) -> El {
 
 fn status_bar(s: &State, dark: bool) -> El {
     let t = tok::theme(dark);
-    let label = if s.busy {
+    let label = if s.syncing {
+        "Syncing vault…".to_owned()
+    } else if s.busy {
         "Working…".to_owned()
+    } else if let Some(error) = &s.sync_error {
+        format!("Sync failed: {error}")
     } else if let Some(notice) = &s.notice {
         notice.clone()
     } else if s.snapshot.status.is_empty() {
@@ -2332,7 +2341,11 @@ fn status_bar(s: &State, dark: bool) -> El {
         accent(dark)
     };
 
-    let sync = if s.snapshot.last_sync.is_empty() {
+    let sync = if s.syncing {
+        " · syncing".to_owned()
+    } else if s.sync_error.is_some() {
+        " · sync failed".to_owned()
+    } else if s.snapshot.last_sync.is_empty() {
         String::new()
     } else {
         format!(
@@ -2359,7 +2372,13 @@ fn status_bar(s: &State, dark: bool) -> El {
                 .grow(1.0)
                 .truncate(),
         )
-        .child(text(server).font(META).color(t.text_secondary).truncate())
+        .child(
+            text(server)
+                .key("status-sync")
+                .font(META)
+                .color(t.text_secondary)
+                .truncate(),
+        )
 }
 
 fn generator_toggle(

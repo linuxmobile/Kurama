@@ -568,6 +568,8 @@ pub enum Event {
         kind: String,
     },
     Error(String),
+    Synced(Snapshot),
+    SyncFailed(String),
 }
 
 const DAEMON_HINT: &str = "Kurama backend is not running. Start it with `kurama daemon`.";
@@ -795,10 +797,10 @@ pub fn perform(request: Request) -> Event {
         }
         Request::Sync => match call(json!({ "action": "sync" })) {
             Ok(_) => match snapshot() {
-                Ok(snapshot) => Event::Snapshot(snapshot),
-                Err(error) => Event::Error(error),
+                Ok(snapshot) => Event::Synced(snapshot),
+                Err(error) => Event::SyncFailed(error),
             },
-            Err(error) => Event::Error(error),
+            Err(error) => Event::SyncFailed(error),
         },
         Request::Lock => match call(json!({ "action": "lock" })) {
             Ok(_) => match snapshot() {

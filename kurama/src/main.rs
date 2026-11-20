@@ -65,6 +65,7 @@ fn main() -> ExitCode {
             ("attachment-preview", state::scene_attachment_preview),
             ("ssh-tools", state::scene_ssh_tools),
             ("ssh-approval", state::scene_ssh_approval),
+            ("sync-error", state::scene_sync_error),
         ],
         setup: Some(state::setup),
         poll: Some(state::poll),
@@ -251,6 +252,21 @@ mod tests {
         ] {
             assert!(rt.find(key).is_some(), "missing key: {key}");
         }
+    }
+
+    #[test]
+    fn sync_error_scene_shows_failure_in_status_bar() {
+        let mut rt = runtime(state::scene_sync_error);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("status-sync").is_some());
+        let status = rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("status-label"))
+            .expect("status label")
+            .text
+            .expect("status text");
+        assert!(status.contains("Sync failed"));
     }
 
     #[test]
