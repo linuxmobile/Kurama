@@ -1578,4 +1578,30 @@ mod tests {
         rt.frame(1.0 / 60.0);
         assert!(rt.find("approvals-banner").is_some());
     }
+
+    #[test]
+    fn real_daemon_snapshot_renders() {
+        if std::env::var_os("KURAMA_REAL_DAEMON_TEST").is_none() {
+            return;
+        }
+        let backend::Event::Snapshot(snapshot) = backend::perform(Request::Refresh) else {
+            panic!("daemon did not return a snapshot");
+        };
+        assert!(!snapshot.email.is_empty());
+        assert!(!snapshot.server.is_empty());
+        let mut state = State::default();
+        state.snapshot = snapshot;
+        let mut rt = Runtime::new(
+            state,
+            ui::view,
+            (1160.0, 760.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("status-label").is_some());
+        assert!(rt.find("status-sync").is_some());
+    }
 }
