@@ -51,6 +51,7 @@ fn main() -> ExitCode {
             ("disconnected", state::scene_disconnected),
             ("account", state::scene_account),
             ("account-two-factor", state::scene_account_two_factor),
+            ("account-fido2", state::scene_account_fido2),
             ("session-expired", state::scene_session_expired),
             ("trash", state::scene_trash),
             ("create-card", state::scene_create_card),
@@ -290,6 +291,31 @@ mod tests {
                 ..
             } if client_id.as_str() == "user.123"
                 && client_secret.as_str() == "api-secret"
+        )));
+    }
+
+    #[test]
+    fn fido2_form_submits_security_key_login() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_account_fido2(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("account-fido2-status").is_some());
+        assert!(rt.find("account-security-key").is_some());
+        let (x, y) = rt.find("account-fido2-continue").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::LoginPassword {
+                two_factor_provider: Some(7),
+                code: None,
+                new_device_otp: None,
+                ..
+            }
         )));
     }
 

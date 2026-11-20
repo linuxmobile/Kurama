@@ -104,6 +104,10 @@ pub enum AuthMode {
         providers: Vec<i32>,
     },
     NewDevice,
+    Fido2 {
+        status: Option<String>,
+        providers: Vec<i32>,
+    },
 }
 
 pub struct AuthDraft {
@@ -544,6 +548,21 @@ pub fn submit_auth(state: &mut State) {
                     })
                 }
             }
+            AuthMode::Fido2 { .. } => {
+                let email = auth.email.text.trim().to_owned();
+                if email.is_empty() || auth.password.text.is_empty() {
+                    Err("Email and password are required.".to_owned())
+                } else {
+                    Ok(Request::LoginPassword {
+                        server_url,
+                        email,
+                        password: Secret::new(auth.password.text.clone()),
+                        code: None,
+                        two_factor_provider: Some(7),
+                        new_device_otp: None,
+                    })
+                }
+            }
         }
     };
     match request {
@@ -576,6 +595,25 @@ pub fn send_two_factor_email(state: &mut State) {
             password: Secret::new(password),
         },
     );
+}
+
+pub fn submit_fido2(state: &mut State) {
+    let providers = state
+        .auth
+        .as_ref()
+        .map(|auth| match &auth.mode {
+            AuthMode::Fido2 { providers, .. } => providers.clone(),
+            _ => vec![7],
+        })
+        .unwrap_or_default();
+    set_auth_mode(
+        state,
+        AuthMode::Fido2 {
+            status: None,
+            providers,
+        },
+    );
+    submit_auth(state);
 }
 
 pub fn logout(state: &mut State) {
@@ -1286,19 +1324,39 @@ fn visible_fingerprint(state: &State) -> u64 {
 }
 
 fn apply_auth_outcome(state: &mut State, outcome: AuthOutcome) {
+    let fido2 = outcome.fido2_status.is_some() || outcome.two_factor_provider == Some(7);
     if !outcome.ok {
         state.form_error = None;
+        if fido2 {
+            if let Some(auth) = state.auth.as_mut() {
+                auth.mode = AuthMode::Fido2 {
+                    status: outcome.fido2_status.clone(),
+                    providers: outcome.two_factor_providers.clone(),
+                };
+            }
+        }
         state.notice = outcome.error;
         return;
     }
     state.form_error = None;
-    state.notice = None;
     if outcome.new_device_verification_required {
+        state.notice = None;
         if let Some(auth) = state.auth.as_mut() {
             auth.mode = AuthMode::NewDevice;
         }
         return;
     }
+    if fido2 {
+        if let Some(auth) = state.auth.as_mut() {
+            auth.mode = AuthMode::Fido2 {
+                status: outcome.fido2_status.clone(),
+                providers: outcome.two_factor_providers.clone(),
+            };
+        }
+        state.notice = outcome.fido2_status;
+        return;
+    }
+    state.notice = None;
     if outcome.two_factor_required {
         if let Some(auth) = state.auth.as_mut() {
             auth.mode = AuthMode::TwoFactor {
@@ -1308,10 +1366,6 @@ fn apply_auth_outcome(state: &mut State, outcome: AuthOutcome) {
                 providers: outcome.two_factor_providers,
             };
         }
-        return;
-    }
-    if outcome.fido2_status.is_some() {
-        state.notice = outcome.fido2_status;
         return;
     }
     dispatch(state, Request::Refresh);
@@ -1744,6 +1798,18 @@ pub fn scene_session_expired(state: &mut State) {
     );
 }
 
+pub fn scene_account_fido2(state: &mut State) {
+    scene_account(state);
+    if let Some(auth) = state.auth.as_mut() {
+        auth.mode = AuthMode::Fido2 {
+            status: Some("Security key detected".to_owned()),
+            providers: vec![7],
+        };
+        auth.email.replace_text("user@example.com");
+        auth.password.replace_text("master-secret");
+    }
+}
+
 pub fn scene_create_card(state: &mut State) {
     scene_populated(state);
     let mut draft = start_create();
@@ -1873,6 +1939,30 @@ mod tests {
             state.auth.as_ref().map(|auth| auth.mode.clone()),
             Some(AuthMode::NewDevice)
         );
+    }
+
+    #[test]
+    fn fido2_challenge_switches_to_security_key_form() {
+        let mut state = State::default();
+        state.auth = Some(empty_auth_draft("https://vault.example.com"));
+        apply_auth_outcome(
+            &mut state,
+            AuthOutcome {
+                ok: false,
+                two_factor_provider: Some(7),
+                fido2_status: Some("no_device".to_owned()),
+                error: Some("Security key not found".to_owned()),
+                ..AuthOutcome::default()
+            },
+        );
+        assert!(matches!(
+            state.auth.as_ref().map(|auth| auth.mode.clone()),
+            Some(AuthMode::Fido2 {
+                status: Some(status),
+                ..
+            }) if status == "no_device"
+        ));
+        assert_eq!(state.notice.as_deref(), Some("Security key not found"));
     }
 
     #[test]

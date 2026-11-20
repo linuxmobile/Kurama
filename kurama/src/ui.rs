@@ -13,7 +13,7 @@ use crate::state::{
     folder_label, logout, move_selection, open_attachment, open_trash, remove_create_field,
     remove_create_uri, remove_edit_uri, restore_item, select_category, select_folder, select_item,
     send_two_factor_email, set_auth_mode, set_create_type, set_favorite, start_edit, submit_auth,
-    submit_create, submit_edit, submit_quick_unlock, submit_search, submit_unlock,
+    submit_create, submit_edit, submit_fido2, submit_quick_unlock, submit_search, submit_unlock,
     toggle_create_favorite, toggle_create_field_value, toggle_edit_favorite, toggle_reveal,
     AuthMode, CardDraft, Category, CustomFieldDraft, IdentityDraft, Location, SshDraft, State,
 };
@@ -1717,6 +1717,7 @@ fn account(s: &State, dark: bool) -> El {
         AuthMode::Password | AuthMode::ApiKey => "Connect account",
         AuthMode::TwoFactor { .. } => "Two-factor verification",
         AuthMode::NewDevice => "Verify new device",
+        AuthMode::Fido2 { .. } => "Security key verification",
     };
     let header = text("Connect Kurama to your vault server.")
         .font(ROW_SUBTITLE)
@@ -1744,6 +1745,12 @@ fn account(s: &State, dark: bool) -> El {
             },
             dark,
             |state| set_auth_mode(state, AuthMode::ApiKey),
+        ))
+        .child(action(
+            "account-security-key",
+            "Security key",
+            dark,
+            submit_fido2,
         ));
 
     let mut body = col()
@@ -1806,7 +1813,8 @@ fn account(s: &State, dark: bool) -> El {
                 Some(1) => "Email",
                 Some(2) => "Duo",
                 Some(3) => "YubiKey",
-                Some(4) => "FIDO2 WebAuthn",
+                Some(4) => "Legacy U2F",
+                Some(7) => "FIDO2 WebAuthn",
                 _ => "Two-factor provider",
             };
             body = body
@@ -1843,12 +1851,33 @@ fn account(s: &State, dark: bool) -> El {
                 submit_auth,
             ));
         }
+        AuthMode::Fido2 { status, .. } => {
+            let detail = status.as_deref().unwrap_or(
+                "Insert or tap your security key, then continue when your browser prompts you.",
+            );
+            body = body
+                .child(
+                    text(detail.to_owned())
+                        .key("account-fido2-status")
+                        .font(ROW_SUBTITLE)
+                        .color(t.text_secondary),
+                )
+                .child(action(
+                    "account-fido2-continue",
+                    "Continue with security key",
+                    dark,
+                    submit_fido2,
+                ));
+        }
     }
 
     let mut footer = row()
         .gap(12.0)
         .child(action("account-submit", "Connect", dark, submit_auth));
-    if matches!(&auth.mode, AuthMode::TwoFactor { .. } | AuthMode::NewDevice) {
+    if matches!(
+        &auth.mode,
+        AuthMode::TwoFactor { .. } | AuthMode::NewDevice | AuthMode::Fido2 { .. }
+    ) {
         footer = footer.child(action("account-back", "Back", dark, |state| {
             set_auth_mode(state, AuthMode::Password)
         }));

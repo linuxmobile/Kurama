@@ -678,7 +678,7 @@ pub fn perform(request: Request) -> Event {
                 "two_factor_provider": two_factor_provider,
                 "new_device_otp": new_device_otp.as_ref().map(Secret::as_str)
             });
-            match call(body) {
+            match call_raw(body) {
                 Ok(response) => Event::Auth(auth_outcome(&response)),
                 Err(error) => Event::Auth(AuthOutcome {
                     error: Some(error),
@@ -697,7 +697,7 @@ pub fn perform(request: Request) -> Event {
                 "client_id": client_id.as_str(),
                 "client_secret": client_secret.as_str()
             });
-            match call(body) {
+            match call_raw(body) {
                 Ok(response) => Event::Auth(auth_outcome(&response)),
                 Err(error) => Event::Auth(AuthOutcome {
                     error: Some(error),
@@ -716,8 +716,17 @@ pub fn perform(request: Request) -> Event {
                 "email": email,
                 "password": password.as_str()
             });
-            match call(body) {
-                Ok(_) => Event::Notice("Two-factor code sent to your email.".to_owned()),
+            match call_raw(body) {
+                Ok(response) if response.get("ok").and_then(Value::as_bool) != Some(false) => {
+                    Event::Notice("Two-factor code sent to your email.".to_owned())
+                }
+                Ok(response) => Event::Error(
+                    response
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Backend request failed")
+                        .to_owned(),
+                ),
                 Err(error) => Event::Error(error),
             }
         }
@@ -793,6 +802,10 @@ fn auth_outcome(response: &Value) -> AuthOutcome {
             .and_then(Value::as_str)
             .map(str::to_owned),
     }
+}
+
+fn call_raw(body: Value) -> Result<Value, String> {
+    kurama_host::daemon::send_daemon_request(&body).ok_or_else(|| DAEMON_HINT.to_owned())
 }
 
 fn call(body: Value) -> Result<Value, String> {
