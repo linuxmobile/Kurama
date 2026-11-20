@@ -101,6 +101,10 @@ pub enum Request {
     Totp {
         item_id: String,
     },
+    SetFavorite {
+        id: String,
+        favorite: bool,
+    },
     Search(String),
     Sync,
     Lock,
@@ -196,6 +200,7 @@ pub enum Event {
     Revealed { item_id: String, key: String },
     Notice(String),
     Totp(TotpMeta),
+    FavoriteChanged { id: String, favorite: bool },
     Notices { cursor: u64, notices: Vec<Notice> },
     Approvals(Vec<Approval>),
     Error(String),
@@ -267,6 +272,17 @@ pub fn perform(request: Request) -> Event {
             }
             Err(error) => Event::Error(error),
         },
+        Request::SetFavorite { id, favorite } => {
+            let request = json!({
+                "action": "favorite_item",
+                "ids": [id.clone()],
+                "value": favorite
+            });
+            match call(request) {
+                Ok(_) => Event::FavoriteChanged { id, favorite },
+                Err(error) => Event::Error(error),
+            }
+        }
         Request::Sync => match call(json!({ "action": "sync" })) {
             Ok(_) => match snapshot() {
                 Ok(snapshot) => Event::Snapshot(snapshot),

@@ -280,6 +280,13 @@ pub fn toggle_reveal(state: &mut State, key: String) {
     send_quiet(state, Request::RevealField { item_id, key });
 }
 
+pub fn set_favorite(state: &mut State, favorite: bool) {
+    let Some(id) = state.selected.clone() else {
+        return;
+    };
+    dispatch(state, Request::SetFavorite { id, favorite });
+}
+
 fn clear_reveal(state: &mut State) {
     if state.revealed.take().is_some() {
         clear_revealed();
@@ -586,6 +593,19 @@ fn apply(state: &mut State, event: Event) {
                 state.notice = Some("SSH approval requested".to_owned());
             }
         }
+        Event::FavoriteChanged { id, favorite } => {
+            for row in state.rows.iter_mut().chain(state.snapshot.items.iter_mut()) {
+                if row.id == id {
+                    row.favorite = favorite;
+                }
+            }
+            state.notice = Some(if favorite {
+                "Added to favorites".to_owned()
+            } else {
+                "Removed from favorites".to_owned()
+            });
+            send_quiet(state, Request::Refresh);
+        }
         Event::Notice(message) => state.notice = Some(message),
         Event::Totp(meta) => {
             if state.selected.as_deref() == Some(meta.item_id.as_str()) {
@@ -772,9 +792,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn favorite_toggle_updates_row_and_refreshes() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+
+        set_favorite(&mut state, false);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            Request::SetFavorite { id, favorite: false } if id == "1"
+        )));
+
+        apply(
+            &mut state,
+            Event::FavoriteChanged {
+                id: "1".to_owned(),
+                favorite: false,
+            },
+        );
+        assert!(!state.rows[0].favorite);
+        assert!(!state.snapshot.items[0].favorite);
+        assert_eq!(state.notice.as_deref(), Some("Removed from favorites"));
+        assert!(rx
+            .try_iter()
+            .any(|request| matches!(request, Request::Refresh)));
+    }
+
+    #[test]
     fn totp_request_ticks_and_refreshes() {
         let mut state = State::default();
         scene_populated(&mut state);
+        state.rows[0].id = "state-totp-test".to_owned();
+        state.selected = Some("state-totp-test".to_owned());
+        state.details.as_mut().unwrap().id = "state-totp-test".to_owned();
+        state.totp.as_mut().unwrap().item_id = "state-totp-test".to_owned();
         let (tx, rx) = mpsc::channel();
         state.requests = Some(tx);
         let (_event_tx, event_rx) = mpsc::channel();
@@ -784,13 +836,13 @@ mod tests {
         apply(&mut state, Event::Details(details));
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            Request::Totp { item_id } if item_id == "1"
+            Request::Totp { item_id } if item_id == "state-totp-test"
         )));
 
         apply(
             &mut state,
             Event::Totp(TotpMeta {
-                item_id: "1".to_owned(),
+                item_id: "state-totp-test".to_owned(),
                 ttl: 2,
                 period: 30,
             }),
@@ -802,7 +854,7 @@ mod tests {
         assert!(state.totp.is_none());
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            Request::Totp { item_id } if item_id == "1"
+            Request::Totp { item_id } if item_id == "state-totp-test"
         )));
     }
 

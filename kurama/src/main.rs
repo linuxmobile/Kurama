@@ -125,6 +125,7 @@ mod tests {
             "copy-password",
             "copy-uri-0",
             "copy-user",
+            "favorite-toggle",
         ] {
             assert!(rt.find(key).is_some(), "missing key: {key}");
         }

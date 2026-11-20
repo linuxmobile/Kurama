@@ -7,7 +7,7 @@ use rune::{
 use crate::backend::{revealed_value, totp_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
-    copy_field, dispatch, move_selection, open_trash, select_category, select_folder,
+    copy_field, dispatch, move_selection, open_trash, select_category, select_folder, set_favorite,
     submit_quick_unlock, submit_search, submit_unlock, toggle_reveal, Category, Location, State,
 };
 use crate::theme::{
@@ -463,6 +463,7 @@ fn details(s: &State, dark: bool) -> El {
     };
 
     let username = item.subtitle.clone();
+    let favorite = item.favorite;
     let type_label = icons::label(&item.type_name);
     let mut fields = col()
         .key("detail-fields")
@@ -589,7 +590,13 @@ fn details(s: &State, dark: bool) -> El {
                     action("copy-user", "Copy username", dark, move |state| {
                         copy_field(state, "username", "username", false)
                     })
-                }),
+                })
+                .child(action(
+                    "favorite-toggle",
+                    if favorite { "Unfavorite" } else { "Favorite" },
+                    dark,
+                    move |state| set_favorite(state, !favorite),
+                )),
         )
         .child(el().h(1.0).w_full().fill(t.separator))
         .child(fields)
