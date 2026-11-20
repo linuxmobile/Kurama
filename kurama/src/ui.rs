@@ -5,22 +5,23 @@ use rune::{
     ScrollSpec, Tx,
 };
 
-use crate::backend::{revealed_value, totp_value, FieldValue, Request, VaultRow};
+use crate::backend::{revealed_value, totp_value, FieldValue, Request, Secret, VaultRow};
 use crate::icons;
 use crate::state::{
     add_create_field, add_create_uri, add_edit_uri, adjust_generator_length,
     adjust_generator_words, cancel_create, cancel_delete_send, cancel_edit, cancel_send,
-    close_generator, close_sends, confirm_delete_send, copy_field, copy_generated, copy_send,
-    cycle_create_field_type, cycle_create_folder, cycle_edit_folder, delete_item, disable_send,
-    dispatch, folder_label, generate_password, logout, move_selection, new_send, open_attachment,
-    open_generator, open_sends, open_trash, remove_create_field, remove_create_uri,
-    remove_edit_uri, request_delete_send, restore_item, select_category, select_folder,
-    select_item, select_send, send_two_factor_email, set_auth_mode, set_create_type, set_favorite,
-    set_generator_passphrase, start_edit, submit_auth, submit_create, submit_edit, submit_fido2,
-    submit_quick_unlock, submit_search, submit_send, submit_unlock, toggle_create_favorite,
-    toggle_create_field_value, toggle_edit_favorite, toggle_generator_option, toggle_reveal,
-    toggle_send_hidden, use_generated, AuthMode, CardDraft, Category, CustomFieldDraft,
-    GeneratorOption, GeneratorTarget, IdentityDraft, Location, SendDraft, SshDraft, State,
+    close_attachment, close_generator, close_sends, confirm_delete_send, copy_field,
+    copy_generated, copy_send, cycle_create_field_type, cycle_create_folder, cycle_edit_folder,
+    delete_item, disable_send, dispatch, folder_label, generate_password, logout, move_selection,
+    new_send, open_attachment, open_generator, open_sends, open_trash, remove_create_field,
+    remove_create_uri, remove_edit_uri, request_delete_send, restore_item, select_category,
+    select_folder, select_item, select_send, send_two_factor_email, set_auth_mode, set_create_type,
+    set_favorite, set_generator_passphrase, start_edit, submit_auth, submit_create, submit_edit,
+    submit_fido2, submit_quick_unlock, submit_search, submit_send, submit_unlock,
+    toggle_create_favorite, toggle_create_field_value, toggle_edit_favorite,
+    toggle_generator_option, toggle_reveal, toggle_send_hidden, use_generated, AttachmentView,
+    AuthMode, CardDraft, Category, CustomFieldDraft, GeneratorOption, GeneratorTarget,
+    IdentityDraft, Location, SendDraft, SshDraft, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -32,7 +33,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let connected = !s.snapshot.status.is_empty();
     let unlocked = s.snapshot.status == "unlocked";
 
-    let content = if s.generator.is_some() {
+    let content = if let Some(view) = s.attachment_preview.as_ref() {
+        attachment_preview(s, view, dark)
+    } else if s.generator.is_some() {
         generator(s, dark)
     } else if s.help {
         help(s, dark)
@@ -1039,6 +1042,95 @@ fn edit_form(s: &State, dark: bool) -> El {
         footer,
         s.form_error.as_deref(),
     )
+}
+
+fn attachment_preview(_s: &State, view: &AttachmentView, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let preview_text = view
+        .is_text
+        .then(|| crate::backend::attachment_text(&view.filename))
+        .flatten();
+    let preview_edit = TextEdit::new(preview_text.clone().unwrap_or_default());
+    let content = if preview_text.is_some() {
+        text_input(&preview_edit, type_::BODY)
+            .secure()
+            .revealed(true)
+            .key("attachment-preview-text")
+            .label("Attachment text preview")
+            .w_full()
+            .grow(1.0)
+            .min_h(160.0)
+            .padding(12.0)
+            .radius(8.0)
+            .fill(t.card)
+            .border(1.0, t.card_border)
+            .color(t.text)
+    } else {
+        col()
+            .key("attachment-preview-message")
+            .grow(1.0)
+            .center()
+            .gap(8.0)
+            .child(
+                text(if view.is_image {
+                    "Image preview opened in the default viewer."
+                } else if view.preview {
+                    "Preview opened in the default application."
+                } else {
+                    "Attachment saved to the local download folder."
+                })
+                .font(ROW_SUBTITLE)
+                .color(t.text),
+            )
+            .child(
+                text(&view.path)
+                    .font(META)
+                    .color(t.text_secondary)
+                    .truncate(),
+            )
+    };
+    let filename = view.filename.clone();
+    let copy = preview_text.is_some().then(|| {
+        action("attachment-preview-copy", "Copy text", dark, move |state| {
+            if let Some(text) = crate::backend::attachment_text(&filename) {
+                dispatch(
+                    state,
+                    Request::CopyText {
+                        text: Secret::new(text),
+                        label: "Attachment text".to_owned(),
+                    },
+                );
+            }
+        })
+    });
+    let mut footer = row().gap(8.0);
+    if let Some(copy) = copy {
+        footer = footer.child(copy);
+    }
+    footer = footer.child(action(
+        "attachment-preview-close",
+        "Close",
+        dark,
+        close_attachment,
+    ));
+    col()
+        .key("attachment-preview-screen")
+        .w_full()
+        .grow(1.0)
+        .h_full()
+        .padding(20.0)
+        .gap(14.0)
+        .fill(t.bg)
+        .child(
+            row().w_full().gap(12.0).child(
+                text(format!("Attachment · {}", view.filename))
+                    .font(WINDOW_TITLE)
+                    .color(t.text),
+            ),
+        )
+        .child(field("Saved to", &view.path, dark))
+        .child(content)
+        .child(footer)
 }
 
 fn sends(s: &State, dark: bool) -> El {

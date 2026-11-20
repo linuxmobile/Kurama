@@ -62,6 +62,7 @@ fn main() -> ExitCode {
             ("generator", state::scene_generator),
             ("sends", state::scene_sends),
             ("send-form", state::scene_send_form),
+            ("attachment-preview", state::scene_attachment_preview),
         ],
         setup: Some(state::setup),
         poll: Some(state::poll),
@@ -78,6 +79,10 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     match &event.key {
         Key::Escape if state.help => {
             state.help = false;
+            true
+        }
+        Key::Escape if state.attachment_preview.is_some() => {
+            state::close_attachment(state);
             true
         }
         Key::Escape if state.edit.is_some() => {
@@ -236,6 +241,20 @@ mod tests {
             "generator-entropy",
             "generator-copy",
             "generator-close",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+    }
+
+    #[test]
+    fn attachment_preview_scene_shows_text_and_actions() {
+        let mut rt = runtime(state::scene_attachment_preview);
+        rt.frame(1.0 / 60.0);
+        for key in [
+            "attachment-preview-screen",
+            "attachment-preview-text",
+            "attachment-preview-copy",
+            "attachment-preview-close",
         ] {
             assert!(rt.find(key).is_some(), "missing key: {key}");
         }

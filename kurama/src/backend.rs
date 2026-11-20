@@ -54,6 +54,16 @@ pub struct AttachmentMeta {
     pub size: String,
 }
 
+/// Result of an attachment preview or download. Text content lives in `Secret`.
+#[derive(Debug)]
+pub struct AttachmentResult {
+    pub filename: String,
+    pub path: String,
+    pub text: Option<Secret>,
+    pub is_image: bool,
+    pub is_text: bool,
+}
+
 /// Metadata-only view of one decrypted vault item.
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
 pub struct ItemDetails {
@@ -437,6 +447,26 @@ pub fn clear_send_urls() {
     }
 }
 
+static ATTACHMENT_TEXT: Mutex<Option<(String, Secret)>> = Mutex::new(None);
+
+pub fn stash_attachment_text(filename: &str, text: Secret) {
+    if let Ok(mut stored) = ATTACHMENT_TEXT.lock() {
+        *stored = Some((filename.to_owned(), text));
+    }
+}
+
+pub fn attachment_text(filename: &str) -> Option<String> {
+    let stored = ATTACHMENT_TEXT.lock().ok()?;
+    let (stored_filename, text) = stored.as_ref()?;
+    (stored_filename == filename).then(|| text.as_str().to_owned())
+}
+
+pub fn clear_attachment_text() {
+    if let Ok(mut stored) = ATTACHMENT_TEXT.lock() {
+        *stored = None;
+    }
+}
+
 #[derive(Debug)]
 pub enum Event {
     Snapshot(Snapshot),
@@ -448,8 +478,8 @@ pub enum Event {
         key: String,
     },
     AttachmentOpened {
-        filename: String,
         preview: bool,
+        result: AttachmentResult,
     },
     Deleted {
         id: String,
@@ -572,7 +602,7 @@ pub fn perform(request: Request) -> Event {
             filename,
             preview,
         } => match attachment(&item_id, &attachment_id, &filename, preview) {
-            Ok(filename) => Event::AttachmentOpened { filename, preview },
+            Ok(result) => Event::AttachmentOpened { preview, result },
             Err(error) => Event::Error(error),
         },
         Request::Delete { id, permanent } => {
@@ -1160,7 +1190,7 @@ fn attachment(
     attachment_id: &str,
     filename: &str,
     preview: bool,
-) -> Result<String, String> {
+) -> Result<AttachmentResult, String> {
     let response = kurama_host::attachment::get_attachment(
         item_id,
         attachment_id,
@@ -1177,7 +1207,16 @@ fn attachment(
             .error
             .unwrap_or_else(|| "Attachment action failed".to_owned()));
     }
-    Ok(response.filename.unwrap_or_else(|| filename.to_owned()))
+    Ok(AttachmentResult {
+        filename: response.filename.unwrap_or_else(|| filename.to_owned()),
+        path: response.path.unwrap_or_default(),
+        text: response
+            .text_content
+            .filter(|text| !text.is_empty())
+            .map(Secret::new),
+        is_image: response.is_image.unwrap_or(false),
+        is_text: response.is_text.unwrap_or(false),
+    })
 }
 
 fn item_fields(item: &Value) -> Vec<ItemField> {

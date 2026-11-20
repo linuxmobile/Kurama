@@ -78,6 +78,15 @@ pub struct SendDraft {
     pub password: TextEdit,
 }
 
+#[derive(Clone, Debug)]
+pub struct AttachmentView {
+    pub filename: String,
+    pub path: String,
+    pub is_image: bool,
+    pub is_text: bool,
+    pub preview: bool,
+}
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Location {
     Vault,
@@ -228,6 +237,7 @@ pub struct State {
     pub send_form: Option<SendDraft>,
     pub send_pending_delete: Option<String>,
     pub send_error: Option<String>,
+    pub attachment_preview: Option<AttachmentView>,
     pub revealed: Option<String>,
     pub totp: Option<TotpMeta>,
     pub busy: bool,
@@ -270,6 +280,7 @@ impl Default for State {
             send_form: None,
             send_pending_delete: None,
             send_error: None,
+            attachment_preview: None,
             revealed: None,
             totp: None,
             busy: true,
@@ -1481,6 +1492,11 @@ fn visible_fingerprint(state: &State) -> u64 {
     state.send_selected.hash(&mut hasher);
     state.send_pending_delete.hash(&mut hasher);
     state.send_error.hash(&mut hasher);
+    state
+        .attachment_preview
+        .as_ref()
+        .map(|view| view.filename.as_str())
+        .hash(&mut hasher);
     for send in &state.sends {
         send.id.hash(&mut hasher);
         send.name.hash(&mut hasher);
@@ -1604,6 +1620,8 @@ fn apply(state: &mut State, event: Event) {
                 state.details = None;
                 state.edit = None;
                 state.create = None;
+                state.attachment_preview = None;
+                backend::clear_attachment_text();
                 clear_reveal(state);
                 state.query.clear();
                 state.password.replace_text("");
@@ -1782,7 +1800,19 @@ fn apply(state: &mut State, event: Event) {
             send_quiet(state, Request::Refresh);
         }
         Event::Notice(message) => state.notice = Some(message),
-        Event::AttachmentOpened { filename, preview } => {
+        Event::AttachmentOpened { preview, result } => {
+            backend::clear_attachment_text();
+            if let Some(text) = result.text {
+                backend::stash_attachment_text(&result.filename, text);
+            }
+            let filename = result.filename;
+            state.attachment_preview = Some(AttachmentView {
+                filename: filename.clone(),
+                path: result.path,
+                is_image: result.is_image,
+                is_text: result.is_text,
+                preview,
+            });
             state.notice = Some(if preview {
                 format!("Previewing {filename}")
             } else {
@@ -2050,6 +2080,11 @@ pub fn confirm_delete_send(state: &mut State) {
     dispatch(state, Request::DeleteSend { id });
 }
 
+pub fn close_attachment(state: &mut State) {
+    state.attachment_preview = None;
+    backend::clear_attachment_text();
+}
+
 pub fn scene_populated(state: &mut State) {
     state.snapshot = Snapshot {
         status: "unlocked".to_owned(),
@@ -2254,6 +2289,21 @@ pub fn scene_send_form(state: &mut State) {
         .text
         .replace_text("Share this text securely");
     state.form_error = None;
+}
+
+pub fn scene_attachment_preview(state: &mut State) {
+    scene_populated(state);
+    state.attachment_preview = Some(AttachmentView {
+        filename: "notes.txt".to_owned(),
+        path: "/tmp/kurama/attachments/1/att-1/notes.txt".to_owned(),
+        is_image: false,
+        is_text: true,
+        preview: true,
+    });
+    backend::stash_attachment_text(
+        "notes.txt",
+        Secret::new("Meeting notes\n- review phase 8\n- ship release build".to_owned()),
+    );
 }
 
 pub fn scene_create_card(state: &mut State) {
@@ -2761,19 +2811,45 @@ mod tests {
         apply(
             &mut state,
             Event::AttachmentOpened {
-                filename: "notes.txt".to_owned(),
                 preview: true,
+                result: crate::backend::AttachmentResult {
+                    filename: "notes.txt".to_owned(),
+                    path: "/tmp/notes.txt".to_owned(),
+                    text: Some(Secret::new("shared notes".to_owned())),
+                    is_image: false,
+                    is_text: true,
+                },
             },
         );
         assert_eq!(state.notice.as_deref(), Some("Previewing notes.txt"));
+        assert_eq!(
+            state
+                .attachment_preview
+                .as_ref()
+                .map(|view| view.filename.as_str()),
+            Some("notes.txt")
+        );
+        assert_eq!(
+            backend::attachment_text("notes.txt").as_deref(),
+            Some("shared notes")
+        );
         apply(
             &mut state,
             Event::AttachmentOpened {
-                filename: "receipt.pdf".to_owned(),
                 preview: false,
+                result: crate::backend::AttachmentResult {
+                    filename: "receipt.pdf".to_owned(),
+                    path: "/tmp/receipt.pdf".to_owned(),
+                    text: None,
+                    is_image: false,
+                    is_text: false,
+                },
             },
         );
         assert_eq!(state.notice.as_deref(), Some("Saved receipt.pdf"));
+        assert_eq!(backend::attachment_text("notes.txt"), None);
+        close_attachment(&mut state);
+        assert!(state.attachment_preview.is_none());
     }
 
     #[test]
