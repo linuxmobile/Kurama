@@ -64,12 +64,19 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         return false;
     }
     match &event.key {
+        Key::Escape if state.edit.is_some() => {
+            state::cancel_edit(state);
+            true
+        }
         Key::Down => state::move_selection(state, 1, tx),
         Key::Up => state::move_selection(state, -1, tx),
         Key::Home => state::select_first(state, tx),
         Key::End => state::select_last(state, tx),
         Key::Text(text) => {
-            let typing = matches!(tx.focused(), Some("search" | "unlock-password"));
+            let typing = matches!(
+                tx.focused(),
+                Some("search" | "unlock-password" | "edit-name")
+            );
             if typing {
                 return false;
             }
@@ -261,6 +268,52 @@ mod tests {
                 preview,
             } if item_id == "1" && attachment_id == "att-1" && filename == "notes.txt" && !preview
         )));
+    }
+
+    #[test]
+    fn edit_form_opens_saves_and_cancels() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.details.as_mut().unwrap().fields.clear();
+            state.requests = Some(tx.clone());
+        });
+        rt.on_key = Some(on_key);
+        rt.frame(0.0);
+        let (x, y) = rt.find("edit-item").expect("edit button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        for key in ["edit-form", "edit-name", "save-edit", "cancel-edit"] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+        rt.state
+            .edit
+            .as_mut()
+            .unwrap()
+            .name
+            .replace_text("Work GitHub");
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("save-edit").expect("save button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.edit.is_none());
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::UpdateName { id, name } if id == "1" && name == "Work GitHub"
+        )));
+
+        let (x, y) = rt.find("edit-item").expect("edit button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        rt.key(KeyEvent {
+            key: Key::Escape,
+            mods: Mods::default(),
+        });
+        rt.frame(0.0);
+        assert!(rt.state.edit.is_none());
     }
 
     #[test]

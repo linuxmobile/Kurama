@@ -7,9 +7,10 @@ use rune::{
 use crate::backend::{revealed_value, totp_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
-    copy_field, delete_item, dispatch, move_selection, open_attachment, open_trash, restore_item,
-    select_category, select_folder, select_item, set_favorite, submit_quick_unlock, submit_search,
-    submit_unlock, toggle_reveal, Category, Location, State,
+    cancel_edit, copy_field, delete_item, dispatch, move_selection, open_attachment, open_trash,
+    restore_item, select_category, select_folder, select_item, set_favorite, start_edit,
+    submit_edit, submit_quick_unlock, submit_search, submit_unlock, toggle_reveal, Category,
+    Location, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -21,7 +22,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let connected = !s.snapshot.status.is_empty();
     let unlocked = s.snapshot.status == "unlocked";
 
-    let content = if !connected {
+    let content = if s.edit.is_some() {
+        edit_form(s, dark)
+    } else if !connected {
         placeholder(
             s,
             dark,
@@ -44,6 +47,50 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(top_bar(s, dark))
         .child(content)
         .child(status_bar(s, dark))
+}
+
+fn edit_form(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let Some(draft) = s.edit.as_ref() else {
+        return el();
+    };
+    col()
+        .key("edit-form")
+        .w_full()
+        .grow(1.0)
+        .h_full()
+        .center()
+        .gap(14.0)
+        .fill(t.bg)
+        .child(text("Rename item").font(WINDOW_TITLE).color(t.text))
+        .child(
+            text_input(&draft.name, type_::BODY)
+                .key("edit-name")
+                .label("Item name")
+                .placeholder("Item name", t.text_secondary)
+                .w(420.0)
+                .h(40.0)
+                .px(12.0)
+                .radius(8.0)
+                .fill(t.card)
+                .on_edit(|s: &mut State| &mut s.edit.as_mut().unwrap().name)
+                .on_submit(|s: &mut State, _tx: &mut Tx| submit_edit(s))
+                .on_input_key(
+                    |s: &mut State, event: &KeyEvent, _tx: &mut Tx| match &event.key {
+                        Key::Escape => {
+                            cancel_edit(s);
+                            true
+                        }
+                        _ => false,
+                    },
+                ),
+        )
+        .child(
+            row()
+                .gap(8.0)
+                .child(action("save-edit", "Save", dark, submit_edit))
+                .child(action("cancel-edit", "Cancel", dark, cancel_edit)),
+        )
 }
 
 fn top_bar(s: &State, dark: bool) -> El {
@@ -606,6 +653,10 @@ fn details(s: &State, dark: bool) -> El {
         row()
             .key("detail-actions")
             .gap(8.0)
+            .child(action_tx("edit-item", "Edit", dark, |state, tx| {
+                start_edit(state);
+                tx.focus("edit-name", true);
+            }))
             .child(if in_trash {
                 action("restore-item", "Restore", dark, restore_item)
             } else {

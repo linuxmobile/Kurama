@@ -120,6 +120,10 @@ pub enum Request {
         id: String,
         permanent: bool,
     },
+    UpdateName {
+        id: String,
+        name: String,
+    },
     Restore {
         id: String,
     },
@@ -222,6 +226,7 @@ pub enum Event {
     Revealed { item_id: String, key: String },
     AttachmentOpened { filename: String, preview: bool },
     Deleted { id: String, permanent: bool },
+    ItemRenamed { id: String, name: String },
     Restored { id: String },
     Notice(String),
     Totp(TotpMeta),
@@ -317,6 +322,17 @@ pub fn perform(request: Request) -> Event {
                 Err(error) => Event::Error(error),
             }
         }
+        Request::UpdateName { id, name } => match call(json!({
+            "action": "update_item",
+            "id": id.clone(),
+            "options": { "name": name.clone() }
+        })) {
+            Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
+                Event::ItemRenamed { id, name }
+            }
+            Ok(response) => Event::Error(text(&response, "error")),
+            Err(error) => Event::Error(error),
+        },
         Request::Restore { id } => match call(json!({
             "action": "restore_item",
             "id": id.clone()

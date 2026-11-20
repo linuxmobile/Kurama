@@ -73,6 +73,11 @@ pub enum Location {
     Trash,
 }
 
+pub struct EditDraft {
+    pub id: String,
+    pub name: TextEdit,
+}
+
 pub struct State {
     pub snapshot: Snapshot,
     pub rows: Vec<VaultRow>,
@@ -84,6 +89,7 @@ pub struct State {
     pub folders: Vec<String>,
     pub selected: Option<String>,
     pub details: Option<ItemDetails>,
+    pub edit: Option<EditDraft>,
     pub revealed: Option<String>,
     pub totp: Option<TotpMeta>,
     pub busy: bool,
@@ -113,6 +119,7 @@ impl Default for State {
             folders: Vec::new(),
             selected: None,
             details: None,
+            edit: None,
             revealed: None,
             totp: None,
             busy: true,
@@ -330,6 +337,32 @@ pub fn open_attachment(state: &mut State, attachment_id: String, filename: Strin
     );
 }
 
+pub fn start_edit(state: &mut State) {
+    let Some(item) = state.selected_item() else {
+        return;
+    };
+    state.edit = Some(EditDraft {
+        id: item.id.clone(),
+        name: TextEdit::new(&item.name),
+    });
+}
+
+pub fn submit_edit(state: &mut State) {
+    let Some(draft) = state.edit.take() else {
+        return;
+    };
+    let name = draft.name.text.trim().to_owned();
+    if name.is_empty() {
+        state.notice = Some("Enter a name for this item.".to_owned());
+        return;
+    }
+    dispatch(state, Request::UpdateName { id: draft.id, name });
+}
+
+pub fn cancel_edit(state: &mut State) {
+    state.edit = None;
+}
+
 pub fn delete_item(state: &mut State, permanent: bool) {
     let Some(id) = state.selected.clone() else {
         return;
@@ -540,6 +573,11 @@ fn visible_fingerprint(state: &State) -> u64 {
         approval.client.hash(&mut hasher);
     }
     state.pending_delete.hash(&mut hasher);
+    state
+        .edit
+        .as_ref()
+        .map(|draft| draft.id.as_str())
+        .hash(&mut hasher);
     hasher.finish()
 }
 
@@ -557,6 +595,7 @@ fn apply(state: &mut State, event: Event) {
                 state.folder = None;
                 state.selected = None;
                 state.details = None;
+                state.edit = None;
                 clear_reveal(state);
                 state.query.clear();
                 state.password.replace_text("");
@@ -693,6 +732,15 @@ fn apply(state: &mut State, event: Event) {
                     Request::Refresh
                 },
             );
+        }
+        Event::ItemRenamed { id, name } => {
+            for row in state.rows.iter_mut().chain(state.snapshot.items.iter_mut()) {
+                if row.id == id {
+                    row.name = name.clone();
+                }
+            }
+            state.notice = Some("Item renamed".to_owned());
+            send_quiet(state, Request::Refresh);
         }
         Event::Restored { id } => {
             state.pending_delete = None;
@@ -993,6 +1041,55 @@ mod tests {
 
         apply(&mut state, Event::Notice("Copied Password".to_owned()));
         assert_eq!(state.notice.as_deref(), Some("Copied Password"));
+    }
+
+    #[test]
+    fn edit_draft_submits_only_the_item_name() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+
+        start_edit(&mut state);
+        assert_eq!(state.edit.as_ref().unwrap().id, "1");
+        state
+            .edit
+            .as_mut()
+            .unwrap()
+            .name
+            .replace_text("Renamed GitHub");
+        submit_edit(&mut state);
+        assert!(state.edit.is_none());
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            Request::UpdateName { id, name } if id == "1" && name == "Renamed GitHub"
+        )));
+
+        apply(
+            &mut state,
+            Event::ItemRenamed {
+                id: "1".to_owned(),
+                name: "Renamed GitHub".to_owned(),
+            },
+        );
+        assert_eq!(state.rows[0].name, "Renamed GitHub");
+        assert_eq!(state.notice.as_deref(), Some("Item renamed"));
+        assert!(rx
+            .try_iter()
+            .any(|request| matches!(request, Request::Refresh)));
+    }
+
+    #[test]
+    fn empty_edit_draft_is_rejected() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        start_edit(&mut state);
+        state.edit.as_mut().unwrap().name.replace_text("   ");
+        submit_edit(&mut state);
+        assert!(rx.try_iter().next().is_none());
+        assert_eq!(state.notice.as_deref(), Some("Enter a name for this item."));
     }
 
     #[test]
