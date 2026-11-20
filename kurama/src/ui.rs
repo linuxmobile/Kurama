@@ -114,7 +114,7 @@ fn labeled_input(
                 .key(key)
                 .label(label)
                 .placeholder(placeholder, t.text_secondary)
-                .w(420.0)
+                .w_full()
                 .h(40.0)
                 .px(12.0)
                 .radius(8.0)
@@ -156,7 +156,7 @@ fn notes_input(
                 .key(key)
                 .label("Secure note")
                 .placeholder("Write your note", t.text_secondary)
-                .w(420.0)
+                .w_full()
                 .h(120.0)
                 .px(12.0)
                 .radius(8.0)
@@ -187,7 +187,7 @@ fn card_fields(
 ) -> El {
     col()
         .key(format!("{prefix}-card-fields"))
-        .gap(10.0)
+        .gap(12.0)
         .child(labeled_input(
             &card.cardholder_name,
             &format!("{prefix}-cardholder"),
@@ -206,46 +206,110 @@ fn card_fields(
             move |state| &mut draft(state).number,
             submit,
         ))
-        .child(labeled_input(
-            &card.brand,
-            &format!("{prefix}-card-brand"),
-            "Brand",
-            "Visa, Mastercard…",
-            dark,
-            move |state| &mut draft(state).brand,
-            submit,
-        ))
-        .child(labeled_input(
-            &card.exp_month,
-            &format!("{prefix}-card-exp-month"),
-            "Expiry month",
-            "MM",
-            dark,
-            move |state| &mut draft(state).exp_month,
-            submit,
-        ))
-        .child(labeled_input(
-            &card.exp_year,
-            &format!("{prefix}-card-exp-year"),
-            "Expiry year",
-            "YYYY",
-            dark,
-            move |state| &mut draft(state).exp_year,
-            submit,
-        ))
-        .child(labeled_input(
-            &card.code,
-            &format!("{prefix}-card-code"),
-            "Security code",
-            "CVV",
-            dark,
-            move |state| &mut draft(state).code,
-            submit,
-        ))
+        .child(
+            row()
+                .gap(10.0)
+                .child(
+                    labeled_input(
+                        &card.brand,
+                        &format!("{prefix}-card-brand"),
+                        "Brand",
+                        "Visa",
+                        dark,
+                        move |state| &mut draft(state).brand,
+                        submit,
+                    )
+                    .grow(1.0),
+                )
+                .child(
+                    labeled_input(
+                        &card.exp_month,
+                        &format!("{prefix}-card-exp-month"),
+                        "Month",
+                        "MM",
+                        dark,
+                        move |state| &mut draft(state).exp_month,
+                        submit,
+                    )
+                    .w(84.0),
+                )
+                .child(
+                    labeled_input(
+                        &card.exp_year,
+                        &format!("{prefix}-card-exp-year"),
+                        "Year",
+                        "YYYY",
+                        dark,
+                        move |state| &mut draft(state).exp_year,
+                        submit,
+                    )
+                    .w(110.0),
+                )
+                .child(
+                    labeled_input(
+                        &card.code,
+                        &format!("{prefix}-card-code"),
+                        "Code",
+                        "CVV",
+                        dark,
+                        move |state| &mut draft(state).code,
+                        submit,
+                    )
+                    .w(100.0),
+                ),
+        )
+}
+
+fn form_panel(key: &str, title: &str, dark: bool, header_extra: El, body: El, footer: El) -> El {
+    let t = tok::theme(dark);
+    col()
+        .key(key)
+        .w_full()
+        .grow(1.0)
+        .h_full()
+        .center()
+        .padding(20.0)
+        .fill(t.bg)
+        .child(
+            col()
+                .key(format!("{key}-panel"))
+                .w(680.0)
+                .max_h(620.0)
+                .radius(14.0)
+                .fill(t.card)
+                .border(1.0, t.card_border)
+                .child(
+                    col()
+                        .key(format!("{key}-header"))
+                        .gap(10.0)
+                        .padding(20.0)
+                        .child(text(title).font(WINDOW_TITLE).color(t.text))
+                        .child(header_extra),
+                )
+                .child(
+                    body.key(format!("{key}-body"))
+                        .scroll(ScrollSpec {
+                            stick_bottom: false,
+                        })
+                        .shrink()
+                        .min_h(0.0)
+                        .padding(20.0)
+                        .gap(12.0),
+                )
+                .child(el().h(1.0).w_full().fill(t.separator))
+                .child(
+                    row()
+                        .key(format!("{key}-footer"))
+                        .w_full()
+                        .gap(10.0)
+                        .center_y()
+                        .padding(16.0)
+                        .child(footer.grow(1.0)),
+                ),
+        )
 }
 
 fn create_form(s: &State, dark: bool) -> El {
-    let t = tok::theme(dark);
     let Some(draft) = s.create.as_ref() else {
         return el();
     };
@@ -256,7 +320,7 @@ fn create_form(s: &State, dark: bool) -> El {
         ("identity", "Identity", 4),
         ("ssh-key", "SSH Key", 5),
     ];
-    let mut choices = row().key("create-types").gap(8.0);
+    let mut choices = row().key("create-types").gap(6.0);
     for (slug, label, value) in types {
         let active = draft.item_type == value;
         choices = choices.child(action(
@@ -271,41 +335,20 @@ fn create_form(s: &State, dark: bool) -> El {
         ));
     }
 
-    col()
-        .key("create-form")
-        .w_full()
-        .grow(1.0)
-        .h_full()
-        .center()
-        .gap(14.0)
-        .fill(t.bg)
-        .child(text("New item").font(WINDOW_TITLE).color(t.text))
-        .child(
-            text_input(&draft.name, type_::BODY)
-                .key("create-name")
-                .label("Item name")
-                .placeholder("Item name", t.text_secondary)
-                .w(420.0)
-                .h(40.0)
-                .px(12.0)
-                .radius(8.0)
-                .fill(t.card)
-                .on_edit(|s: &mut State| &mut s.create.as_mut().unwrap().name)
-                .on_submit(|s: &mut State, _tx: &mut Tx| submit_create(s))
-                .on_input_key(
-                    |s: &mut State, event: &KeyEvent, _tx: &mut Tx| match &event.key {
-                        Key::Escape => {
-                            cancel_create(s);
-                            true
-                        }
-                        _ => false,
-                    },
-                ),
-        )
+    let body = col()
+        .child(labeled_input(
+            &draft.name,
+            "create-name",
+            "Item name",
+            "Item name",
+            dark,
+            |state| &mut state.create.as_mut().unwrap().name,
+            submit_create,
+        ))
         .child(if draft.item_type == 1 {
             col()
                 .key("create-login-fields")
-                .gap(10.0)
+                .gap(12.0)
                 .child(labeled_input(
                     &draft.username,
                     "create-username",
@@ -353,8 +396,9 @@ fn create_form(s: &State, dark: bool) -> El {
             })
         } else {
             el()
-        })
-        .child(choices)
+        });
+
+    let footer = row()
         .child(action(
             "create-favorite",
             if draft.favorite {
@@ -368,7 +412,7 @@ fn create_form(s: &State, dark: bool) -> El {
         .child(
             row()
                 .key("create-folder")
-                .gap(8.0)
+                .gap(6.0)
                 .center_y()
                 .child(action("create-folder-prev", "‹", dark, |state| {
                     cycle_create_folder(state, -1)
@@ -380,18 +424,17 @@ fn create_form(s: &State, dark: bool) -> El {
                     ))
                     .key("create-folder-label")
                     .font(ROW_SUBTITLE)
-                    .color(t.text),
+                    .color(tok::theme(dark).text),
                 )
                 .child(action("create-folder-next", "›", dark, |state| {
                     cycle_create_folder(state, 1)
                 })),
         )
-        .child(
-            row()
-                .gap(8.0)
-                .child(action("create-submit", "Create", dark, submit_create))
-                .child(action("create-cancel", "Cancel", dark, cancel_create)),
-        )
+        .child(el().grow(1.0))
+        .child(action("create-submit", "Create", dark, submit_create))
+        .child(action("create-cancel", "Cancel", dark, cancel_create));
+
+    form_panel("create-form", "New item", dark, choices, body, footer)
 }
 
 fn edit_form(s: &State, dark: bool) -> El {
@@ -399,19 +442,32 @@ fn edit_form(s: &State, dark: bool) -> El {
     let Some(draft) = s.edit.as_ref() else {
         return el();
     };
-    col()
-        .key("edit-form")
-        .w_full()
-        .grow(1.0)
-        .h_full()
-        .center()
-        .gap(14.0)
-        .fill(t.bg)
-        .child(text("Edit item").font(WINDOW_TITLE).color(t.text))
+    let type_label = match draft.item_type {
+        1 => "Login",
+        2 => "Secure Note",
+        3 => "Card",
+        4 => "Identity",
+        5 => "SSH Key",
+        _ => "Item",
+    };
+    let header = text(format!("Type: {type_label}"))
+        .font(ROW_SUBTITLE)
+        .color(t.text_secondary);
+
+    let body = col()
+        .child(labeled_input(
+            &draft.name,
+            "edit-name",
+            "Item name",
+            "Item name",
+            dark,
+            |state| &mut state.edit.as_mut().unwrap().name,
+            submit_edit,
+        ))
         .child(if draft.login {
             col()
                 .key("edit-login-fields")
-                .gap(10.0)
+                .gap(12.0)
                 .child(labeled_input(
                     &draft.username,
                     "edit-username",
@@ -442,28 +498,6 @@ fn edit_form(s: &State, dark: bool) -> El {
         } else {
             el()
         })
-        .child(
-            text_input(&draft.name, type_::BODY)
-                .key("edit-name")
-                .label("Item name")
-                .placeholder("Item name", t.text_secondary)
-                .w(420.0)
-                .h(40.0)
-                .px(12.0)
-                .radius(8.0)
-                .fill(t.card)
-                .on_edit(|s: &mut State| &mut s.edit.as_mut().unwrap().name)
-                .on_submit(|s: &mut State, _tx: &mut Tx| submit_edit(s))
-                .on_input_key(
-                    |s: &mut State, event: &KeyEvent, _tx: &mut Tx| match &event.key {
-                        Key::Escape => {
-                            cancel_edit(s);
-                            true
-                        }
-                        _ => false,
-                    },
-                ),
-        )
         .child(if draft.item_type == 3 {
             card_fields(
                 &draft.card,
@@ -481,20 +515,24 @@ fn edit_form(s: &State, dark: bool) -> El {
             })
         } else {
             el()
-        })
+        });
+
+    let footer = row()
+        .child(action(
+            "edit-favorite",
+            if draft.favorite {
+                "★ Favorite"
+            } else {
+                "☆ Favorite"
+            },
+            dark,
+            toggle_edit_favorite,
+        ))
         .child(
             row()
-                .gap(8.0)
-                .child(action(
-                    "edit-favorite",
-                    if draft.favorite {
-                        "★ Favorite"
-                    } else {
-                        "☆ Favorite"
-                    },
-                    dark,
-                    toggle_edit_favorite,
-                ))
+                .key("edit-folder")
+                .gap(6.0)
+                .center_y()
                 .child(action("edit-folder-prev", "‹", dark, |state| {
                     cycle_edit_folder(state, -1)
                 }))
@@ -509,10 +547,13 @@ fn edit_form(s: &State, dark: bool) -> El {
                 )
                 .child(action("edit-folder-next", "›", dark, |state| {
                     cycle_edit_folder(state, 1)
-                }))
-                .child(action("save-edit", "Save", dark, submit_edit))
-                .child(action("cancel-edit", "Cancel", dark, cancel_edit)),
+                })),
         )
+        .child(el().grow(1.0))
+        .child(action("save-edit", "Save", dark, submit_edit))
+        .child(action("cancel-edit", "Cancel", dark, cancel_edit));
+
+    form_panel("edit-form", "Edit item", dark, header, body, footer)
 }
 
 fn top_bar(s: &State, dark: bool) -> El {

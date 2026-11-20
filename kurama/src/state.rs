@@ -1194,6 +1194,13 @@ pub fn scene_disconnected(state: &mut State) {
     state.notice = Some("Kurama backend is not running.".to_owned());
 }
 
+pub fn scene_create_card(state: &mut State) {
+    scene_populated(state);
+    let mut draft = start_create();
+    draft.item_type = 3;
+    state.create = Some(draft);
+}
+
 pub fn scene_trash(state: &mut State) {
     scene_populated(state);
     state.location = Location::Trash;

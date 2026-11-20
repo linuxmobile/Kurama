@@ -50,6 +50,7 @@ fn main() -> ExitCode {
             ("locked", state::scene_locked),
             ("disconnected", state::scene_disconnected),
             ("trash", state::scene_trash),
+            ("create-card", state::scene_create_card),
         ],
         setup: Some(state::setup),
         poll: Some(state::poll),
