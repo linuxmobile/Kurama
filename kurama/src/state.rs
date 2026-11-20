@@ -1317,6 +1317,17 @@ fn apply_auth_outcome(state: &mut State, outcome: AuthOutcome) {
     dispatch(state, Request::Refresh);
 }
 
+fn is_session_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("session expired")
+        || lower.contains("no active session")
+        || lower.contains("log in again")
+        || lower.contains("log in first")
+        || lower.contains("unauthorized")
+        || lower.contains("401")
+        || lower.contains("403")
+}
+
 fn apply(state: &mut State, event: Event) {
     state.busy = false;
     match event {
@@ -1532,7 +1543,30 @@ fn apply(state: &mut State, event: Event) {
                 state.totp = Some(meta);
             }
         }
-        Event::Error(message) => state.notice = Some(message),
+        Event::Error(message) => {
+            if is_session_error(&message) {
+                state.snapshot.status = "unauthenticated".to_owned();
+                state.rows.clear();
+                state.folders.clear();
+                state.folder_ids.clear();
+                state.location = Location::Vault;
+                state.folder = None;
+                state.selected = None;
+                state.details = None;
+                state.edit = None;
+                state.create = None;
+                clear_reveal(state);
+                state.password.replace_text("");
+                state.bump_rows_version();
+                if state.auth.is_none() {
+                    let server = state.snapshot.server.clone();
+                    state.auth = Some(empty_auth_draft(&server));
+                }
+                state.notice = Some("Your session expired. Sign in again.".to_owned());
+            } else {
+                state.notice = Some(message);
+            }
+        }
     }
 }
 
@@ -1702,6 +1736,14 @@ pub fn scene_account_two_factor(state: &mut State) {
     }
 }
 
+pub fn scene_session_expired(state: &mut State) {
+    scene_populated(state);
+    apply(
+        state,
+        Event::Error("Session expired or credentials rejected. Please log in again.".to_owned()),
+    );
+}
+
 pub fn scene_create_card(state: &mut State) {
     scene_populated(state);
     let mut draft = start_create();
@@ -1830,6 +1872,23 @@ mod tests {
         assert_eq!(
             state.auth.as_ref().map(|auth| auth.mode.clone()),
             Some(AuthMode::NewDevice)
+        );
+    }
+
+    #[test]
+    fn session_errors_return_to_the_account_form() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        apply(
+            &mut state,
+            Event::Error("Session expired. Log in again.".to_owned()),
+        );
+        assert_eq!(state.snapshot.status, "unauthenticated");
+        assert!(state.rows.is_empty());
+        assert!(state.auth.is_some());
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Your session expired. Sign in again.")
         );
     }
 

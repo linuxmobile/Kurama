@@ -51,6 +51,7 @@ fn main() -> ExitCode {
             ("disconnected", state::scene_disconnected),
             ("account", state::scene_account),
             ("account-two-factor", state::scene_account_two_factor),
+            ("session-expired", state::scene_session_expired),
             ("trash", state::scene_trash),
             ("create-card", state::scene_create_card),
             ("create-identity", state::scene_create_identity),
@@ -183,6 +184,18 @@ mod tests {
                 scale: 1.0,
             },
         )
+    }
+
+    #[test]
+    fn session_expired_scene_shows_account_form_and_notice() {
+        let mut rt = runtime(state::scene_session_expired);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("account-form").is_some());
+        assert!(rt.find("account-form-error").is_some());
+        assert_eq!(
+            rt.state.notice.as_deref(),
+            Some("Your session expired. Sign in again.")
+        );
     }
 
     #[test]
