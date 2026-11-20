@@ -12,7 +12,8 @@ use crate::state::{
     dispatch, folder_label, move_selection, open_attachment, open_trash, restore_item,
     select_category, select_folder, select_item, set_create_type, set_favorite, start_edit,
     submit_create, submit_edit, submit_quick_unlock, submit_search, submit_unlock,
-    toggle_create_favorite, toggle_edit_favorite, toggle_reveal, Category, Location, State,
+    toggle_create_favorite, toggle_edit_favorite, toggle_reveal, CardDraft, Category, Location,
+    State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -177,6 +178,72 @@ fn notes_input(
         )
 }
 
+fn card_fields(
+    card: &CardDraft,
+    prefix: &str,
+    dark: bool,
+    draft: for<'a> fn(&'a mut State) -> &'a mut CardDraft,
+    submit: fn(&mut State),
+) -> El {
+    col()
+        .key(format!("{prefix}-card-fields"))
+        .gap(10.0)
+        .child(labeled_input(
+            &card.cardholder_name,
+            &format!("{prefix}-cardholder"),
+            "Cardholder",
+            "Name on card",
+            dark,
+            move |state| &mut draft(state).cardholder_name,
+            submit,
+        ))
+        .child(labeled_input(
+            &card.number,
+            &format!("{prefix}-card-number"),
+            "Number",
+            "Card number",
+            dark,
+            move |state| &mut draft(state).number,
+            submit,
+        ))
+        .child(labeled_input(
+            &card.brand,
+            &format!("{prefix}-card-brand"),
+            "Brand",
+            "Visa, Mastercard…",
+            dark,
+            move |state| &mut draft(state).brand,
+            submit,
+        ))
+        .child(labeled_input(
+            &card.exp_month,
+            &format!("{prefix}-card-exp-month"),
+            "Expiry month",
+            "MM",
+            dark,
+            move |state| &mut draft(state).exp_month,
+            submit,
+        ))
+        .child(labeled_input(
+            &card.exp_year,
+            &format!("{prefix}-card-exp-year"),
+            "Expiry year",
+            "YYYY",
+            dark,
+            move |state| &mut draft(state).exp_year,
+            submit,
+        ))
+        .child(labeled_input(
+            &card.code,
+            &format!("{prefix}-card-code"),
+            "Security code",
+            "CVV",
+            dark,
+            move |state| &mut draft(state).code,
+            submit,
+        ))
+}
+
 fn create_form(s: &State, dark: bool) -> El {
     let t = tok::theme(dark);
     let Some(draft) = s.create.as_ref() else {
@@ -266,6 +333,17 @@ fn create_form(s: &State, dark: bool) -> El {
                     |state| &mut state.create.as_mut().unwrap().website,
                     submit_create,
                 ))
+        } else {
+            el()
+        })
+        .child(if draft.item_type == 3 {
+            card_fields(
+                &draft.card,
+                "create",
+                dark,
+                |state| &mut state.create.as_mut().unwrap().card,
+                submit_create,
+            )
         } else {
             el()
         })
@@ -386,6 +464,17 @@ fn edit_form(s: &State, dark: bool) -> El {
                     },
                 ),
         )
+        .child(if draft.item_type == 3 {
+            card_fields(
+                &draft.card,
+                "edit",
+                dark,
+                |state| &mut state.edit.as_mut().unwrap().card,
+                submit_edit,
+            )
+        } else {
+            el()
+        })
         .child(if draft.item_type == 2 {
             notes_input(&draft.notes, "edit-notes", dark, |state| {
                 &mut state.edit.as_mut().unwrap().notes

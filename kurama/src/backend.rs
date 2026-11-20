@@ -98,6 +98,39 @@ pub struct Approval {
     pub client: String,
 }
 
+#[derive(Clone)]
+pub struct CardInput {
+    pub cardholder_name: Option<Secret>,
+    pub number: Option<Secret>,
+    pub brand: Option<Secret>,
+    pub exp_month: Option<Secret>,
+    pub exp_year: Option<Secret>,
+    pub code: Option<Secret>,
+}
+
+impl CardInput {
+    fn value(&self) -> Option<Value> {
+        let value = json!({
+            "cardholder_name": self.cardholder_name.as_ref().map(Secret::as_str),
+            "number": self.number.as_ref().map(Secret::as_str),
+            "brand": self.brand.as_ref().map(Secret::as_str),
+            "exp_month": self.exp_month.as_ref().map(Secret::as_str),
+            "exp_year": self.exp_year.as_ref().map(Secret::as_str),
+            "code": self.code.as_ref().map(Secret::as_str),
+        });
+        let used = value
+            .as_object()
+            .is_some_and(|fields| fields.values().any(|field| !field.is_null()));
+        used.then_some(value)
+    }
+}
+
+impl fmt::Debug for CardInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CardInput([redacted])")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Request {
     Refresh,
@@ -137,6 +170,7 @@ pub enum Request {
         password: Option<Secret>,
         website: Option<String>,
         notes: Option<Secret>,
+        card: Option<CardInput>,
     },
     CreateItem {
         name: String,
@@ -147,6 +181,7 @@ pub enum Request {
         password: Option<Secret>,
         website: Option<String>,
         notes: Option<Secret>,
+        card: Option<CardInput>,
     },
     Folders,
     Restore {
@@ -382,6 +417,7 @@ pub fn perform(request: Request) -> Event {
             password,
             website,
             notes,
+            card,
         } => match call(json!({
             "action": "update_item",
             "id": id.clone(),
@@ -392,7 +428,8 @@ pub fn perform(request: Request) -> Event {
                 "username": username,
                 "password": password.as_ref().map(Secret::as_str),
                 "website": website,
-                "notes": notes.as_ref().map(Secret::as_str)
+                "notes": notes.as_ref().map(Secret::as_str),
+                "card": card.as_ref().and_then(CardInput::value)
             }
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
@@ -410,6 +447,7 @@ pub fn perform(request: Request) -> Event {
             password,
             website,
             notes,
+            card,
         } => match call(json!({
             "action": "create_item",
             "options": {
@@ -420,7 +458,8 @@ pub fn perform(request: Request) -> Event {
                 "username": username,
                 "password": password.as_ref().map(Secret::as_str),
                 "website": website,
-                "notes": notes.as_ref().map(Secret::as_str)
+                "notes": notes.as_ref().map(Secret::as_str),
+                "card": card.as_ref().and_then(CardInput::value)
             }
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
@@ -1034,6 +1073,7 @@ mod tests {
             password: Some(Secret::new("hunter2".to_owned())),
             website: None,
             notes: Some(Secret::new("private note".to_owned())),
+            card: None,
         };
         let debug = format!("{request:?}");
         assert!(!debug.contains("hunter2"));

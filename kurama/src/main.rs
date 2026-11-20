@@ -81,8 +81,9 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Home => state::select_first(state, tx),
         Key::End => state::select_last(state, tx),
         Key::Text(text) => {
+            let focused = tx.focused();
             let typing = matches!(
-                tx.focused(),
+                focused,
                 Some(
                     "search"
                         | "unlock-password"
@@ -97,7 +98,8 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                         | "create-notes"
                         | "edit-notes"
                 )
-            );
+            ) || focused
+                .is_some_and(|key| key.starts_with("create-card") || key.starts_with("edit-card"));
             if typing {
                 return false;
             }
@@ -449,6 +451,55 @@ mod tests {
                 if username.as_deref() == Some("member@example.com")
                     && password.as_ref().map(backend::Secret::as_str) == Some("s3cret")
                     && website.as_deref() == Some("https://store.example.com")
+        )));
+    }
+
+    #[test]
+    fn create_form_submits_card_details() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("new-item").expect("new item button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("create-type-card").expect("card type button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        for key in [
+            "create-card-fields",
+            "create-cardholder",
+            "create-card-number",
+            "create-card-brand",
+            "create-card-exp-month",
+            "create-card-exp-year",
+            "create-card-code",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+        let draft = rt.state.create.as_mut().unwrap();
+        draft.name.replace_text("Payment card");
+        draft.card.cardholder_name.replace_text("Ada Lovelace");
+        draft.card.number.replace_text("4242424242424242");
+        draft.card.brand.replace_text("Visa");
+        draft.card.exp_month.replace_text("12");
+        draft.card.exp_year.replace_text("2030");
+        draft.card.code.replace_text("123");
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("create-submit").expect("create button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::CreateItem { card: Some(card), .. }
+                if card.number.as_ref().map(backend::Secret::as_str) == Some("4242424242424242")
+                    && card.code.as_ref().map(backend::Secret::as_str) == Some("123")
+                    && card.exp_year.as_ref().map(backend::Secret::as_str) == Some("2030")
         )));
     }
 

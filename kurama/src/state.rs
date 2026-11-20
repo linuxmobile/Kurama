@@ -7,8 +7,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use rune::{edit::TextEdit, Tx, Waker};
 
 use crate::backend::{
-    self, clear_revealed, clear_totp, Approval, Event, FieldValue, ItemDetails, ItemField, Request,
-    Secret, Snapshot, TotpMeta, VaultRow,
+    self, clear_revealed, clear_totp, Approval, CardInput, Event, FieldValue, ItemDetails,
+    ItemField, Request, Secret, Snapshot, TotpMeta, VaultRow,
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -73,6 +73,15 @@ pub enum Location {
     Trash,
 }
 
+pub struct CardDraft {
+    pub cardholder_name: TextEdit,
+    pub number: TextEdit,
+    pub brand: TextEdit,
+    pub exp_month: TextEdit,
+    pub exp_year: TextEdit,
+    pub code: TextEdit,
+}
+
 pub struct CreateDraft {
     pub name: TextEdit,
     pub item_type: i64,
@@ -82,6 +91,7 @@ pub struct CreateDraft {
     pub password: TextEdit,
     pub website: TextEdit,
     pub notes: TextEdit,
+    pub card: CardDraft,
 }
 
 pub struct EditDraft {
@@ -95,6 +105,7 @@ pub struct EditDraft {
     pub password: TextEdit,
     pub website: TextEdit,
     pub notes: TextEdit,
+    pub card: CardDraft,
 }
 
 pub struct State {
@@ -372,6 +383,7 @@ pub fn start_create() -> CreateDraft {
         password: TextEdit::new("").secure(),
         website: TextEdit::new(""),
         notes: TextEdit::new(""),
+        card: empty_card_draft(),
     }
 }
 
@@ -382,6 +394,44 @@ fn optional_text(field: &TextEdit) -> Option<String> {
 
 fn optional_secret(field: &TextEdit) -> Option<String> {
     (!field.text.is_empty()).then(|| field.text.clone())
+}
+
+fn empty_card_draft() -> CardDraft {
+    CardDraft {
+        cardholder_name: TextEdit::new(""),
+        number: TextEdit::new("").secure(),
+        brand: TextEdit::new(""),
+        exp_month: TextEdit::new(""),
+        exp_year: TextEdit::new(""),
+        code: TextEdit::new("").secure(),
+    }
+}
+
+fn card_input(draft: &CardDraft) -> Option<CardInput> {
+    let cardholder_name = optional_secret(&draft.cardholder_name).map(Secret::new);
+    let number = optional_secret(&draft.number).map(Secret::new);
+    let brand = optional_secret(&draft.brand).map(Secret::new);
+    let exp_month = optional_secret(&draft.exp_month).map(Secret::new);
+    let exp_year = optional_secret(&draft.exp_year).map(Secret::new);
+    let code = optional_secret(&draft.code).map(Secret::new);
+    let used = [
+        &cardholder_name,
+        &number,
+        &brand,
+        &exp_month,
+        &exp_year,
+        &code,
+    ]
+    .iter()
+    .any(|field| field.is_some());
+    used.then_some(CardInput {
+        cardholder_name,
+        number,
+        brand,
+        exp_month,
+        exp_year,
+        code,
+    })
 }
 
 fn item_type_id(type_name: &str) -> i64 {
@@ -473,6 +523,7 @@ pub fn submit_create(state: &mut State) {
             password: optional_secret(&draft.password).map(Secret::new),
             website: optional_text(&draft.website),
             notes: optional_secret(&draft.notes).map(Secret::new),
+            card: card_input(&draft.card),
         },
     );
 }
@@ -496,6 +547,7 @@ pub fn start_edit(state: &mut State) {
         password: TextEdit::new("").secure(),
         website: TextEdit::new(""),
         notes: TextEdit::new(""),
+        card: empty_card_draft(),
     });
 }
 
@@ -536,6 +588,7 @@ pub fn submit_edit(state: &mut State) {
             password: optional_secret(&draft.password).map(Secret::new),
             website: optional_text(&draft.website),
             notes: optional_secret(&draft.notes).map(Secret::new),
+            card: card_input(&draft.card),
         },
     );
 }
