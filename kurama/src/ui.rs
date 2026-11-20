@@ -89,8 +89,13 @@ fn help(_s: &State, dark: bool) -> El {
         ("h / l", "Change category"),
         ("/", "Focus search"),
         ("n", "Create a new item"),
+        ("e", "Edit the selected item"),
+        ("c", "Copy the selected password"),
         ("g", "Generate a password"),
         ("s", "Open Sends"),
+        (",", "Open settings"),
+        ("Ctrl/⌘ + L", "Lock the vault"),
+        ("Ctrl/⌘ + R", "Synchronize the vault"),
         ("?", "Toggle this help"),
         ("Esc", "Close a form or this help"),
     ];

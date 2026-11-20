@@ -80,11 +80,20 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     if state.snapshot.status != "unlocked" {
         return false;
     }
+    if event.is_command('l') {
+        state::dispatch(state, backend::Request::Lock);
+        return true;
+    }
+    if event.is_command('r') {
+        state::dispatch(state, backend::Request::Sync);
+        return true;
+    }
     match &event.key {
         Key::Escape if state.settings_open => {
             state::close_settings(state);
             true
         }
+        _ if state.settings_open => false,
         Key::Escape if state.help => {
             state.help = false;
             true
@@ -193,6 +202,24 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                     state.create = Some(state::start_create());
                     state.form_error = None;
                     tx.focus("create-name", true);
+                    true
+                }
+                "e" => {
+                    if state.selected_item().is_none() {
+                        return false;
+                    }
+                    state::start_edit(state);
+                    if state.edit.is_some() {
+                        tx.focus("edit-name", true);
+                    }
+                    true
+                }
+                "c" => {
+                    state::copy_field(state, "password", "Password", true);
+                    true
+                }
+                "," => {
+                    state::open_settings(state);
                     true
                 }
                 "g" => {
@@ -767,6 +794,90 @@ mod tests {
                 preview,
             } if item_id == "1" && attachment_id == "att-1" && filename == "notes.txt" && !preview
         )));
+    }
+
+    #[test]
+    fn shortcuts_edit_copy_and_open_settings() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.requests = Some(tx.clone());
+        });
+        rt.on_key = Some(on_key);
+        rt.frame(1.0 / 60.0);
+        let press = |rt: &mut Runtime<State>, key: Key| {
+            rt.key(KeyEvent {
+                key,
+                mods: Mods::default(),
+            });
+            rt.frame(1.0 / 60.0);
+        };
+
+        press(&mut rt, Key::Text("e".to_owned()));
+        assert!(rt.state.edit.is_some());
+        assert!(rt.find("edit-name").is_some());
+        press(&mut rt, Key::Escape);
+        assert!(rt.state.edit.is_none());
+
+        press(&mut rt, Key::Text("c".to_owned()));
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            Request::CopyField {
+                ref key,
+                sensitive: true,
+                ..
+            } if key == "password"
+        )));
+
+        press(&mut rt, Key::Text(",".to_owned()));
+        assert!(rt.state.settings_open);
+        assert!(rt.find("settings").is_some());
+        press(&mut rt, Key::Text("n".to_owned()));
+        assert!(rt.state.create.is_none());
+    }
+
+    #[test]
+    fn command_shortcuts_lock_and_sync() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.requests = Some(tx.clone());
+        });
+        rt.on_key = Some(on_key);
+        rt.frame(1.0 / 60.0);
+        for key in [Key::Command('l'), Key::Command('r')] {
+            rt.key(KeyEvent {
+                key,
+                mods: Mods::default(),
+            });
+            rt.frame(1.0 / 60.0);
+        }
+        let requests: Vec<_> = rx.try_iter().collect();
+        assert!(requests
+            .iter()
+            .any(|request| matches!(request, Request::Lock)));
+        assert!(requests
+            .iter()
+            .any(|request| matches!(request, Request::Sync)));
+    }
+
+    #[test]
+    fn single_letter_shortcuts_do_not_fire_while_typing() {
+        let mut rt = runtime(state::scene_populated);
+        rt.on_key = Some(on_key);
+        rt.frame(1.0 / 60.0);
+        rt.key(KeyEvent {
+            key: Key::Text("/".to_owned()),
+            mods: Mods::default(),
+        });
+        rt.frame(1.0 / 60.0);
+        rt.key(KeyEvent {
+            key: Key::Text("e".to_owned()),
+            mods: Mods::default(),
+        });
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.query.text.as_str(), "e");
+        assert!(rt.state.edit.is_none());
     }
 
     #[test]
