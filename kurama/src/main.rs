@@ -54,6 +54,7 @@ fn main() -> ExitCode {
             ("create-identity", state::scene_create_identity),
             ("create-ssh", state::scene_create_ssh),
             ("create-fields", state::scene_create_fields),
+            ("create-uris", state::scene_create_uris),
         ],
         setup: Some(state::setup),
         poll: Some(state::poll),
@@ -94,11 +95,9 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                         | "edit-name"
                         | "edit-username"
                         | "edit-password"
-                        | "edit-website"
                         | "create-name"
                         | "create-username"
                         | "create-password"
-                        | "create-website"
                         | "create-notes"
                         | "edit-notes"
                         | "create-first-name"
@@ -126,6 +125,8 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                     || key.starts_with("edit-card")
                     || key.starts_with("create-field-name-")
                     || key.starts_with("create-field-value-")
+                    || key.starts_with("create-uri-")
+                    || key.starts_with("edit-uri-")
             });
             if typing {
                 return false;
@@ -210,6 +211,7 @@ mod tests {
         for key in [
             "detail-field-username",
             "detail-field-uri-0",
+            "detail-field-uri-1",
             "detail-field-password",
             "detail-field-totp",
             "detail-field-created",
@@ -482,7 +484,9 @@ mod tests {
             "create-login-fields",
             "create-username",
             "create-password",
-            "create-website",
+            "create-uri-fields",
+            "create-uri-0",
+            "create-uri-add",
         ] {
             assert!(rt.find(key).is_some(), "missing key: {key}");
         }
@@ -490,7 +494,9 @@ mod tests {
         draft.name.replace_text("Store");
         draft.username.replace_text("member@example.com");
         draft.password.replace_text("s3cret");
-        draft.website.replace_text("https://store.example.com");
+        draft.uris[0].replace_text("https://store.example.com");
+        state::add_create_uri(&mut rt.state);
+        rt.state.create.as_mut().unwrap().uris[1].replace_text("https://admin.store.example.com");
         rt.frame(1.0 / 60.0);
         let (x, y) = rt.find("create-submit").expect("create button");
         rt.pointer_down(x, y);
@@ -498,10 +504,13 @@ mod tests {
         rt.frame(1.0 / 60.0);
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            crate::backend::Request::CreateItem { username, password, website, .. }
+            crate::backend::Request::CreateItem { username, password, uris, .. }
                 if username.as_deref() == Some("member@example.com")
                     && password.as_ref().map(backend::Secret::as_str) == Some("s3cret")
-                    && website.as_deref() == Some("https://store.example.com")
+                    && uris == vec![
+                        "https://store.example.com",
+                        "https://admin.store.example.com",
+                    ]
         )));
     }
 
@@ -717,13 +726,16 @@ mod tests {
             "edit-login-fields",
             "edit-username",
             "edit-password",
-            "edit-website",
+            "edit-uri-fields",
+            "edit-uri-0",
+            "edit-uri-1",
+            "edit-uri-add",
         ] {
             assert!(rt.find(key).is_some(), "missing key: {key}");
         }
         let draft = rt.state.edit.as_mut().unwrap();
         draft.password.replace_text("new-secret");
-        draft.website.replace_text("https://new.example.com");
+        draft.uris[0].replace_text("https://new.example.com");
         rt.frame(1.0 / 60.0);
         let (x, y) = rt.find("save-edit").expect("save button");
         rt.pointer_down(x, y);
@@ -731,11 +743,14 @@ mod tests {
         rt.frame(1.0 / 60.0);
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            crate::backend::Request::UpdateItem { id, username, password, website, .. }
+            crate::backend::Request::UpdateItem { id, username, password, uris, .. }
                 if id == "1"
                     && username.as_deref() == Some("dev@example.com")
                     && password.as_ref().map(backend::Secret::as_str) == Some("new-secret")
-                    && website.as_deref() == Some("https://new.example.com")
+                    && uris == vec![
+                        "https://new.example.com",
+                        "https://docs.example.com",
+                    ]
         )));
     }
 

@@ -112,7 +112,7 @@ pub struct CreateDraft {
     pub folder_id: Option<String>,
     pub username: TextEdit,
     pub password: TextEdit,
-    pub website: TextEdit,
+    pub uris: Vec<TextEdit>,
     pub notes: TextEdit,
     pub card: CardDraft,
     pub identity: IdentityDraft,
@@ -129,7 +129,7 @@ pub struct EditDraft {
     pub login: bool,
     pub username: TextEdit,
     pub password: TextEdit,
-    pub website: TextEdit,
+    pub uris: Vec<TextEdit>,
     pub notes: TextEdit,
     pub card: CardDraft,
     pub identity: IdentityDraft,
@@ -410,7 +410,7 @@ pub fn start_create() -> CreateDraft {
         folder_id: None,
         username: TextEdit::new(""),
         password: TextEdit::new("").secure(),
-        website: TextEdit::new(""),
+        uris: vec![TextEdit::new("")],
         notes: TextEdit::new(""),
         card: empty_card_draft(),
         identity: empty_identity_draft(),
@@ -426,6 +426,32 @@ fn optional_text(field: &TextEdit) -> Option<String> {
 
 fn optional_secret(field: &TextEdit) -> Option<String> {
     (!field.text.is_empty()).then(|| field.text.clone())
+}
+
+fn uri_values(fields: &[TextEdit]) -> Vec<String> {
+    fields.iter().filter_map(optional_text).collect()
+}
+
+fn prefilled_uri_draft(state: &State, item_id: &str) -> Vec<TextEdit> {
+    let uris: BTreeMap<usize, String> = state
+        .details
+        .iter()
+        .filter(|details| details.id == item_id)
+        .flat_map(|details| details.fields.iter())
+        .filter_map(|field| {
+            let index = field.key.strip_prefix("uri-")?.parse::<usize>().ok()?;
+            let FieldValue::Text(value) = &field.value else {
+                return None;
+            };
+            Some((index, value.clone()))
+        })
+        .collect();
+    let values: Vec<_> = uris.into_values().collect();
+    if values.is_empty() {
+        vec![TextEdit::new("")]
+    } else {
+        values.into_iter().map(TextEdit::new).collect()
+    }
 }
 
 fn empty_card_draft() -> CardDraft {
@@ -642,6 +668,34 @@ pub fn add_create_field(state: &mut State) {
     }
 }
 
+pub fn add_create_uri(state: &mut State) {
+    if let Some(draft) = state.create.as_mut() {
+        draft.uris.push(TextEdit::new(""));
+    }
+}
+
+pub fn remove_create_uri(state: &mut State, index: usize) {
+    if let Some(draft) = state.create.as_mut() {
+        if index < draft.uris.len() {
+            draft.uris.remove(index);
+        }
+    }
+}
+
+pub fn add_edit_uri(state: &mut State) {
+    if let Some(draft) = state.edit.as_mut() {
+        draft.uris.push(TextEdit::new(""));
+    }
+}
+
+pub fn remove_edit_uri(state: &mut State, index: usize) {
+    if let Some(draft) = state.edit.as_mut() {
+        if index < draft.uris.len() {
+            draft.uris.remove(index);
+        }
+    }
+}
+
 pub fn remove_create_field(state: &mut State, index: usize) {
     if let Some(draft) = state.create.as_mut() {
         if index < draft.fields.len() {
@@ -733,7 +787,7 @@ pub fn submit_create(state: &mut State) {
             folder_id: draft.folder_id,
             username: optional_text(&draft.username),
             password: optional_secret(&draft.password).map(Secret::new),
-            website: optional_text(&draft.website),
+            uris: uri_values(&draft.uris),
             notes: optional_secret(&draft.notes).map(Secret::new),
             card: (draft.item_type == 3)
                 .then(|| card_input(&draft.card))
@@ -764,7 +818,7 @@ pub fn start_edit(state: &mut State) {
         login: item.type_name == "login",
         username: TextEdit::new(&item.subtitle),
         password: TextEdit::new("").secure(),
-        website: TextEdit::new(""),
+        uris: prefilled_uri_draft(state, &item.id),
         notes: TextEdit::new(""),
         card: empty_card_draft(),
         identity: if item.type_name == "identity" {
@@ -812,7 +866,7 @@ pub fn submit_edit(state: &mut State) {
             folder_id: draft.folder_id,
             username: optional_text(&draft.username),
             password: optional_secret(&draft.password).map(Secret::new),
-            website: optional_text(&draft.website),
+            uris: uri_values(&draft.uris),
             notes: optional_secret(&draft.notes).map(Secret::new),
             card: (draft.item_type == 3)
                 .then(|| card_input(&draft.card))
@@ -1355,6 +1409,11 @@ pub fn scene_populated(state: &mut State) {
                 value: FieldValue::Text("https://github.com".to_owned()),
             },
             ItemField {
+                key: "uri-1".to_owned(),
+                label: "Website".to_owned(),
+                value: FieldValue::Text("https://docs.example.com".to_owned()),
+            },
+            ItemField {
                 key: "password".to_owned(),
                 label: "Password".to_owned(),
                 value: FieldValue::Masked,
@@ -1451,6 +1510,14 @@ pub fn scene_create_fields(state: &mut State) {
     scene_populated(state);
     let mut draft = start_create();
     add_create_field_raw(&mut draft);
+    state.create = Some(draft);
+}
+
+pub fn scene_create_uris(state: &mut State) {
+    scene_populated(state);
+    let mut draft = start_create();
+    draft.uris[0] = TextEdit::new("https://github.com");
+    draft.uris.push(TextEdit::new("https://docs.example.com"));
     state.create = Some(draft);
 }
 
@@ -1707,13 +1774,13 @@ mod tests {
         assert!(state.edit.is_none());
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            Request::UpdateItem { id, name, favorite, username, password, website, .. }
+            Request::UpdateItem { id, name, favorite, username, password, uris, .. }
                 if id == "1"
                     && name == "Renamed GitHub"
                     && !favorite
                     && username.as_deref() == Some("dev@example.com")
                     && password.is_none()
-                    && website.is_none()
+                    && uris == vec!["https://github.com", "https://docs.example.com"]
         )));
 
         apply(

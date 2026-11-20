@@ -8,13 +8,14 @@ use rune::{
 use crate::backend::{revealed_value, totp_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
-    add_create_field, cancel_create, cancel_edit, copy_field, cycle_create_field_type,
-    cycle_create_folder, cycle_edit_folder, delete_item, dispatch, folder_label, move_selection,
-    open_attachment, open_trash, remove_create_field, restore_item, select_category, select_folder,
-    select_item, set_create_type, set_favorite, start_edit, submit_create, submit_edit,
-    submit_quick_unlock, submit_search, submit_unlock, toggle_create_favorite,
-    toggle_create_field_value, toggle_edit_favorite, toggle_reveal, CardDraft, Category,
-    CustomFieldDraft, IdentityDraft, Location, SshDraft, State,
+    add_create_field, add_create_uri, add_edit_uri, cancel_create, cancel_edit, copy_field,
+    cycle_create_field_type, cycle_create_folder, cycle_edit_folder, delete_item, dispatch,
+    folder_label, move_selection, open_attachment, open_trash, remove_create_field,
+    remove_create_uri, remove_edit_uri, restore_item, select_category, select_folder, select_item,
+    set_create_type, set_favorite, start_edit, submit_create, submit_edit, submit_quick_unlock,
+    submit_search, submit_unlock, toggle_create_favorite, toggle_create_field_value,
+    toggle_edit_favorite, toggle_reveal, CardDraft, Category, CustomFieldDraft, IdentityDraft,
+    Location, SshDraft, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -561,6 +562,97 @@ fn custom_fields(fields: &[CustomFieldDraft], dark: bool) -> El {
     ))
 }
 
+fn create_uri_fields(uris: &[TextEdit], dark: bool) -> El {
+    let t = tok::theme(dark);
+    let mut view = col().key("create-uri-fields").gap(12.0).child(
+        text("Websites")
+            .font(SECTION_TITLE)
+            .color(t.text_secondary)
+            .h(18.0)
+            .center_y(),
+    );
+    for (index, uri) in uris.iter().enumerate() {
+        let label = if uris.len() == 1 {
+            "Website".to_owned()
+        } else {
+            format!("Website {}", index + 1)
+        };
+        view = view.child(
+            row()
+                .key(format!("create-uri-row-{index}"))
+                .gap(10.0)
+                .center_y()
+                .child(form_field(
+                    format!("create-uri-{index}"),
+                    &label,
+                    "https://example.com",
+                    uri,
+                    dark,
+                    move |state| &mut state.create.as_mut().unwrap().uris[index],
+                    submit_create,
+                ))
+                .child(
+                    action(
+                        &format!("create-uri-remove-{index}"),
+                        "×",
+                        dark,
+                        move |state| remove_create_uri(state, index),
+                    )
+                    .w(32.0),
+                ),
+        );
+    }
+    view.child(action(
+        "create-uri-add",
+        "+ Add website",
+        dark,
+        add_create_uri,
+    ))
+}
+
+fn edit_uri_fields(uris: &[TextEdit], dark: bool) -> El {
+    let t = tok::theme(dark);
+    let mut view = col().key("edit-uri-fields").gap(12.0).child(
+        text("Websites")
+            .font(SECTION_TITLE)
+            .color(t.text_secondary)
+            .h(18.0)
+            .center_y(),
+    );
+    for (index, uri) in uris.iter().enumerate() {
+        let label = if uris.len() == 1 {
+            "Website".to_owned()
+        } else {
+            format!("Website {}", index + 1)
+        };
+        view = view.child(
+            row()
+                .key(format!("edit-uri-row-{index}"))
+                .gap(10.0)
+                .center_y()
+                .child(form_field(
+                    format!("edit-uri-{index}"),
+                    &label,
+                    "https://example.com",
+                    uri,
+                    dark,
+                    move |state| &mut state.edit.as_mut().unwrap().uris[index],
+                    submit_edit,
+                ))
+                .child(
+                    action(
+                        &format!("edit-uri-remove-{index}"),
+                        "×",
+                        dark,
+                        move |state| remove_edit_uri(state, index),
+                    )
+                    .w(32.0),
+                ),
+        );
+    }
+    view.child(action("edit-uri-add", "+ Add website", dark, add_edit_uri))
+}
+
 fn form_panel(
     key: &str,
     title: &str,
@@ -692,15 +784,7 @@ fn create_form(s: &State, dark: bool) -> El {
                     |state| &mut state.create.as_mut().unwrap().password,
                     submit_create,
                 ))
-                .child(labeled_input(
-                    &draft.website,
-                    "create-website",
-                    "Website",
-                    "https://example.com",
-                    dark,
-                    |state| &mut state.create.as_mut().unwrap().website,
-                    submit_create,
-                ))
+                .child(create_uri_fields(&draft.uris, dark))
         } else {
             el()
         })
@@ -836,15 +920,7 @@ fn edit_form(s: &State, dark: bool) -> El {
                     |state| &mut state.edit.as_mut().unwrap().password,
                     submit_edit,
                 ))
-                .child(labeled_input(
-                    &draft.website,
-                    "edit-website",
-                    "Website",
-                    "Leave blank to keep",
-                    dark,
-                    |state| &mut state.edit.as_mut().unwrap().website,
-                    submit_edit,
-                ))
+                .child(edit_uri_fields(&draft.uris, dark))
         } else {
             el()
         })
