@@ -1,0 +1,12 @@
+[package]
+name = "kurama"
+version = "0.1.0"
+edition = "2021"
+description = "Kurama desktop vault UI built with Rune"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+rune = { path = "../rune/crates/rune", default-features = true } # pinned checkout: 07f1ddde9a1d61def92e69f89beb28319a56bc17
+omawarden = { path = "../omawarden" }
+serde_json = "1"

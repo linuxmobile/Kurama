@@ -1,0 +1,4189 @@
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::io::{IsTerminal, Read};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::crypto::{
+    derive_master_key, derive_master_password_hash, EncString, KdfType, SymmetricCryptoKey,
+};
+use crate::vault::{parse_ssh_key_fields, SshMetadata, VaultItem};
+
+/// Maximum response size for error bodies (64 KiB)
+pub const MAX_ERROR_BODY_SIZE: u64 = 64 * 1024;
+
+/// Maximum response size for standard API JSON responses (e.g. prelogin, token, 2FA, ciphers) (2 MiB)
+pub const MAX_API_BODY_SIZE: u64 = 2 * 1024 * 1024;
+
+/// Maximum response size for vault synchronization responses (/sync) (64 MiB)
+pub const MAX_SYNC_BODY_SIZE: u64 = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone)]
+pub enum ApiError {
+    Network(String),
+    HttpStatus(reqwest::StatusCode, String),
+    Http(String),
+    Json(String),
+    AuthFailed(String),
+    TwoFactorRequired {
+        providers: Vec<i32>,
+        providers2: Option<serde_json::Value>,
+    },
+    NewDeviceVerificationRequired,
+    Crypto(String),
+    ResponseTooLarge {
+        size: u64,
+        max_allowed: u64,
+    },
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApiError::Network(s) => write!(f, "Network error: {}", s),
+            ApiError::HttpStatus(code, s) => write!(f, "HTTP error {}: {}", code, s),
+            ApiError::Http(s) => write!(f, "HTTP error: {}", s),
+            ApiError::Json(s) => write!(f, "JSON decode error: {}", s),
+            ApiError::AuthFailed(s) => write!(f, "API authentication failed: {}", s),
+            ApiError::TwoFactorRequired { .. } => write!(f, "Two-factor authentication required"),
+            ApiError::NewDeviceVerificationRequired => {
+                write!(f, "New device verification required")
+            }
+            ApiError::Crypto(s) => write!(f, "Cryptographic error: {}", s),
+            ApiError::ResponseTooLarge { size, max_allowed } => write!(
+                f,
+                "Response size {} bytes exceeds maximum allowed limit of {} bytes",
+                size, max_allowed
+            ),
+        }
+    }
+}
+impl std::error::Error for ApiError {}
+
+/// Reads bytes from a reader with both pre-read Content-Length rejection and streaming byte cap.
+pub fn read_response_limited<R: std::io::Read>(
+    reader: &mut R,
+    advertised_len: Option<u64>,
+    max_allowed: u64,
+) -> Result<Vec<u8>, ApiError> {
+    if let Some(advertised) = advertised_len {
+        if advertised > max_allowed {
+            return Err(ApiError::ResponseTooLarge {
+                size: advertised,
+                max_allowed,
+            });
+        }
+    }
+
+    let mut buf = Vec::new();
+    let take_limit = max_allowed.saturating_add(1);
+    reader
+        .take(take_limit)
+        .read_to_end(&mut buf)
+        .map_err(|e| ApiError::Http(format!("Failed to read response body: {}", e)))?;
+
+    if (buf.len() as u64) > max_allowed {
+        return Err(ApiError::ResponseTooLarge {
+            size: buf.len() as u64,
+            max_allowed,
+        });
+    }
+
+    Ok(buf)
+}
+
+/// Reads a UTF-8 string from a response with a size cap.
+pub fn read_response_text(
+    resp: &mut reqwest::blocking::Response,
+    max_allowed: u64,
+) -> Result<String, ApiError> {
+    let content_len = resp.content_length();
+    let bytes = read_response_limited(resp, content_len, max_allowed)?;
+    String::from_utf8(bytes)
+        .map_err(|e| ApiError::Http(format!("Invalid UTF-8 in response: {}", e)))
+}
+
+/// Reads a JSON object from a response with a size cap.
+pub fn read_response_json<T: serde::de::DeserializeOwned>(
+    resp: &mut reqwest::blocking::Response,
+    max_allowed: u64,
+) -> Result<T, ApiError> {
+    let content_len = resp.content_length();
+    let bytes = read_response_limited(resp, content_len, max_allowed)?;
+    serde_json::from_slice::<T>(&bytes).map_err(|e| ApiError::Json(e.to_string()))
+}
+
+impl From<reqwest::Error> for ApiError {
+    fn from(e: reqwest::Error) -> Self {
+        if e.is_connect() || e.is_timeout() {
+            ApiError::Network(e.to_string())
+        } else if let Some(status) = e.status() {
+            ApiError::HttpStatus(status, e.to_string())
+        } else {
+            let msg = e.to_string();
+            let lower = msg.to_lowercase();
+            if lower.contains("dns")
+                || lower.contains("connection refused")
+                || lower.contains("connect")
+                || lower.contains("timeout")
+                || lower.contains("timed out")
+                || lower.contains("unreachable")
+            {
+                ApiError::Network(msg)
+            } else {
+                ApiError::Http(msg)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PreloginResponse {
+    #[serde(alias = "kdf", alias = "Kdf")]
+    pub kdf: Option<u32>,
+    #[serde(alias = "kdfIterations", alias = "KdfIterations", alias = "iterations")]
+    pub kdf_iterations: Option<u32>,
+    #[serde(alias = "kdfMemory", alias = "KdfMemory", alias = "memory")]
+    pub kdf_memory: Option<u32>,
+    #[serde(
+        alias = "kdfParallelism",
+        alias = "KdfParallelism",
+        alias = "parallelism"
+    )]
+    pub kdf_parallelism: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenResponse {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_in: Option<u64>,
+    #[serde(rename = "token_type", alias = "tokenType")]
+    pub token_type: Option<String>,
+    #[serde(alias = "Key", alias = "key", alias = "userKey", alias = "UserKey")]
+    pub key: Option<String>,
+    #[serde(alias = "PrivateKey", alias = "private_key", alias = "privateKey")]
+    pub private_key: Option<String>,
+    #[serde(alias = "Kdf", alias = "kdf")]
+    pub kdf: Option<u32>,
+    #[serde(alias = "KdfIterations", alias = "kdfIterations", alias = "iterations")]
+    pub kdf_iterations: Option<u32>,
+    #[serde(alias = "KdfMemory", alias = "kdfMemory", alias = "memory")]
+    pub kdf_memory: Option<u32>,
+    #[serde(
+        alias = "KdfParallelism",
+        alias = "kdfParallelism",
+        alias = "parallelism"
+    )]
+    pub kdf_parallelism: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncResponse {
+    pub profile: Option<Value>,
+    #[serde(default)]
+    pub folders: Vec<Value>,
+    #[serde(default)]
+    pub collections: Vec<Value>,
+    #[serde(default)]
+    pub ciphers: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EnvironmentUrls {
+    pub base_url: String,
+    pub api_url: String,
+    pub identity_url: String,
+    pub is_cloud: bool,
+    pub has_explicit_identity: bool,
+}
+
+/// Determines whether a hostname or IP address represents a local loopback origin
+/// (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`, `[::1]`).
+pub fn is_loopback_host(host: &str) -> bool {
+    let clean = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if clean.eq_ignore_ascii_case("localhost") || clean.to_lowercase().ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(ip) = clean.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    false
+}
+
+impl EnvironmentUrls {
+    pub fn resolve(server_url: &str, explicit_identity_url: Option<&str>) -> Self {
+        let trimmed_server = server_url.trim();
+        let mut normalized_server = if trimmed_server.is_empty() {
+            "https://vault.bitwarden.com".to_string()
+        } else if !trimmed_server.starts_with("http://") && !trimmed_server.starts_with("https://")
+        {
+            format!("https://{}", trimmed_server)
+        } else {
+            trimmed_server.to_string()
+        };
+
+        if let Ok(parsed) = url::Url::parse(&normalized_server) {
+            let host = parsed.host_str().unwrap_or("").to_lowercase();
+            if parsed.scheme() == "http" && !is_loopback_host(&host) {
+                crate::log_warn!(
+                    "omawarden:api",
+                    "Plaintext HTTP is forbidden for remote server host '{}'. Upgrading to HTTPS to protect credentials in transit.",
+                    host
+                );
+                normalized_server = format!("https://{}", &normalized_server["http://".len()..]);
+            }
+        }
+
+        let parsed = url::Url::parse(&normalized_server).ok();
+        let host = parsed
+            .as_ref()
+            .and_then(|u| u.host_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let mut is_cloud = false;
+        let (base_url, api_url, mut identity_url) =
+            if host == "bitwarden.eu" || host.ends_with(".bitwarden.eu") {
+                is_cloud = true;
+                (
+                    "https://vault.bitwarden.eu".to_string(),
+                    "https://api.bitwarden.eu".to_string(),
+                    "https://identity.bitwarden.eu".to_string(),
+                )
+            } else if host == "bitwarden.com" || host.ends_with(".bitwarden.com") {
+                is_cloud = true;
+                (
+                    "https://vault.bitwarden.com".to_string(),
+                    "https://api.bitwarden.com".to_string(),
+                    "https://identity.bitwarden.com".to_string(),
+                )
+            } else {
+                let clean = normalized_server.trim_end_matches('/');
+                let root = if let Some(stripped) = clean.strip_suffix("/api") {
+                    stripped.trim_end_matches('/')
+                } else if let Some(stripped) = clean.strip_suffix("/identity") {
+                    stripped.trim_end_matches('/')
+                } else {
+                    clean
+                };
+                (
+                    root.to_string(),
+                    format!("{}/api", root),
+                    format!("{}/identity", root),
+                )
+            };
+
+        let mut has_explicit_identity = false;
+        if let Some(explicit) = explicit_identity_url {
+            let exp_trimmed = explicit.trim();
+            if !exp_trimmed.is_empty() {
+                has_explicit_identity = true;
+                let mut norm_explicit = if !exp_trimmed.starts_with("http://")
+                    && !exp_trimmed.starts_with("https://")
+                {
+                    format!("https://{}", exp_trimmed.trim_end_matches('/'))
+                } else {
+                    exp_trimmed.trim_end_matches('/').to_string()
+                };
+                if let Some(stripped) = norm_explicit.strip_suffix("/connect/token") {
+                    norm_explicit = stripped.trim_end_matches('/').to_string();
+                }
+                if let Ok(parsed) = url::Url::parse(&norm_explicit) {
+                    let host = parsed.host_str().unwrap_or("").to_lowercase();
+                    if parsed.scheme() == "http" && !is_loopback_host(&host) {
+                        crate::log_warn!(
+                            "omawarden:api",
+                            "Plaintext HTTP is forbidden for remote identity host '{}'. Upgrading to HTTPS to protect credentials in transit.",
+                            host
+                        );
+                        norm_explicit = format!("https://{}", &norm_explicit["http://".len()..]);
+                    }
+                }
+                identity_url = norm_explicit;
+            }
+        }
+
+        Self {
+            base_url,
+            api_url,
+            identity_url,
+            is_cloud,
+            has_explicit_identity,
+        }
+    }
+}
+
+/// Standard Bitwarden two-factor authentication provider types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(i32)]
+pub enum TwoFactorProviderType {
+    Authenticator = 0,
+    Email = 1,
+    Duo = 2,
+    Yubikey = 3,
+    U2f = 4,
+    Remember = 5,
+    OrganizationDuo = 6,
+    WebAuthn = 7,
+}
+
+impl TwoFactorProviderType {
+    pub fn from_i32(val: i32) -> Option<Self> {
+        match val {
+            0 => Some(Self::Authenticator),
+            1 => Some(Self::Email),
+            2 => Some(Self::Duo),
+            3 => Some(Self::Yubikey),
+            4 => Some(Self::U2f),
+            5 => Some(Self::Remember),
+            6 => Some(Self::OrganizationDuo),
+            7 => Some(Self::WebAuthn),
+            _ => None,
+        }
+    }
+
+    pub fn to_i32(self) -> i32 {
+        self as i32
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Authenticator => "Authenticator",
+            Self::Email => "Email",
+            Self::Duo => "Duo",
+            Self::Yubikey => "YubiKey",
+            Self::U2f => "U2F",
+            Self::Remember => "Remember",
+            Self::OrganizationDuo => "OrganizationDuo",
+            Self::WebAuthn => "WebAuthn",
+        }
+    }
+}
+
+/// Returns a stable device identifier (UUID format) for Bitwarden identity endpoints.
+/// Uses `/etc/machine-id` or `/var/lib/dbus/machine-id` if available,
+/// or falls back to an RFC 4122 v4 UUID.
+pub fn get_device_identifier() -> String {
+    for path in &["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+        if let Ok(id) = std::fs::read_to_string(path) {
+            let trimmed = id.trim();
+            if trimmed.len() == 32 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                return format!(
+                    "{}-{}-{}-{}-{}",
+                    &trimmed[0..8],
+                    &trimmed[8..12],
+                    &trimmed[12..16],
+                    &trimmed[16..20],
+                    &trimmed[20..32]
+                );
+            }
+        }
+    }
+
+    use rand_core::RngCore;
+    let mut bytes = [0u8; 16];
+    let mut rng = rand_core::OsRng;
+    rng.fill_bytes(&mut bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
+}
+
+pub const BITWARDEN_COMPAT_VERSION: &str = "2026.7.0";
+pub const BITWARDEN_CLIENT_NAME: &str = "desktop";
+pub const BITWARDEN_DEVICE_TYPE: &str = "8";
+
+/// Client context metadata identifying the calling frontend application.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientContext {
+    pub name: String,
+    pub version: String,
+}
+
+impl ClientContext {
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+        }
+    }
+
+    /// Validates that name and version adhere to a strict character whitelist:
+    /// Length: 1..=32 characters.
+    /// Characters allowed: alphanumeric ASCII, dot (.), hyphen (-), and underscore (_).
+    /// Rejects any whitespace, newlines, carriage returns, control characters, or invalid length.
+    pub fn is_valid(&self) -> bool {
+        fn is_valid_token(s: &str) -> bool {
+            if s.is_empty() || s.len() > 32 {
+                return false;
+            }
+            s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        }
+
+        is_valid_token(&self.name) && is_valid_token(&self.version)
+    }
+}
+
+/// Formats the User-Agent header string with the current operating system.
+pub fn format_user_agent(context: Option<&ClientContext>) -> String {
+    let engine_version = env!("CARGO_PKG_VERSION");
+    let os = match std::env::consts::OS {
+        "macos" => "macOS".to_string(),
+        "windows" => "Windows".to_string(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        }
+    };
+    if let Some(ctx) = context.filter(|c| c.is_valid()) {
+        format!(
+            "{}/{} (Omawarden/{}; Bitwarden/{}; {})",
+            ctx.name, ctx.version, engine_version, BITWARDEN_COMPAT_VERSION, os
+        )
+    } else {
+        format!(
+            "Omawarden/{} (Bitwarden/{}; {})",
+            engine_version, BITWARDEN_COMPAT_VERSION, os
+        )
+    }
+}
+
+/// Default application client identity used by non-interactive callers.
+pub const DEFAULT_CLIENT_NAME: &str = "Omawarden_Desktop";
+
+/// Path to an optional JSON file providing a custom client identity.
+pub fn get_default_client_context_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("OMAWARDEN_CLIENT_CONTEXT_PATH").filter(|s| !s.is_empty())
+    {
+        return Some(PathBuf::from(path));
+    }
+    let config_dir = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|s| !s.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })?;
+    Some(config_dir.join("omawarden").join("client.json"))
+}
+
+/// Reads a client identity from a JSON file with `client_name`/`client_version`
+/// (or `name`/`version`) fields.
+pub fn probe_client_context_from_path(path: &Path) -> Option<ClientContext> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::Read::take(file, 64 * 1024);
+    let mut contents = String::new();
+    reader.read_to_string(&mut contents).ok()?;
+
+    let val: Value = serde_json::from_str(&contents).ok()?;
+    let name = val
+        .get("client_name")
+        .and_then(Value::as_str)
+        .or_else(|| val.get("name").and_then(Value::as_str))
+        .unwrap_or(DEFAULT_CLIENT_NAME);
+    let version = val
+        .get("client_version")
+        .and_then(Value::as_str)
+        .or_else(|| val.get("version").and_then(Value::as_str))?;
+
+    let ctx = ClientContext::new(name.trim(), version.trim());
+    Some(ctx).filter(|c| c.is_valid())
+}
+
+/// Resolves the client context from an explicit override or the optional
+/// context file. Interactive terminals keep the plain CLI identity.
+pub fn resolve_effective_client_context(explicit: Option<&ClientContext>) -> Option<ClientContext> {
+    resolve_effective_client_context_internal(
+        explicit,
+        || std::io::stdout().is_terminal(),
+        get_default_client_context_path().as_deref(),
+    )
+}
+
+pub fn resolve_effective_client_context_internal<F: Fn() -> bool>(
+    explicit: Option<&ClientContext>,
+    is_terminal_fn: F,
+    context_path: Option<&Path>,
+) -> Option<ClientContext> {
+    if let Some(ctx) = explicit {
+        return Some(ctx.clone()).filter(|c| c.is_valid());
+    }
+    if is_terminal_fn() {
+        return None;
+    }
+    context_path.and_then(probe_client_context_from_path)
+}
+
+/// Validates that private key file permissions on POSIX systems are 0600 or 0400.
+#[cfg(unix)]
+pub fn validate_private_key_permissions(path: &Path) -> Result<(), ApiError> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = std::fs::metadata(path).map_err(|e| {
+        ApiError::Http(format!(
+            "Failed to read private key metadata for '{}': {}",
+            path.display(),
+            e
+        ))
+    })?;
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(ApiError::Http(format!(
+            "Insecure permissions ({:#o}) on client private key '{}': file must be restricted to 0600 or 0400",
+            mode,
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn validate_private_key_permissions(_path: &Path) -> Result<(), ApiError> {
+    Ok(())
+}
+
+fn check_rsa_key_strength(key: &rsa::RsaPrivateKey) -> Result<(), ApiError> {
+    use rsa::traits::PublicKeyParts;
+    let bits = key.size() * 8;
+    if bits < 2048 {
+        return Err(ApiError::Crypto(format!(
+            "RSA client key length ({} bits) is below minimum safe threshold (2048 bits)",
+            bits
+        )));
+    }
+    Ok(())
+}
+
+/// Validates that the private key within PEM bytes satisfies minimum cryptographic strength (e.g. RSA >= 2048 bits, EC scalar >= 256 bits).
+pub fn validate_client_key_strength(pem_bytes: &[u8]) -> Result<(), ApiError> {
+    use rsa::pkcs1::DecodeRsaPrivateKey;
+    use rsa::pkcs8::DecodePrivateKey;
+
+    let pem_str = std::str::from_utf8(pem_bytes).map_err(|e| {
+        ApiError::Crypto(format!(
+            "Client private key file is not valid UTF-8 PEM: {}",
+            e
+        ))
+    })?;
+
+    if pem_str.contains("-----BEGIN ENCRYPTED PRIVATE KEY-----") {
+        return Err(ApiError::Crypto(
+            "Encrypted private keys are not supported. Please use an unencrypted PEM private key restricted to 0600 permissions."
+                .to_string(),
+        ));
+    }
+
+    let mut key_found = false;
+
+    // 1. Check RSA PKCS#1
+    if let Some(start) = pem_str.find("-----BEGIN RSA PRIVATE KEY-----") {
+        if let Some(end) = pem_str[start..].find("-----END RSA PRIVATE KEY-----") {
+            key_found = true;
+            let block = &pem_str[start..start + end + "-----END RSA PRIVATE KEY-----".len()];
+            match rsa::RsaPrivateKey::from_pkcs1_pem(block) {
+                Ok(key) => check_rsa_key_strength(&key)?,
+                Err(e) => {
+                    return Err(ApiError::Crypto(format!(
+                        "Failed to parse PKCS#1 RSA private key: {}",
+                        e
+                    )));
+                }
+            }
+        }
+    }
+
+    // 2. Check PKCS#8
+    if let Some(start) = pem_str.find("-----BEGIN PRIVATE KEY-----") {
+        if let Some(end) = pem_str[start..].find("-----END PRIVATE KEY-----") {
+            key_found = true;
+            let block = &pem_str[start..start + end + "-----END PRIVATE KEY-----".len()];
+            if let Ok(key) = rsa::RsaPrivateKey::from_pkcs8_pem(block) {
+                check_rsa_key_strength(&key)?;
+            } else {
+                // Not an RSA key; inspect PKCS#8 DER structure for EC or other key types
+                let b64: String = pem_str[start + "-----BEGIN PRIVATE KEY-----".len()..start + end]
+                    .lines()
+                    .collect();
+                let b64_clean = b64.trim();
+                let der =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64_clean)
+                        .map_err(|e| {
+                        ApiError::Crypto(format!("Invalid base64 in PKCS#8 private key: {}", e))
+                    })?;
+
+                match pkcs8::PrivateKeyInfoRef::try_from(&der[..]) {
+                    Ok(info) => {
+                        // EC / Ed25519 private key scalars must be at least 32 bytes (256 bits).
+                        // eMudhra zero-day vulnerability (weak P-384 keys with 3-8 bits entropy) produces degenerate scalars.
+                        if u32::from(info.private_key.len()) < 32 {
+                            return Err(ApiError::Crypto(
+                                "PKCS#8 client private key scalar is degraded or below 256 bits"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        return Err(ApiError::Crypto(format!(
+                            "Failed to parse PKCS#8 private key structure: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Check EC SEC1 Private Key
+    if let Some(start) = pem_str.find("-----BEGIN EC PRIVATE KEY-----") {
+        if let Some(end) = pem_str[start..].find("-----END EC PRIVATE KEY-----") {
+            key_found = true;
+            let b64: String = pem_str[start + "-----BEGIN EC PRIVATE KEY-----".len()..start + end]
+                .lines()
+                .collect();
+            let b64_clean = b64.trim();
+            let decoded =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64_clean)
+                    .map_err(|e| {
+                        ApiError::Crypto(format!("Invalid base64 in EC private key: {}", e))
+                    })?;
+
+            // Minimum valid EC SEC1 key for P-256 or higher is ~120 bytes (private scalar at least 32 bytes)
+            if decoded.len() < 32 {
+                return Err(ApiError::Crypto(
+                    "Elliptic curve client private key is corrupted or degraded".to_string(),
+                ));
+            }
+        }
+    }
+
+    if !key_found {
+        return Err(ApiError::Crypto(
+            "No recognized private key found in PEM (expected RSA, EC, or PKCS#8 private key)"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Loads and validates a client certificate and private key from PEM files into reqwest::Identity.
+pub fn load_client_identity_from_pem(
+    cert_path: &Path,
+    key_path: Option<&Path>,
+) -> Result<reqwest::Identity, ApiError> {
+    if !cert_path.exists() {
+        return Err(ApiError::Http(format!(
+            "Client certificate file not found: '{}'",
+            cert_path.display()
+        )));
+    }
+
+    let privkey_path = match key_path {
+        Some(kp) => {
+            if !kp.exists() {
+                return Err(ApiError::Http(format!(
+                    "Client private key file not found: '{}'",
+                    kp.display()
+                )));
+            }
+            kp
+        }
+        None => cert_path,
+    };
+
+    validate_private_key_permissions(privkey_path)?;
+
+    let cert_bytes = std::fs::read(cert_path).map_err(|e| {
+        ApiError::Http(format!(
+            "Failed to read client certificate file '{}': {}",
+            cert_path.display(),
+            e
+        ))
+    })?;
+
+    let combined_pem = match key_path {
+        Some(kp) => {
+            let key_bytes = std::fs::read(kp).map_err(|e| {
+                ApiError::Http(format!(
+                    "Failed to read client private key file '{}': {}",
+                    kp.display(),
+                    e
+                ))
+            })?;
+            let mut combined = cert_bytes;
+            combined.push(b'\n');
+            combined.extend_from_slice(&key_bytes);
+            combined
+        }
+        None => cert_bytes,
+    };
+
+    validate_client_key_strength(&combined_pem)?;
+
+    reqwest::Identity::from_pem(&combined_pem)
+        .map_err(|e| ApiError::Http(format!("Failed to parse client identity PEM: {}", e)))
+}
+
+/// Builds an HTTP blocking client with standard Bitwarden client headers and client-context-aware User-Agent.
+pub fn build_http_client_with_context(
+    timeout: Duration,
+    client_context: Option<&ClientContext>,
+) -> Client {
+    build_http_client_for_url(timeout, client_context, None)
+        .unwrap_or_else(|_| Client::builder().build().unwrap_or_default())
+}
+
+/// Builds a default HTTP blocking client with standard Bitwarden client headers and the specified timeout.
+pub fn build_http_client(timeout: Duration) -> Client {
+    build_http_client_for_url(timeout, None, None)
+        .unwrap_or_else(|_| Client::builder().build().unwrap_or_default())
+}
+
+/// Builds an HTTP blocking client optionally targeting a specific server URL for mTLS client certificate presentation.
+pub fn build_http_client_for_url(
+    timeout: Duration,
+    client_context: Option<&ClientContext>,
+    target_url: Option<&str>,
+) -> Result<Client, ApiError> {
+    build_http_client_for_url_with_config(timeout, client_context, target_url, None)
+}
+
+/// Builds an HTTP blocking client with optional configuration override for deterministic mTLS origin gating.
+pub fn build_http_client_for_url_with_config(
+    timeout: Duration,
+    client_context: Option<&ClientContext>,
+    target_url: Option<&str>,
+    config_override: Option<&crate::config::Config>,
+) -> Result<Client, ApiError> {
+    let mut default_headers = reqwest::header::HeaderMap::new();
+    let ua_str = format_user_agent(client_context);
+    let ua_val = reqwest::header::HeaderValue::from_str(&ua_str).unwrap_or_else(|_| {
+        reqwest::header::HeaderValue::from_static("Omawarden (Bitwarden/2026.7.0)")
+    });
+    default_headers.insert(reqwest::header::USER_AGENT, ua_val);
+    default_headers.insert(
+        reqwest::header::HeaderName::from_static("bitwarden-client-name"),
+        reqwest::header::HeaderValue::from_static(BITWARDEN_CLIENT_NAME),
+    );
+    default_headers.insert(
+        reqwest::header::HeaderName::from_static("bitwarden-client-version"),
+        reqwest::header::HeaderValue::from_static(BITWARDEN_COMPAT_VERSION),
+    );
+    default_headers.insert(
+        reqwest::header::HeaderName::from_static("device-type"),
+        reqwest::header::HeaderValue::from_static(BITWARDEN_DEVICE_TYPE),
+    );
+
+    let mut builder = Client::builder()
+        .default_headers(default_headers)
+        .timeout(timeout);
+
+    // Gated mTLS Identity Attachment
+    let loaded_cfg;
+    let cfg = match config_override {
+        Some(c) => c,
+        None => {
+            loaded_cfg = crate::config::ConfigManager::default().load();
+            &loaded_cfg
+        }
+    };
+    if let (Some(cert_path_str), Some(cert_server)) = (
+        cfg.client_cert_path.as_deref(),
+        cfg.client_cert_server.as_deref(),
+    ) {
+        let should_attach = match target_url {
+            Some(t_url) => crate::attachment::is_same_origin(cert_server, t_url),
+            None => crate::attachment::is_same_origin(cert_server, &cfg.server_url),
+        };
+
+        if should_attach {
+            let cert_p = std::path::PathBuf::from(cert_path_str);
+            let key_p = cfg.client_key_path.as_ref().map(std::path::PathBuf::from);
+            match load_client_identity_from_pem(&cert_p, key_p.as_deref()) {
+                Ok(identity) => {
+                    builder = builder.identity(identity);
+                }
+                Err(e) => {
+                    crate::log_error!(
+                        "omawarden:api",
+                        "Failed to load client mTLS identity for origin '{}': {}",
+                        cert_server,
+                        e
+                    );
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    builder
+        .build()
+        .map_err(|e| ApiError::Http(format!("Failed to build HTTP client: {}", e)))
+}
+
+pub struct BitwardenApiClient {
+    pub server_url: String,
+    pub urls: EnvironmentUrls,
+    client: Client,
+    client_init_error: Option<ApiError>,
+}
+
+impl BitwardenApiClient {
+    pub fn new(server_url: &str) -> Self {
+        Self::with_identity_url(server_url, None)
+    }
+
+    pub fn with_identity_url(server_url: &str, explicit_identity_url: Option<&str>) -> Self {
+        Self::with_options(server_url, explicit_identity_url, None)
+    }
+
+    pub fn with_options(
+        server_url: &str,
+        explicit_identity_url: Option<&str>,
+        client_context: Option<&ClientContext>,
+    ) -> Self {
+        Self::with_options_and_config(server_url, explicit_identity_url, client_context, None)
+    }
+
+    pub fn with_options_and_config(
+        server_url: &str,
+        explicit_identity_url: Option<&str>,
+        client_context: Option<&ClientContext>,
+        config_override: Option<&crate::config::Config>,
+    ) -> Self {
+        let urls = EnvironmentUrls::resolve(server_url, explicit_identity_url);
+        let (client, client_init_error) = match build_http_client_for_url_with_config(
+            Duration::from_secs(30),
+            client_context,
+            Some(server_url),
+            config_override,
+        ) {
+            Ok(c) => (c, None),
+            Err(e) => (Client::builder().build().unwrap_or_default(), Some(e)),
+        };
+        Self {
+            server_url: urls.base_url.clone(),
+            urls,
+            client,
+            client_init_error,
+        }
+    }
+
+    fn get_client(&self) -> Result<&Client, ApiError> {
+        if let Some(ref err) = self.client_init_error {
+            Err(err.clone())
+        } else {
+            Ok(&self.client)
+        }
+    }
+
+    pub fn prelogin(&self, email: &str) -> Result<PreloginResponse, ApiError> {
+        let client = self.get_client()?;
+        let primary_url = format!("{}/accounts/prelogin", self.urls.identity_url);
+        let fallback_url = format!("{}/accounts/prelogin", self.urls.api_url);
+
+        let email_payload = json!({ "email": email.trim().to_lowercase() });
+        let mut resp = client.post(&primary_url).json(&email_payload).send();
+
+        if let Ok(ref r) = resp {
+            if r.status() == reqwest::StatusCode::NOT_FOUND {
+                resp = client.post(&fallback_url).json(&email_payload).send();
+            }
+        }
+
+        let mut resp = resp.map_err(ApiError::from)?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Prelogin returned HTTP {} ({})", status, body),
+            ));
+        }
+
+        read_response_json::<PreloginResponse>(&mut resp, MAX_API_BODY_SIZE)
+    }
+
+    fn post_identity_connect_token(
+        &self,
+        form_params: &HashMap<&str, String>,
+    ) -> Result<reqwest::blocking::Response, ApiError> {
+        let client = self.get_client()?;
+        let primary_url = format!("{}/connect/token", self.urls.identity_url);
+        let fallback_url = if self.urls.is_cloud {
+            None
+        } else {
+            Some(format!("{}/connect/token", self.urls.base_url))
+        };
+
+        let mut resp = client.post(&primary_url).form(form_params).send();
+        if let (Some(ref fb_url), Ok(ref r)) = (fallback_url, &resp) {
+            if r.status() == reqwest::StatusCode::NOT_FOUND {
+                resp = client.post(fb_url).form(form_params).send();
+            }
+        }
+
+        resp.map_err(ApiError::from)
+    }
+
+    pub fn login_password(
+        &self,
+        email: &str,
+        password: &str,
+        two_factor_token: Option<&str>,
+        two_factor_provider: Option<i32>,
+        new_device_otp: Option<&str>,
+    ) -> Result<(TokenResponse, SymmetricCryptoKey), ApiError> {
+        let prelogin = self.prelogin(email)?;
+        let kdf_type = KdfType::from(prelogin.kdf.unwrap_or(0));
+        let iterations = prelogin.kdf_iterations.unwrap_or(600_000);
+
+        let master_key = derive_master_key(
+            email,
+            password,
+            kdf_type,
+            iterations,
+            prelogin.kdf_memory,
+            prelogin.kdf_parallelism,
+        )
+        .map_err(|e| ApiError::Crypto(e.to_string()))?;
+
+        let password_hash = derive_master_password_hash(&master_key, password);
+
+        let mut form_params: HashMap<&str, String> = HashMap::new();
+        form_params.insert("grant_type", "password".to_string());
+        form_params.insert("username", email.trim().to_lowercase());
+        form_params.insert("password", password_hash);
+        form_params.insert("scope", "api offline_access".to_string());
+        form_params.insert("client_id", "web".to_string());
+        form_params.insert("deviceType", "8".to_string());
+        form_params.insert("deviceIdentifier", get_device_identifier());
+        form_params.insert("deviceName", "linux".to_string());
+
+        if let Some(otp) = new_device_otp {
+            form_params.insert("newDeviceOtp", otp.trim().to_string());
+        } else if let Some(code) = two_factor_token {
+            form_params.insert("twoFactorToken", code.trim().to_string());
+            let provider_val = two_factor_provider.unwrap_or(0);
+            form_params.insert("twoFactorProvider", provider_val.to_string());
+            form_params.insert("twoFactorRemember", "1".to_string());
+        }
+
+        let parse_and_decrypt_token =
+            |body: &str| -> Result<(TokenResponse, SymmetricCryptoKey), ApiError> {
+                let mut token_resp = serde_json::from_str::<TokenResponse>(body)
+                    .map_err(|e| ApiError::Json(e.to_string()))?;
+
+                if token_resp.kdf.is_none() {
+                    token_resp.kdf = prelogin.kdf;
+                }
+                if token_resp.kdf_iterations.is_none() {
+                    token_resp.kdf_iterations = prelogin.kdf_iterations;
+                }
+                if token_resp.kdf_memory.is_none() {
+                    token_resp.kdf_memory = prelogin.kdf_memory;
+                }
+                if token_resp.kdf_parallelism.is_none() {
+                    token_resp.kdf_parallelism = prelogin.kdf_parallelism;
+                }
+
+                // Decrypt User Key
+                let enc_user_key = token_resp.key.as_ref().ok_or_else(|| {
+                    ApiError::Crypto("User key missing in login response".to_string())
+                })?;
+                let parsed_enc_key =
+                    EncString::parse(enc_user_key).map_err(|e| ApiError::Crypto(e.to_string()))?;
+
+                let decrypted_raw_user_key =
+                    SymmetricCryptoKey::decrypt_with_master_key(&parsed_enc_key, &master_key)
+                        .map_err(|e| ApiError::Crypto(format!("{:?}", e)))?;
+
+                let user_key = SymmetricCryptoKey::from_raw_bytes(&decrypted_raw_user_key)
+                    .map_err(|e| ApiError::Crypto(format!("{:?}", e)))?;
+
+                Ok((token_resp, user_key))
+            };
+
+        let mut resp = self.post_identity_connect_token(&form_params)?;
+        let status = resp.status();
+        let body_text = read_response_text(&mut resp, MAX_API_BODY_SIZE)?;
+
+        if status.is_success() {
+            parse_and_decrypt_token(&body_text)
+        } else if status.is_server_error() || status == reqwest::StatusCode::NOT_FOUND {
+            Err(ApiError::HttpStatus(
+                status,
+                format!("Password login endpoint error: HTTP {}", status),
+            ))
+        } else {
+            let body_lower = body_text.to_lowercase();
+            if let Ok(err_json) = serde_json::from_str::<Value>(&body_text) {
+                let err_desc = err_json
+                    .get("error_description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let err_msg = err_json
+                    .get("Message")
+                    .or_else(|| err_json.get("message"))
+                    .or_else(|| {
+                        err_json
+                            .get("ErrorModel")
+                            .and_then(|em| em.get("Message").or_else(|| em.get("message")))
+                    })
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let err_code = err_json.get("error").and_then(|v| v.as_str()).unwrap_or("");
+
+                let err_desc_lower = err_desc.to_lowercase();
+                let err_msg_lower = err_msg.to_lowercase();
+
+                let is_new_device = err_desc_lower.contains("new device verification")
+                    || err_msg_lower.contains("new device verification")
+                    || body_lower.contains("new device verification required")
+                    || (err_code == "device_error" && body_lower.contains("verification"));
+
+                if is_new_device {
+                    if let Some(code) = two_factor_token {
+                        if new_device_otp.is_none() && !code.trim().is_empty() {
+                            let mut retry_params = form_params.clone();
+                            retry_params.remove("twoFactorToken");
+                            retry_params.remove("twoFactorProvider");
+                            retry_params.remove("twoFactorRemember");
+                            retry_params.insert("newDeviceOtp", code.trim().to_string());
+                            if let Ok(mut retry_resp) =
+                                self.post_identity_connect_token(&retry_params)
+                            {
+                                let retry_status = retry_resp.status();
+                                if let Ok(retry_body) =
+                                    read_response_text(&mut retry_resp, MAX_API_BODY_SIZE)
+                                {
+                                    if retry_status.is_success() {
+                                        return parse_and_decrypt_token(&retry_body);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Err(ApiError::NewDeviceVerificationRequired);
+                }
+
+                let has_2fa_field = err_json.get("TwoFactorProviders").is_some()
+                    || err_json.get("twoFactorProviders").is_some()
+                    || err_json.get("TwoFactorProviders2").is_some()
+                    || err_json.get("twoFactorProviders2").is_some()
+                    || body_lower.contains("twofactorproviders");
+
+                if has_2fa_field
+                    || err_desc_lower.contains("two factor")
+                    || err_desc_lower.contains("two-factor")
+                    || err_desc_lower.contains("twofactor")
+                    || err_desc_lower.contains("two-step")
+                    || err_desc_lower.contains("2fa")
+                    || err_msg_lower.contains("two factor")
+                    || err_msg_lower.contains("two-factor")
+                    || err_msg_lower.contains("twofactor")
+                    || err_msg_lower.contains("two-step")
+                    || err_msg_lower.contains("2fa")
+                {
+                    let mut providers = vec![0];
+                    if let Some(arr) = err_json
+                        .get("TwoFactorProviders")
+                        .or_else(|| err_json.get("twoFactorProviders"))
+                        .and_then(|v| v.as_array())
+                    {
+                        let parsed: Vec<i32> = arr
+                            .iter()
+                            .filter_map(|p| {
+                                if let Some(n) = p.as_i64() {
+                                    Some(n as i32)
+                                } else if let Some(s) = p.as_str() {
+                                    s.parse::<i32>().ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        if !parsed.is_empty() {
+                            providers = parsed;
+                        }
+                    }
+
+                    // If caller submitted a code without specifying provider (defaulting to 0)
+                    // but server indicates Email 2FA is required (and not Authenticator 0),
+                    // auto-retry once with twoFactorProvider=1.
+                    if let Some(code) = two_factor_token {
+                        if two_factor_provider.is_none()
+                            && !providers.contains(&0)
+                            && providers.contains(&1)
+                            && !code.trim().is_empty()
+                        {
+                            let mut retry_params = form_params.clone();
+                            retry_params.insert("twoFactorProvider", "1".to_string());
+                            if let Ok(mut retry_resp) =
+                                self.post_identity_connect_token(&retry_params)
+                            {
+                                let retry_status = retry_resp.status();
+                                if let Ok(retry_body) =
+                                    read_response_text(&mut retry_resp, MAX_API_BODY_SIZE)
+                                {
+                                    if retry_status.is_success() {
+                                        return parse_and_decrypt_token(&retry_body);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let providers2 = err_json.get("TwoFactorProviders2").cloned();
+                    return Err(ApiError::TwoFactorRequired {
+                        providers,
+                        providers2,
+                    });
+                }
+
+                if !err_desc.is_empty() {
+                    return Err(ApiError::AuthFailed(err_desc.to_string()));
+                }
+                if !err_msg.is_empty() {
+                    return Err(ApiError::AuthFailed(err_msg.to_string()));
+                }
+                if !err_code.is_empty() && !body_text.trim().is_empty() {
+                    return Err(ApiError::AuthFailed(format!(
+                        "{}: {}",
+                        err_code,
+                        body_text.trim()
+                    )));
+                }
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::BAD_REQUEST
+            {
+                let detail = body_text.trim();
+                if detail.is_empty() {
+                    Err(ApiError::AuthFailed(format!("HTTP {}", status)))
+                } else {
+                    Err(ApiError::AuthFailed(format!(
+                        "HTTP {} ({})",
+                        status, detail
+                    )))
+                }
+            } else {
+                Err(ApiError::HttpStatus(status, format!("HTTP {}", status)))
+            }
+        }
+    }
+
+    /// Triggers sending a two-factor verification code to the user's email address.
+    pub fn send_two_factor_email(&self, email: &str, password: &str) -> Result<(), ApiError> {
+        let prelogin = self.prelogin(email)?;
+        let kdf_type = KdfType::from(prelogin.kdf.unwrap_or(0));
+        let iterations = prelogin.kdf_iterations.unwrap_or(600_000);
+
+        let master_key = derive_master_key(
+            email,
+            password,
+            kdf_type,
+            iterations,
+            prelogin.kdf_memory,
+            prelogin.kdf_parallelism,
+        )
+        .map_err(|e| ApiError::Crypto(e.to_string()))?;
+
+        let password_hash = derive_master_password_hash(&master_key, password);
+
+        let payload = serde_json::json!({
+            "email": email.trim().to_lowercase(),
+            "masterPasswordHash": password_hash,
+            "deviceIdentifier": get_device_identifier()
+        });
+
+        let primary_url = format!("{}/api/two-factor/send-email-login", self.urls.base_url);
+        let fallback_url = format!("{}/two-factor/send-email-login", self.urls.base_url);
+
+        let client = self.get_client()?;
+        let mut resp = client.post(&primary_url).json(&payload).send();
+        if let Ok(ref r) = resp {
+            if r.status() == reqwest::StatusCode::NOT_FOUND {
+                resp = client.post(&fallback_url).json(&payload).send();
+            }
+        }
+
+        let mut resp = resp.map_err(ApiError::from)?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            let status = resp.status();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            Err(ApiError::HttpStatus(
+                status,
+                format!("Failed to send 2FA email: HTTP {} - {}", status, body),
+            ))
+        }
+    }
+
+    pub fn login_apikey(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<TokenResponse, ApiError> {
+        let mut form_params: HashMap<&str, String> = HashMap::new();
+        form_params.insert("grant_type", "client_credentials".to_string());
+        form_params.insert("client_id", client_id.trim().to_string());
+        form_params.insert("client_secret", client_secret.trim().to_string());
+        form_params.insert("scope", "api".to_string());
+        form_params.insert("deviceType", "8".to_string());
+        form_params.insert("deviceIdentifier", get_device_identifier());
+        form_params.insert("deviceName", "linux".to_string());
+
+        let mut resp = self.post_identity_connect_token(&form_params)?;
+        let status = resp.status();
+        let body_text = read_response_text(&mut resp, MAX_API_BODY_SIZE)?;
+
+        if status.is_success() {
+            serde_json::from_str::<TokenResponse>(&body_text)
+                .map_err(|e| ApiError::Json(e.to_string()))
+        } else if status.is_server_error() || status == reqwest::StatusCode::NOT_FOUND {
+            Err(ApiError::HttpStatus(
+                status,
+                format!("API key login endpoint error: HTTP {}", status),
+            ))
+        } else {
+            if let Ok(err_json) = serde_json::from_str::<Value>(&body_text) {
+                if let Some(err_desc) = err_json.get("error_description").and_then(|v| v.as_str()) {
+                    return Err(ApiError::AuthFailed(err_desc.to_string()));
+                }
+                if let Some(err_msg) = err_json.get("Message").and_then(|v| v.as_str()) {
+                    return Err(ApiError::AuthFailed(err_msg.to_string()));
+                }
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::BAD_REQUEST
+            {
+                Err(ApiError::AuthFailed(format!("HTTP {}", status)))
+            } else {
+                Err(ApiError::HttpStatus(status, format!("HTTP {}", status)))
+            }
+        }
+    }
+
+    pub fn refresh_token_grant(&self, refresh_token: &str) -> Result<TokenResponse, ApiError> {
+        let mut form_params = HashMap::new();
+        form_params.insert("grant_type", "refresh_token".to_string());
+        form_params.insert("client_id", "web".to_string());
+        form_params.insert("refresh_token", refresh_token.to_string());
+
+        let mut resp = self.post_identity_connect_token(&form_params)?;
+        let status = resp.status();
+        let body_text = read_response_text(&mut resp, MAX_API_BODY_SIZE)?;
+
+        if status.is_success() {
+            serde_json::from_str::<TokenResponse>(&body_text)
+                .map_err(|e| ApiError::Json(e.to_string()))
+        } else if status.is_server_error() || status == reqwest::StatusCode::NOT_FOUND {
+            Err(ApiError::HttpStatus(
+                status,
+                format!("Refresh token endpoint error: HTTP {}", status),
+            ))
+        } else {
+            if let Ok(err_json) = serde_json::from_str::<Value>(&body_text) {
+                if let Some(err_desc) = err_json.get("error_description").and_then(|v| v.as_str()) {
+                    return Err(ApiError::AuthFailed(err_desc.to_string()));
+                }
+                if let Some(err_msg) = err_json.get("Message").and_then(|v| v.as_str()) {
+                    return Err(ApiError::AuthFailed(err_msg.to_string()));
+                }
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::BAD_REQUEST
+            {
+                Err(ApiError::AuthFailed(format!(
+                    "Refresh token rejected: HTTP {}",
+                    status
+                )))
+            } else {
+                Err(ApiError::HttpStatus(
+                    status,
+                    format!("Refresh token HTTP {}", status),
+                ))
+            }
+        }
+    }
+
+    pub fn sync_vault(&self, access_token: &str) -> Result<SyncResponse, ApiError> {
+        let client = self.get_client()?;
+        let url = format!("{}/sync", self.urls.api_url);
+        let mut resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Sync vault failed with HTTP status {} ({})", status, body),
+            ));
+        }
+
+        read_response_json::<SyncResponse>(&mut resp, MAX_SYNC_BODY_SIZE)
+    }
+
+    pub fn update_cipher(
+        &self,
+        access_token: &str,
+        id: &str,
+        payload: &Value,
+    ) -> Result<Value, ApiError> {
+        self.cipher_request(
+            reqwest::Method::PUT,
+            access_token,
+            &format!("/ciphers/{id}"),
+            Some(payload),
+        )
+    }
+
+    pub fn delete_cipher(&self, access_token: &str, id: &str) -> Result<(), ApiError> {
+        self.cipher_request(
+            reqwest::Method::DELETE,
+            access_token,
+            &format!("/ciphers/{id}"),
+            None,
+        )
+        .map(|_| ())
+    }
+
+    pub fn delete_cipher_permanent(&self, access_token: &str, id: &str) -> Result<(), ApiError> {
+        self.cipher_request(
+            reqwest::Method::DELETE,
+            access_token,
+            &format!("/ciphers/{id}/delete"),
+            None,
+        )
+        .map(|_| ())
+    }
+
+    pub fn restore_cipher(&self, access_token: &str, id: &str) -> Result<Value, ApiError> {
+        self.cipher_request(
+            reqwest::Method::PUT,
+            access_token,
+            &format!("/ciphers/{id}/restore"),
+            None,
+        )
+    }
+
+    pub fn list_folders(&self, access_token: &str) -> Result<Vec<Value>, ApiError> {
+        let value = self.cipher_request(reqwest::Method::GET, access_token, "/folders", None)?;
+        Ok(value
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    pub fn create_folder(&self, access_token: &str, payload: &Value) -> Result<Value, ApiError> {
+        self.cipher_request(
+            reqwest::Method::POST,
+            access_token,
+            "/folders",
+            Some(payload),
+        )
+    }
+
+    pub fn update_folder(
+        &self,
+        access_token: &str,
+        id: &str,
+        payload: &Value,
+    ) -> Result<Value, ApiError> {
+        self.cipher_request(
+            reqwest::Method::PUT,
+            access_token,
+            &format!("/folders/{id}"),
+            Some(payload),
+        )
+    }
+
+    pub fn delete_folder(&self, access_token: &str, id: &str) -> Result<(), ApiError> {
+        self.cipher_request(
+            reqwest::Method::DELETE,
+            access_token,
+            &format!("/folders/{id}"),
+            None,
+        )
+        .map(|_| ())
+    }
+
+    fn cipher_request(
+        &self,
+        method: reqwest::Method,
+        access_token: &str,
+        path: &str,
+        payload: Option<&Value>,
+    ) -> Result<Value, ApiError> {
+        let client = self.get_client()?;
+        let url = format!("{}{}", self.urls.api_url, path);
+        let mut request = client
+            .request(method, &url)
+            .header("Authorization", format!("Bearer {access_token}"));
+        if let Some(body) = payload {
+            request = request.json(body);
+        }
+        let mut response = request.send().map_err(ApiError::from)?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = read_response_text(&mut response, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {e}]"));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Vault request failed (HTTP {status}): {body}"),
+            ));
+        }
+        let body = read_response_text(&mut response, MAX_API_BODY_SIZE)?;
+        if body.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&body).map_err(|error| ApiError::Json(error.to_string()))
+    }
+
+    pub fn list_sends(&self, access_token: &str) -> Result<Vec<Value>, ApiError> {
+        let value = self.cipher_request(reqwest::Method::GET, access_token, "/sends", None)?;
+        Ok(value
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    pub fn create_send(&self, access_token: &str, payload: &Value) -> Result<Value, ApiError> {
+        self.cipher_request(reqwest::Method::POST, access_token, "/sends", Some(payload))
+    }
+
+    pub fn update_send(
+        &self,
+        access_token: &str,
+        id: &str,
+        payload: &Value,
+    ) -> Result<Value, ApiError> {
+        self.cipher_request(
+            reqwest::Method::PUT,
+            access_token,
+            &format!("/sends/{id}"),
+            Some(payload),
+        )
+    }
+
+    pub fn delete_send(&self, access_token: &str, id: &str) -> Result<(), ApiError> {
+        self.cipher_request(
+            reqwest::Method::DELETE,
+            access_token,
+            &format!("/sends/{id}"),
+            None,
+        )
+        .map(|_| ())
+    }
+
+    pub fn create_cipher(&self, access_token: &str, payload: &Value) -> Result<Value, ApiError> {
+        let client = self.get_client()?;
+        let url = format!("{}/ciphers", self.urls.api_url);
+        let mut resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .json(payload)
+            .send()
+            .map_err(ApiError::from)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = read_response_text(&mut resp, MAX_ERROR_BODY_SIZE)
+                .unwrap_or_else(|e| format!("[body omitted: {}]", e));
+            return Err(ApiError::HttpStatus(
+                status,
+                format!("Create cipher failed (HTTP {}): {}", status, body),
+            ));
+        }
+
+        read_response_json::<Value>(&mut resp, MAX_API_BODY_SIZE)
+    }
+}
+
+pub fn decrypt_cipher_string(
+    enc_str_opt: Option<&str>,
+    key: &SymmetricCryptoKey,
+) -> Option<String> {
+    let s = enc_str_opt?;
+    if s.is_empty() {
+        return Some(String::new());
+    }
+    match EncString::parse(s) {
+        Ok(parsed) => parsed.decrypt_string(key).ok(),
+        Err(_) => None,
+    }
+}
+
+pub fn decrypt_sync_ciphers(ciphers: &[Value], user_key: &SymmetricCryptoKey) -> Vec<VaultItem> {
+    decrypt_sync_ciphers_with_context(ciphers, &[], &[], user_key, None)
+}
+
+pub fn decrypt_sync_ciphers_with_context(
+    ciphers: &[Value],
+    folders: &[Value],
+    organizations: &[Value],
+    user_key: &SymmetricCryptoKey,
+    enc_private_key: Option<&str>,
+) -> Vec<VaultItem> {
+    use std::collections::HashMap;
+
+    // 1. Decrypt Folders
+    let mut folder_map: HashMap<String, String> = HashMap::new();
+    for f in folders {
+        if let Some(fid) = f.get("id").and_then(|v| v.as_str()) {
+            let fname = decrypt_cipher_string(f.get("name").and_then(|v| v.as_str()), user_key)
+                .unwrap_or_else(|| "Folder".to_string());
+            folder_map.insert(fid.to_string(), fname);
+        }
+    }
+
+    // 2. Decrypt User RSA Private Key
+    let rsa_priv_key: Option<rsa::RsaPrivateKey> = if let Some(enc_priv) = enc_private_key {
+        if let Ok(enc_priv_str) = EncString::parse(enc_priv) {
+            if let Ok(der_bytes) = enc_priv_str.decrypt(user_key) {
+                crate::crypto::parse_rsa_private_key_der(&der_bytes).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 3. Decrypt Organization Keys & Names
+    let mut org_keys: HashMap<String, SymmetricCryptoKey> = HashMap::new();
+    let mut org_names: HashMap<String, String> = HashMap::new();
+    for org in organizations {
+        if let Some(org_id) = org.get("id").and_then(|v| v.as_str()) {
+            if let Some(org_name) = org.get("name").and_then(|v| v.as_str()) {
+                org_names.insert(org_id.to_string(), org_name.to_string());
+            }
+            if let Some(org_key_enc) = org.get("key").and_then(|v| v.as_str()) {
+                if let Ok(enc_str) = EncString::parse(org_key_enc) {
+                    let raw_key = match enc_str.enc_type {
+                        3..=6 => {
+                            if let Some(ref rsa) = rsa_priv_key {
+                                enc_str.decrypt_rsa(rsa).ok()
+                            } else {
+                                None
+                            }
+                        }
+                        0..=2 => enc_str.decrypt(user_key).ok(),
+                        _ => None,
+                    };
+                    if let Some(key_bytes) = raw_key {
+                        if let Some(sym_key) =
+                            crate::crypto::parse_symmetric_key_from_decrypted_bytes(&key_bytes)
+                        {
+                            org_keys.insert(org_id.to_string(), sym_key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut items = Vec::new();
+
+    for c in ciphers {
+        // Filter out soft-deleted items (items in Trash / Recycle Bin)
+        let is_deleted = c
+            .get("deletedDate")
+            .or_else(|| c.get("DeletedDate"))
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
+        if is_deleted {
+            continue;
+        }
+
+        let id = c
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let item_type = c.get("type").and_then(|v| v.as_i64()).unwrap_or(1);
+        let favorite = c.get("favorite").and_then(|v| v.as_bool()).unwrap_or(false);
+        let created_at = c
+            .get("creationDate")
+            .or_else(|| c.get("creation_date"))
+            .or_else(|| c.get("created_at"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let updated_at = c
+            .get("revisionDate")
+            .or_else(|| c.get("revision_date"))
+            .or_else(|| c.get("updated_at"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Folder metadata
+        let folder_id = c
+            .get("folderId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let folder_name = folder_id
+            .as_ref()
+            .and_then(|fid| folder_map.get(fid).cloned());
+
+        // Organization metadata & key resolution
+        let org_id_opt = c
+            .get("organizationId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let org_name_opt = org_id_opt
+            .as_ref()
+            .and_then(|oid| org_names.get(oid).cloned());
+
+        let collection_ids = c
+            .get("collectionIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            });
+
+        // Determine base key for this cipher: org_key if org-owned, else user_key
+        let base_key = if let Some(ref oid) = org_id_opt {
+            org_keys.get(oid).unwrap_or(user_key)
+        } else {
+            user_key
+        };
+
+        // Determine item key: if cipher has an encrypted key, decrypt it using base_key or user_key
+        let mut cipher_key = base_key.clone();
+        if let Some(enc_key_str) = c.get("key").and_then(|v| v.as_str()) {
+            if let Ok(parsed_k) = EncString::parse(enc_key_str) {
+                let raw_k = parsed_k
+                    .decrypt(base_key)
+                    .or_else(|_| parsed_k.decrypt(user_key));
+                if let Ok(raw_k_bytes) = raw_k {
+                    if let Some(k) =
+                        crate::crypto::parse_symmetric_key_from_decrypted_bytes(&raw_k_bytes)
+                    {
+                        cipher_key = k;
+                    }
+                }
+            }
+        }
+
+        let name = decrypt_cipher_string(c.get("name").and_then(|v| v.as_str()), &cipher_key)
+            .unwrap_or_else(|| "Untitled".to_string());
+        let notes = decrypt_cipher_string(c.get("notes").and_then(|v| v.as_str()), &cipher_key);
+
+        // Decrypt login details if present
+        let mut login_val: Option<Value> = None;
+        if item_type == 1 {
+            if let Some(login_obj) = c.get("login").or_else(|| c.get("Login")) {
+                if !login_obj.is_null() {
+                    let user = decrypt_cipher_string(
+                        login_obj.get("username").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let pwd = decrypt_cipher_string(
+                        login_obj.get("password").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let totp = decrypt_cipher_string(
+                        login_obj.get("totp").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+
+                    let mut uris_decrypted = Vec::new();
+                    if let Some(uris_arr) = login_obj.get("uris").and_then(|v| v.as_array()) {
+                        for u in uris_arr {
+                            let uri_str = decrypt_cipher_string(
+                                u.get("uri").and_then(|v| v.as_str()),
+                                &cipher_key,
+                            );
+                            uris_decrypted.push(json!({ "uri": uri_str }));
+                        }
+                    }
+
+                    let mut password_history = Vec::new();
+                    let raw_hist_arr = c
+                        .get("passwordHistory")
+                        .or_else(|| c.get("password_history"))
+                        .or_else(|| c.get("PasswordHistory"))
+                        .or_else(|| login_obj.get("passwordHistory"))
+                        .or_else(|| login_obj.get("password_history"))
+                        .or_else(|| login_obj.get("PasswordHistory"))
+                        .and_then(|v| v.as_array());
+
+                    if let Some(hist_arr) = raw_hist_arr {
+                        for h in hist_arr {
+                            let hist_pwd = decrypt_cipher_string(
+                                h.get("password").and_then(|v| v.as_str()),
+                                &cipher_key,
+                            );
+                            let last_used = h
+                                .get("lastUsedDate")
+                                .or_else(|| h.get("last_used_date"))
+                                .or_else(|| h.get("LastUsedDate"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            if let Some(p) = hist_pwd {
+                                password_history.push(json!({
+                                    "password": p,
+                                    "last_used_date": last_used,
+                                }));
+                            }
+                        }
+                    }
+
+                    let mut has_passkey = false;
+                    let mut passkey_created_at: Option<String> = None;
+                    if let Some(fido2_arr) = login_obj
+                        .get("fido2Credentials")
+                        .or_else(|| login_obj.get("fido2_credentials"))
+                        .and_then(|v| v.as_array())
+                    {
+                        if !fido2_arr.is_empty() {
+                            has_passkey = true;
+                            if let Some(first_fido) = fido2_arr.first() {
+                                if let Some(created) = first_fido
+                                    .get("creationDate")
+                                    .or_else(|| first_fido.get("creation_date"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    passkey_created_at = Some(created.to_string());
+                                }
+                            }
+                        }
+                    }
+
+                    login_val = Some(json!({
+                        "username": user,
+                        "password": pwd,
+                        "totp": totp,
+                        "uris": uris_decrypted,
+                        "password_history": password_history,
+                        "has_passkey": has_passkey,
+                        "passkey_created_at": passkey_created_at,
+                    }));
+                }
+            }
+        }
+
+        // Decrypt card details if present
+        let mut card_val: Option<Value> = None;
+        if item_type == 3 {
+            if let Some(card_obj) = c.get("card").or_else(|| c.get("Card")) {
+                if !card_obj.is_null() {
+                    let cardholder_name = decrypt_cipher_string(
+                        card_obj.get("cardholderName").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let brand = decrypt_cipher_string(
+                        card_obj.get("brand").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let number = decrypt_cipher_string(
+                        card_obj.get("number").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let exp_month = decrypt_cipher_string(
+                        card_obj.get("expMonth").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let exp_year = decrypt_cipher_string(
+                        card_obj.get("expYear").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let code = decrypt_cipher_string(
+                        card_obj.get("code").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+
+                    card_val = Some(json!({
+                        "cardholderName": cardholder_name,
+                        "brand": brand,
+                        "number": number,
+                        "expMonth": exp_month,
+                        "expYear": exp_year,
+                        "code": code,
+                    }));
+                }
+            }
+        }
+
+        // Decrypt identity details if present
+        let mut identity_val: Option<Value> = None;
+        if item_type == 4 {
+            if let Some(id_obj) = c.get("identity").or_else(|| c.get("Identity")) {
+                if !id_obj.is_null() {
+                    let title = decrypt_cipher_string(
+                        id_obj.get("title").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let first_name = decrypt_cipher_string(
+                        id_obj.get("firstName").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let middle_name = decrypt_cipher_string(
+                        id_obj.get("middleName").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let last_name = decrypt_cipher_string(
+                        id_obj.get("lastName").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let address1 = decrypt_cipher_string(
+                        id_obj.get("address1").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let address2 = decrypt_cipher_string(
+                        id_obj.get("address2").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let city = decrypt_cipher_string(
+                        id_obj.get("city").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let state = decrypt_cipher_string(
+                        id_obj.get("state").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let postal_code = decrypt_cipher_string(
+                        id_obj.get("postalCode").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let country = decrypt_cipher_string(
+                        id_obj.get("country").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let company = decrypt_cipher_string(
+                        id_obj.get("company").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let email = decrypt_cipher_string(
+                        id_obj.get("email").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let phone = decrypt_cipher_string(
+                        id_obj.get("phone").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let ssn = decrypt_cipher_string(
+                        id_obj.get("ssn").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let username = decrypt_cipher_string(
+                        id_obj.get("username").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let passport_number = decrypt_cipher_string(
+                        id_obj.get("passportNumber").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let license_number = decrypt_cipher_string(
+                        id_obj.get("licenseNumber").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+
+                    identity_val = Some(json!({
+                        "title": title,
+                        "firstName": first_name,
+                        "middleName": middle_name,
+                        "lastName": last_name,
+                        "address1": address1,
+                        "address2": address2,
+                        "city": city,
+                        "state": state,
+                        "postalCode": postal_code,
+                        "country": country,
+                        "company": company,
+                        "email": email,
+                        "phone": phone,
+                        "ssn": ssn,
+                        "username": username,
+                        "passportNumber": passport_number,
+                        "licenseNumber": license_number,
+                    }));
+                }
+            }
+        }
+
+        let mut ssh_key_val: Option<SshMetadata> = None;
+        if item_type == 5 {
+            if let Some(ssh_obj) = c.get("sshKey").or_else(|| c.get("SshKey")) {
+                if !ssh_obj.is_null() {
+                    let priv_k = decrypt_cipher_string(
+                        ssh_obj.get("privateKey").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let pub_k = decrypt_cipher_string(
+                        ssh_obj.get("publicKey").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    let fp = decrypt_cipher_string(
+                        ssh_obj.get("keyFingerprint").and_then(|v| v.as_str()),
+                        &cipher_key,
+                    );
+                    ssh_key_val = Some(parse_ssh_key_fields(priv_k, pub_k, fp));
+                }
+            }
+        }
+
+        // Decrypt fields if present
+        let mut fields_decrypted = Vec::new();
+        if let Some(fields_arr) = c.get("fields").and_then(|v| v.as_array()) {
+            for f in fields_arr {
+                let fname =
+                    decrypt_cipher_string(f.get("name").and_then(|v| v.as_str()), &cipher_key)
+                        .unwrap_or_default();
+                let fval =
+                    decrypt_cipher_string(f.get("value").and_then(|v| v.as_str()), &cipher_key)
+                        .unwrap_or_default();
+                let ftype = f.get("type").and_then(|v| v.as_i64()).unwrap_or(0);
+                fields_decrypted.push(json!({
+                    "name": fname,
+                    "value": fval,
+                    "type": ftype,
+                }));
+            }
+        }
+
+        // Attachments metadata
+        let mut attachments_decrypted = Vec::new();
+        if let Some(att_arr) = c.get("attachments").and_then(|v| v.as_array()) {
+            for att in att_arr {
+                let fname = decrypt_cipher_string(
+                    att.get("fileName").and_then(|v| v.as_str()),
+                    &cipher_key,
+                )
+                .unwrap_or_default();
+                let att_id = att
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let size = att
+                    .get("size")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0")
+                    .to_string();
+                let url = att
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                attachments_decrypted.push(json!({
+                    "id": att_id,
+                    "fileName": fname,
+                    "size": size,
+                    "url": url,
+                }));
+            }
+        }
+
+        let type_name = match item_type {
+            1 => "login",
+            2 => "note",
+            3 => "card",
+            4 => "identity",
+            5 => "ssh_key",
+            _ => "login",
+        }
+        .to_string();
+
+        let sub_title = match item_type {
+            1 => {
+                if let Some(ref l) = login_val {
+                    l.get("username")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                } else {
+                    String::new()
+                }
+            }
+            2 => "Secure Note".to_string(),
+            3 => {
+                if let Some(ref c) = card_val {
+                    let num = c.get("number").and_then(|v| v.as_str()).unwrap_or("");
+                    let brand = c.get("brand").and_then(|v| v.as_str()).unwrap_or("Card");
+                    if num.len() >= 4 {
+                        let last4 = &num[num.len() - 4..];
+                        if !brand.is_empty() && brand != "Card" {
+                            format!("{} •••• {}", brand, last4)
+                        } else {
+                            format!("•••• {}", last4)
+                        }
+                    } else if !brand.is_empty() {
+                        brand.to_string()
+                    } else {
+                        "Payment Card".to_string()
+                    }
+                } else {
+                    "Payment Card".to_string()
+                }
+            }
+            4 => {
+                if let Some(ref id) = identity_val {
+                    let full_name = format!(
+                        "{} {} {} {}",
+                        id.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                        id.get("firstName").and_then(|v| v.as_str()).unwrap_or(""),
+                        id.get("middleName").and_then(|v| v.as_str()).unwrap_or(""),
+                        id.get("lastName").and_then(|v| v.as_str()).unwrap_or("")
+                    )
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                    if !full_name.is_empty() {
+                        full_name
+                    } else if let Some(em) = id.get("email").and_then(|v| v.as_str()) {
+                        if !em.is_empty() {
+                            em.to_string()
+                        } else {
+                            "Identity".to_string()
+                        }
+                    } else if let Some(un) = id.get("username").and_then(|v| v.as_str()) {
+                        if !un.is_empty() {
+                            un.to_string()
+                        } else {
+                            "Identity".to_string()
+                        }
+                    } else {
+                        "Identity".to_string()
+                    }
+                } else {
+                    "Identity".to_string()
+                }
+            }
+            5 => {
+                if let Some(ref s) = ssh_key_val {
+                    format!("SSH Key ({})", s.key_type)
+                } else {
+                    "SSH Key".to_string()
+                }
+            }
+            _ => {
+                if let Some(ref l) = login_val {
+                    l.get("username")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                } else {
+                    String::new()
+                }
+            }
+        };
+
+        let mut search_tokens = vec![
+            name.to_lowercase(),
+            notes.clone().unwrap_or_default().to_lowercase(),
+        ];
+        if !sub_title.is_empty() {
+            search_tokens.push(sub_title.to_lowercase());
+        }
+        if let Some(ref l) = login_val {
+            if let Some(u) = l.get("username").and_then(|v| v.as_str()) {
+                search_tokens.push(u.to_lowercase());
+            }
+            if let Some(uris) = l.get("uris").and_then(|v| v.as_array()) {
+                for u in uris {
+                    if let Some(u_str) = u.get("uri").and_then(|v| v.as_str()) {
+                        search_tokens.push(u_str.to_lowercase());
+                    }
+                }
+            }
+        }
+        if let Some(ref c) = card_val {
+            if let Some(b) = c.get("brand").and_then(|v| v.as_str()) {
+                search_tokens.push(b.to_lowercase());
+            }
+            if let Some(num) = c.get("number").and_then(|v| v.as_str()) {
+                search_tokens.push(num.to_lowercase());
+            }
+            if let Some(ch) = c.get("cardholderName").and_then(|v| v.as_str()) {
+                search_tokens.push(ch.to_lowercase());
+            }
+        }
+        if let Some(ref id) = identity_val {
+            for k in [
+                "firstName",
+                "lastName",
+                "email",
+                "phone",
+                "username",
+                "company",
+                "address1",
+                "city",
+                "ssn",
+            ] {
+                if let Some(val) = id.get(k).and_then(|v| v.as_str()) {
+                    search_tokens.push(val.to_lowercase());
+                }
+            }
+        }
+        if item_type == 5 {
+            search_tokens.push("ssh".to_string());
+            search_tokens.push("ssh key".to_string());
+            if let Some(ref s) = ssh_key_val {
+                search_tokens.push(s.key_type.to_lowercase());
+                if let Some(ref pubk) = s.public_key {
+                    search_tokens.push(pubk.to_lowercase());
+                }
+                if let Some(ref fp) = s.fingerprint {
+                    search_tokens.push(fp.to_lowercase());
+                }
+            }
+        }
+        for f in &fields_decrypted {
+            if let Some(fn_str) = f.get("name").and_then(|v| v.as_str()) {
+                search_tokens.push(fn_str.to_lowercase());
+            }
+            if let Some(fv_str) = f.get("value").and_then(|v| v.as_str()) {
+                search_tokens.push(fv_str.to_lowercase());
+            }
+        }
+        for att in &attachments_decrypted {
+            if let Some(fn_str) = att.get("fileName").and_then(|v| v.as_str()) {
+                search_tokens.push(fn_str.to_lowercase());
+            }
+        }
+        if let Some(ref fn_name) = folder_name {
+            search_tokens.push(fn_name.to_lowercase());
+        }
+        if let Some(ref on_name) = org_name_opt {
+            search_tokens.push(on_name.to_lowercase());
+        }
+
+        let search_text = search_tokens.join(" ");
+
+        items.push(VaultItem {
+            id,
+            name,
+            item_type,
+            type_name,
+            sub_title,
+            notes,
+            favorite,
+            created_at,
+            updated_at,
+            folder_id,
+            folder_name,
+            organization_id: org_id_opt,
+            organization_name: org_name_opt,
+            collection_ids,
+            login: if item_type == 1 { login_val } else { None },
+            card: if item_type == 3 { card_val } else { None },
+            identity: if item_type == 4 { identity_val } else { None },
+            ssh_key: if item_type == 5 { ssh_key_val } else { None },
+            fields: fields_decrypted,
+            attachments: attachments_decrypted,
+            search_text,
+        });
+    }
+
+    items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aes::Aes256;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine;
+    use cbc::cipher::block_padding::Pkcs7;
+    use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+    type HmacSha256 = Hmac<Sha256>;
+
+    fn encrypt_test_string(plaintext: &str, key: &SymmetricCryptoKey) -> String {
+        let iv = [2u8; 16];
+        let enc = Aes256CbcEnc::new_from_slices(&key.enc_key, &iv).unwrap();
+        let mut buf = vec![0u8; plaintext.len() + 32];
+        let ct_len = enc
+            .encrypt_padded_b2b_mut::<Pkcs7>(plaintext.as_bytes(), &mut buf)
+            .unwrap()
+            .len();
+        let ct = &buf[..ct_len];
+
+        let mut hmac = HmacSha256::new_from_slice(key.mac_key.as_ref().unwrap()).unwrap();
+        hmac.update(&iv);
+        hmac.update(ct);
+        let mac = hmac.finalize().into_bytes();
+
+        format!(
+            "2.{}|{}|{}",
+            BASE64.encode(iv),
+            BASE64.encode(ct),
+            BASE64.encode(mac)
+        )
+    }
+
+    #[test]
+    fn test_decrypt_sync_ciphers() {
+        let raw_user_key = [5u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let enc_name = encrypt_test_string("GitHub Enterprise", &user_key);
+        let enc_user = encrypt_test_string("octocat_native", &user_key);
+        let enc_pwd = encrypt_test_string("P@ssw0rd123!", &user_key);
+        let enc_notes = encrypt_test_string("Production SSH server access", &user_key);
+
+        let ciphers = vec![json!({
+            "id": "cipher-1",
+            "type": 1,
+            "favorite": true,
+            "name": enc_name,
+            "notes": enc_notes,
+            "login": {
+                "username": enc_user,
+                "password": enc_pwd,
+                "uris": [{ "uri": encrypt_test_string("https://github.com/login", &user_key) }]
+            }
+        })];
+
+        let items = decrypt_sync_ciphers(&ciphers, &user_key);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "GitHub Enterprise");
+        assert_eq!(items[0].sub_title, "octocat_native");
+        assert_eq!(
+            items[0].notes.as_deref(),
+            Some("Production SSH server access")
+        );
+        assert!(items[0].favorite);
+    }
+
+    #[test]
+    fn test_decrypt_card_and_identity_ciphers() {
+        let raw_user_key = [7u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let ciphers = vec![
+            json!({
+                "id": "card-1",
+                "type": 3,
+                "name": encrypt_test_string("Corporate Visa", &user_key),
+                "card": {
+                    "cardholderName": encrypt_test_string("Alice Doe", &user_key),
+                    "brand": encrypt_test_string("Visa", &user_key),
+                    "number": encrypt_test_string("4111222233334444", &user_key),
+                    "expMonth": encrypt_test_string("12", &user_key),
+                    "expYear": encrypt_test_string("2028", &user_key),
+                    "code": encrypt_test_string("987", &user_key),
+                }
+            }),
+            json!({
+                "id": "id-1",
+                "type": 4,
+                "name": encrypt_test_string("Personal Identity", &user_key),
+                "identity": {
+                    "firstName": encrypt_test_string("Alice", &user_key),
+                    "lastName": encrypt_test_string("Doe", &user_key),
+                    "email": encrypt_test_string("alice@example.com", &user_key),
+                    "phone": encrypt_test_string("+1-555-0199", &user_key),
+                    "company": encrypt_test_string("Acme Corp", &user_key),
+                    "address1": encrypt_test_string("123 Tech Lane", &user_key),
+                    "city": encrypt_test_string("San Francisco", &user_key),
+                    "state": encrypt_test_string("CA", &user_key),
+                    "postalCode": encrypt_test_string("94105", &user_key),
+                    "country": encrypt_test_string("US", &user_key),
+                    "ssn": encrypt_test_string("123-45-6789", &user_key),
+                }
+            }),
+            json!({
+                "id": "note-1",
+                "type": 2,
+                "name": encrypt_test_string("Server Recovery Keys", &user_key),
+                "notes": encrypt_test_string("Mnemonic: alpha beta gamma delta", &user_key),
+            }),
+        ];
+
+        let items = decrypt_sync_ciphers(&ciphers, &user_key);
+        assert_eq!(items.len(), 3);
+
+        // Card assertions
+        assert_eq!(items[0].name, "Corporate Visa");
+        assert_eq!(items[0].type_name, "card");
+        assert_eq!(items[0].sub_title, "Visa •••• 4444");
+        assert!(items[0].login.is_none());
+        assert!(items[0].identity.is_none());
+        assert!(items[0].ssh_key.is_none());
+        let card = items[0].card.as_ref().unwrap();
+        assert_eq!(card.get("cardholderName").unwrap(), "Alice Doe");
+        assert_eq!(card.get("brand").unwrap(), "Visa");
+        assert_eq!(card.get("number").unwrap(), "4111222233334444");
+        assert_eq!(card.get("code").unwrap(), "987");
+
+        // Identity assertions
+        assert_eq!(items[1].name, "Personal Identity");
+        assert_eq!(items[1].type_name, "identity");
+        assert_eq!(items[1].sub_title, "Alice Doe");
+        assert!(items[1].login.is_none());
+        assert!(items[1].card.is_none());
+        assert!(items[1].ssh_key.is_none());
+        let id_val = items[1].identity.as_ref().unwrap();
+        assert_eq!(id_val.get("firstName").unwrap(), "Alice");
+        assert_eq!(id_val.get("lastName").unwrap(), "Doe");
+        assert_eq!(id_val.get("email").unwrap(), "alice@example.com");
+        assert_eq!(id_val.get("phone").unwrap(), "+1-555-0199");
+        assert_eq!(id_val.get("company").unwrap(), "Acme Corp");
+        assert_eq!(id_val.get("city").unwrap(), "San Francisco");
+
+        // Note assertions
+        assert_eq!(items[2].name, "Server Recovery Keys");
+        assert_eq!(items[2].type_name, "note");
+        assert_eq!(items[2].sub_title, "Secure Note");
+        assert!(items[2].login.is_none());
+        assert!(items[2].card.is_none());
+        assert!(items[2].identity.is_none());
+        assert!(items[2].ssh_key.is_none());
+        assert_eq!(
+            items[2].notes.as_deref(),
+            Some("Mnemonic: alpha beta gamma delta")
+        );
+    }
+
+    #[test]
+    fn test_filter_soft_deleted_ciphers() {
+        let raw_user_key = [9u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let ciphers = vec![
+            json!({
+                "id": "active-1",
+                "type": 4,
+                "deletedDate": null,
+                "name": encrypt_test_string("Active Identity", &user_key),
+            }),
+            json!({
+                "id": "deleted-1",
+                "type": 4,
+                "deletedDate": "2024-01-01T00:00:00Z",
+                "name": encrypt_test_string("Deleted Identity in Trash", &user_key),
+            }),
+        ];
+
+        let items = decrypt_sync_ciphers(&ciphers, &user_key);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "active-1");
+    }
+
+    #[test]
+    fn test_decrypt_sync_ciphers_with_folders() {
+        let raw_user_key = [10u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let folders = vec![json!({
+            "id": "folder-123",
+            "name": encrypt_test_string("Work Projects", &user_key),
+        })];
+
+        let ciphers = vec![json!({
+            "id": "cipher-f1",
+            "type": 1,
+            "folderId": "folder-123",
+            "name": encrypt_test_string("Company Jira", &user_key),
+            "login": {
+                "username": encrypt_test_string("worker1", &user_key),
+                "password": encrypt_test_string("pass123", &user_key),
+                "uris": []
+            }
+        })];
+
+        let items = decrypt_sync_ciphers_with_context(&ciphers, &folders, &[], &user_key, None);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].folder_id.as_deref(), Some("folder-123"));
+        assert_eq!(items[0].folder_name.as_deref(), Some("Work Projects"));
+        assert!(items[0].search_text.contains("work projects"));
+    }
+
+    #[test]
+    fn test_decrypt_organization_ciphers() {
+        let raw_user_key = [11u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let raw_org_key = [12u8; 64];
+        let org_key = SymmetricCryptoKey::from_raw_bytes(&raw_org_key).unwrap();
+
+        // Encrypt org key with user_key (CipherType 2: AES-CBC)
+        let enc_org_key =
+            encrypt_test_string(std::str::from_utf8(&raw_org_key).unwrap_or(""), &user_key);
+
+        let organizations = vec![json!({
+            "id": "org-789",
+            "name": "Acme Global",
+            "key": format!("2.{}", &enc_org_key[2..]),
+        })];
+
+        // Organization cipher encrypted with org_key
+        let ciphers = vec![json!({
+            "id": "org-cipher-1",
+            "type": 4,
+            "organizationId": "org-789",
+            "name": encrypt_test_string("Corporate Identity", &org_key),
+            "identity": {
+                "firstName": encrypt_test_string("Bob", &org_key),
+                "lastName": encrypt_test_string("Acme", &org_key),
+                "company": encrypt_test_string("Acme Global Inc", &org_key),
+            }
+        })];
+
+        let items =
+            decrypt_sync_ciphers_with_context(&ciphers, &[], &organizations, &user_key, None);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "Corporate Identity");
+        assert_eq!(items[0].organization_id.as_deref(), Some("org-789"));
+        assert_eq!(items[0].organization_name.as_deref(), Some("Acme Global"));
+        assert_eq!(items[0].sub_title, "Bob Acme");
+        assert!(items[0].identity.is_some());
+        assert!(items[0].search_text.contains("acme global"));
+    }
+
+    #[test]
+    fn test_decrypt_organization_ciphers_with_rsa_type_4() {
+        use rsa::pkcs8::EncodePrivateKey;
+        use rsa::rand_core::OsRng;
+        use rsa::RsaPrivateKey;
+
+        let raw_user_key = [15u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        // 1. Generate 2048-bit RSA key for user
+        let mut rng = OsRng;
+        let priv_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pub_key = rsa::RsaPublicKey::from(&priv_key);
+        let priv_der = priv_key.to_pkcs8_der().unwrap();
+        let priv_b64 = BASE64.encode(priv_der.as_bytes());
+
+        // Encrypt private key with user_key (CipherType 2)
+        let enc_private_key = encrypt_test_string(&priv_b64, &user_key);
+
+        // 2. Org key (64 bytes) encrypted with RSA-OAEP SHA-1 (CipherType 4)
+        let raw_org_key = [22u8; 64];
+        let org_key = SymmetricCryptoKey::from_raw_bytes(&raw_org_key).unwrap();
+        let enc_org_bytes = pub_key
+            .encrypt(&mut rng, rsa::Oaep::new::<sha1::Sha1>(), &raw_org_key)
+            .unwrap();
+        let org_key_b64 = BASE64.encode(&enc_org_bytes);
+
+        let organizations = vec![json!({
+            "id": "org-rsa-4",
+            "name": "LZSH",
+            "key": format!("4.{}", org_key_b64),
+        })];
+
+        let ciphers = vec![json!({
+            "id": "cipher-rsa-4",
+            "type": 4,
+            "organizationId": "org-rsa-4",
+            "name": encrypt_test_string("Wang Shen Identity", &org_key),
+            "identity": {
+                "firstName": encrypt_test_string("Shen", &org_key),
+                "lastName": encrypt_test_string("Wang", &org_key),
+                "company": encrypt_test_string("LZSH Org", &org_key),
+            }
+        })];
+
+        let items = decrypt_sync_ciphers_with_context(
+            &ciphers,
+            &[],
+            &organizations,
+            &user_key,
+            Some(&enc_private_key),
+        );
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "Wang Shen Identity");
+        assert_eq!(items[0].organization_name.as_deref(), Some("LZSH"));
+        assert_eq!(items[0].sub_title, "Shen Wang");
+        let id_obj = items[0].identity.as_ref().unwrap();
+        assert_eq!(id_obj.get("company").unwrap(), "LZSH Org");
+    }
+
+    #[test]
+    fn test_decrypt_login_with_fido2_passkey() {
+        let raw_user_key = [10u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let ciphers = vec![
+            json!({
+                "id": "cipher-login-passkey",
+                "type": 1,
+                "name": encrypt_test_string("GitHub Account", &user_key),
+                "login": {
+                    "username": encrypt_test_string("octocat", &user_key),
+                    "password": encrypt_test_string("secret_pass", &user_key),
+                    "fido2Credentials": [
+                        {
+                            "credentialId": "cred-12345",
+                            "keyType": "public-key",
+                            "creationDate": "2024-05-12T14:30:00.000Z",
+                            "userName": "octocat",
+                            "rpId": "github.com"
+                        }
+                    ]
+                }
+            }),
+            json!({
+                "id": "cipher-login-no-passkey",
+                "type": 1,
+                "name": encrypt_test_string("Standard Login", &user_key),
+                "login": {
+                    "username": encrypt_test_string("user1", &user_key),
+                    "password": encrypt_test_string("pass1", &user_key)
+                }
+            }),
+        ];
+
+        let items = decrypt_sync_ciphers(&ciphers, &user_key);
+        assert_eq!(items.len(), 2);
+
+        // Item 1 with passkey
+        let login_with_pk = items[0].login.as_ref().unwrap();
+        assert_eq!(login_with_pk.get("has_passkey").unwrap(), true);
+        assert_eq!(
+            login_with_pk.get("passkey_created_at").unwrap(),
+            "2024-05-12T14:30:00.000Z"
+        );
+
+        // Item 2 without passkey
+        let login_without_pk = items[1].login.as_ref().unwrap();
+        assert_eq!(login_without_pk.get("has_passkey").unwrap(), false);
+        assert!(login_without_pk
+            .get("passkey_created_at")
+            .unwrap()
+            .is_null());
+    }
+
+    #[test]
+    fn test_decrypt_ssh_key_cipher_type_5() {
+        let raw_user_key = [16u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let ciphers = vec![
+            json!({
+                "id": "cipher-ssh-5",
+                "type": 5,
+                "name": encrypt_test_string("Production Server Key", &user_key),
+                "sshKey": {
+                    "publicKey": encrypt_test_string("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG... dev@server", &user_key),
+                    "privateKey": encrypt_test_string("-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----", &user_key),
+                    "keyFingerprint": encrypt_test_string("SHA256:fingerprint123456", &user_key)
+                }
+            }),
+            json!({
+                "id": "cipher-note-2",
+                "type": 2,
+                "name": encrypt_test_string("Regular Note", &user_key),
+                "notes": encrypt_test_string("Just some text with ssh-rsa AAAAB3NzaC1yc2E... in it", &user_key)
+            }),
+        ];
+
+        let items = decrypt_sync_ciphers(&ciphers, &user_key);
+        assert_eq!(items.len(), 2);
+
+        // Cipher Type 5
+        assert_eq!(items[0].type_name, "ssh_key");
+        assert_eq!(items[0].sub_title, "SSH Key (ED25519)");
+        let ssh_meta = items[0].ssh_key.as_ref().unwrap();
+        assert_eq!(ssh_meta.key_type, "ED25519");
+        assert!(ssh_meta
+            .public_key
+            .as_ref()
+            .unwrap()
+            .starts_with("ssh-ed25519"));
+        assert!(ssh_meta
+            .private_key
+            .as_ref()
+            .unwrap()
+            .contains("BEGIN OPENSSH"));
+        assert_eq!(
+            ssh_meta.fingerprint.as_deref(),
+            Some("SHA256:fingerprint123456")
+        );
+
+        // Cipher Type 2 (Note) remains Note!
+        assert_eq!(items[1].type_name, "note");
+        assert_eq!(items[1].sub_title, "Secure Note");
+        assert!(items[1].ssh_key.is_none());
+    }
+
+    #[test]
+    fn test_decrypt_ciphers_with_timestamps() {
+        let raw_user_key = [15u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let ciphers = vec![json!({
+            "id": "cipher-timestamps",
+            "type": 1,
+            "name": encrypt_test_string("Item With Timestamps", &user_key),
+            "creationDate": "2024-01-15T08:20:00.000Z",
+            "revisionDate": "2024-06-20T11:45:00.000Z",
+            "login": {
+                "username": encrypt_test_string("alice", &user_key),
+            }
+        })];
+
+        let items = decrypt_sync_ciphers(&ciphers, &user_key);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].created_at.as_deref(),
+            Some("2024-01-15T08:20:00.000Z")
+        );
+        assert_eq!(
+            items[0].updated_at.as_deref(),
+            Some("2024-06-20T11:45:00.000Z")
+        );
+    }
+
+    #[test]
+    fn test_decrypt_ciphers_with_password_history() {
+        let raw_user_key = [16u8; 64];
+        let user_key = SymmetricCryptoKey::from_raw_bytes(&raw_user_key).unwrap();
+
+        let ciphers = vec![
+            json!({
+                "id": "cipher-with-pwd-history",
+                "type": 1,
+                "name": encrypt_test_string("Login With History", &user_key),
+                "login": {
+                    "username": encrypt_test_string("bob", &user_key),
+                    "password": encrypt_test_string("current_secret_pwd", &user_key),
+                    "passwordHistory": [
+                        {
+                            "password": encrypt_test_string("old_secret_pwd_2", &user_key),
+                            "lastUsedDate": "2024-05-10T10:00:00.000Z"
+                        },
+                        {
+                            "password": encrypt_test_string("old_secret_pwd_1", &user_key),
+                            "lastUsedDate": "2023-12-01T08:00:00.000Z"
+                        }
+                    ]
+                }
+            }),
+            json!({
+                "id": "cipher-without-pwd-history",
+                "type": 1,
+                "name": encrypt_test_string("Login Without History", &user_key),
+                "login": {
+                    "username": encrypt_test_string("charlie", &user_key),
+                    "password": encrypt_test_string("another_pwd", &user_key),
+                }
+            }),
+        ];
+
+        let items = decrypt_sync_ciphers(&ciphers, &user_key);
+        assert_eq!(items.len(), 2);
+
+        // First item has 2 password history entries
+        let login_0 = items[0].login.as_ref().unwrap();
+        assert_eq!(
+            login_0.get("password").and_then(|v| v.as_str()),
+            Some("current_secret_pwd")
+        );
+        let hist_0 = login_0
+            .get("password_history")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(hist_0.len(), 2);
+        assert_eq!(
+            hist_0[0].get("password").and_then(|v| v.as_str()),
+            Some("old_secret_pwd_2")
+        );
+        assert_eq!(
+            hist_0[0].get("last_used_date").and_then(|v| v.as_str()),
+            Some("2024-05-10T10:00:00.000Z")
+        );
+        assert_eq!(
+            hist_0[1].get("password").and_then(|v| v.as_str()),
+            Some("old_secret_pwd_1")
+        );
+
+        // Second item has empty password history list
+        let login_1 = items[1].login.as_ref().unwrap();
+        let hist_1 = login_1
+            .get("password_history")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert!(hist_1.is_empty());
+    }
+
+    #[test]
+    fn test_endpoint_resolver_official_us_cloud() {
+        let cases = [
+            "https://vault.bitwarden.com",
+            "https://vault.bitwarden.com/",
+            "https://api.bitwarden.com",
+            "https://identity.bitwarden.com",
+            "https://bitwarden.com",
+            "vault.bitwarden.com",
+            "bitwarden.com",
+        ];
+
+        for url in cases {
+            let urls = EnvironmentUrls::resolve(url, None);
+            assert!(urls.is_cloud, "Expected is_cloud for {}", url);
+            assert_eq!(urls.base_url, "https://vault.bitwarden.com");
+            assert_eq!(urls.api_url, "https://api.bitwarden.com");
+            assert_eq!(urls.identity_url, "https://identity.bitwarden.com");
+            assert!(!urls.has_explicit_identity);
+        }
+    }
+
+    #[test]
+    fn test_endpoint_resolver_official_eu_cloud() {
+        let cases = [
+            "https://vault.bitwarden.eu",
+            "https://vault.bitwarden.eu/",
+            "https://api.bitwarden.eu",
+            "https://identity.bitwarden.eu",
+            "https://bitwarden.eu",
+            "vault.bitwarden.eu",
+            "bitwarden.eu",
+        ];
+
+        for url in cases {
+            let urls = EnvironmentUrls::resolve(url, None);
+            assert!(urls.is_cloud, "Expected is_cloud for {}", url);
+            assert_eq!(urls.base_url, "https://vault.bitwarden.eu");
+            assert_eq!(urls.api_url, "https://api.bitwarden.eu");
+            assert_eq!(urls.identity_url, "https://identity.bitwarden.eu");
+            assert!(!urls.has_explicit_identity);
+        }
+    }
+
+    #[test]
+    fn test_endpoint_resolver_self_hosted_and_suffixes() {
+        let urls = EnvironmentUrls::resolve("https://vaultwarden.example.com", None);
+        assert!(!urls.is_cloud);
+        assert_eq!(urls.base_url, "https://vaultwarden.example.com");
+        assert_eq!(urls.api_url, "https://vaultwarden.example.com/api");
+        assert_eq!(
+            urls.identity_url,
+            "https://vaultwarden.example.com/identity"
+        );
+
+        // Trailing slash
+        let urls = EnvironmentUrls::resolve("https://vaultwarden.example.com/", None);
+        assert_eq!(urls.base_url, "https://vaultwarden.example.com");
+        assert_eq!(urls.api_url, "https://vaultwarden.example.com/api");
+        assert_eq!(
+            urls.identity_url,
+            "https://vaultwarden.example.com/identity"
+        );
+
+        // Redundant /api suffix
+        let urls = EnvironmentUrls::resolve("https://vaultwarden.example.com/api", None);
+        assert_eq!(urls.base_url, "https://vaultwarden.example.com");
+        assert_eq!(urls.api_url, "https://vaultwarden.example.com/api");
+        assert_eq!(
+            urls.identity_url,
+            "https://vaultwarden.example.com/identity"
+        );
+
+        // Redundant /identity suffix
+        let urls = EnvironmentUrls::resolve("https://vaultwarden.example.com/identity/", None);
+        assert_eq!(urls.base_url, "https://vaultwarden.example.com");
+        assert_eq!(urls.api_url, "https://vaultwarden.example.com/api");
+        assert_eq!(
+            urls.identity_url,
+            "https://vaultwarden.example.com/identity"
+        );
+
+        // Localhost with port
+        let urls = EnvironmentUrls::resolve("http://127.0.0.1:8080", None);
+        assert!(!urls.is_cloud);
+        assert_eq!(urls.base_url, "http://127.0.0.1:8080");
+        assert_eq!(urls.api_url, "http://127.0.0.1:8080/api");
+        assert_eq!(urls.identity_url, "http://127.0.0.1:8080/identity");
+
+        // Subpath deployment
+        let urls = EnvironmentUrls::resolve("https://example.com/vw/api", None);
+        assert_eq!(urls.base_url, "https://example.com/vw");
+        assert_eq!(urls.api_url, "https://example.com/vw/api");
+        assert_eq!(urls.identity_url, "https://example.com/vw/identity");
+    }
+
+    #[test]
+    fn test_endpoint_resolver_explicit_identity_override() {
+        // Cloud base with custom identity override
+        let urls = EnvironmentUrls::resolve(
+            "https://vault.bitwarden.com",
+            Some("https://custom-auth.corp.net/identity/"),
+        );
+        assert!(urls.is_cloud);
+        assert!(urls.has_explicit_identity);
+        assert_eq!(urls.base_url, "https://vault.bitwarden.com");
+        assert_eq!(urls.api_url, "https://api.bitwarden.com");
+        assert_eq!(urls.identity_url, "https://custom-auth.corp.net/identity");
+
+        // Self-hosted with custom identity override
+        let urls =
+            EnvironmentUrls::resolve("https://vaultwarden.corp.net", Some("https://id.corp.net"));
+        assert!(!urls.is_cloud);
+        assert!(urls.has_explicit_identity);
+        assert_eq!(urls.base_url, "https://vaultwarden.corp.net");
+        assert_eq!(urls.api_url, "https://vaultwarden.corp.net/api");
+        assert_eq!(urls.identity_url, "https://id.corp.net");
+
+        // Empty string explicit identity is treated as None
+        let urls = EnvironmentUrls::resolve("https://vaultwarden.corp.net", Some("   "));
+        assert!(!urls.has_explicit_identity);
+        assert_eq!(urls.identity_url, "https://vaultwarden.corp.net/identity");
+    }
+
+    #[test]
+    fn test_endpoint_resolver_non_official_bitwarden_domain() {
+        // Host has bitwarden in domain name but is not the official cloud
+        let urls = EnvironmentUrls::resolve("https://mybitwarden.com", None);
+        assert!(!urls.is_cloud);
+        assert_eq!(urls.base_url, "https://mybitwarden.com");
+        assert_eq!(urls.api_url, "https://mybitwarden.com/api");
+        assert_eq!(urls.identity_url, "https://mybitwarden.com/identity");
+    }
+
+    #[test]
+    fn test_is_loopback_host() {
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("LOCALHOST"));
+        assert!(is_loopback_host("sub.localhost"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("127.0.0.2"));
+        assert!(is_loopback_host("127.255.255.254"));
+        assert!(is_loopback_host("::1"));
+        assert!(is_loopback_host("[::1]"));
+
+        assert!(!is_loopback_host("vaultwarden.example.com"));
+        assert!(!is_loopback_host("192.168.1.1"));
+        assert!(!is_loopback_host("10.0.0.1"));
+        assert!(!is_loopback_host("172.16.0.1"));
+        assert!(!is_loopback_host(""));
+    }
+
+    #[test]
+    fn test_endpoint_resolver_enforces_https_for_remote_http() {
+        // Plaintext HTTP remote server is upgraded to HTTPS
+        let urls = EnvironmentUrls::resolve("http://vaultwarden.example.com", None);
+        assert_eq!(urls.base_url, "https://vaultwarden.example.com");
+        assert_eq!(urls.api_url, "https://vaultwarden.example.com/api");
+        assert_eq!(
+            urls.identity_url,
+            "https://vaultwarden.example.com/identity"
+        );
+
+        // Plaintext HTTP remote identity override is upgraded to HTTPS
+        let urls = EnvironmentUrls::resolve(
+            "https://vaultwarden.example.com",
+            Some("http://identity.example.com"),
+        );
+        assert_eq!(urls.base_url, "https://vaultwarden.example.com");
+        assert_eq!(urls.identity_url, "https://identity.example.com");
+
+        // Loopback HTTP addresses are preserved
+        let urls = EnvironmentUrls::resolve("http://localhost:8080", None);
+        assert_eq!(urls.base_url, "http://localhost:8080");
+
+        let urls = EnvironmentUrls::resolve("http://[::1]:8080", None);
+        assert_eq!(urls.base_url, "http://[::1]:8080");
+    }
+
+    #[test]
+    fn test_client_prelogin_primary_identity_success() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&request_count);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                count_clone.fetch_add(1, Ordering::SeqCst);
+
+                if req.contains("POST /identity/accounts/prelogin") {
+                    let body = r#"{"kdf":0,"kdfIterations":600000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let res = client.prelogin("user@example.com").unwrap();
+        assert_eq!(res.kdf, Some(0));
+        assert_eq!(res.kdf_iterations, Some(600_000));
+        let _ = handle.join();
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_client_prelogin_fallback_from_identity_to_api() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&request_count);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                count_clone.fetch_add(1, Ordering::SeqCst);
+
+                if req.contains("POST /identity/accounts/prelogin") {
+                    // First request to /identity/accounts/prelogin returns 404
+                    let resp =
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /api/accounts/prelogin") {
+                    // Fallback to /api/accounts/prelogin returns 200
+                    let body = r#"{"kdf":0,"kdfIterations":600000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let res = client.prelogin("fallback@example.com").unwrap();
+        assert_eq!(res.kdf, Some(0));
+        assert_eq!(res.kdf_iterations, Some(600_000));
+        let _ = handle.join();
+        assert_eq!(request_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_client_prelogin_identity_500_does_not_fallback() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&request_count);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                count_clone.fetch_add(1, Ordering::SeqCst);
+
+                if req.contains("POST /identity/accounts/prelogin") {
+                    let resp =
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let err = client.prelogin("err@example.com").unwrap_err();
+        match err {
+            ApiError::HttpStatus(code, _) => {
+                assert_eq!(code, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            other => panic!("Expected HttpStatus(500), got: {:?}", other),
+        }
+        let _ = handle.join();
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_client_connect_token_fallback() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/connect/token") {
+                    // Primary returns 404
+                    let resp =
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /connect/token") {
+                    // Fallback returns 200
+                    let body = r#"{"access_token":"token_fallback_123","token_type":"Bearer","expires_in":3600}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let res = client.login_apikey("client_id_val", "client_sec").unwrap();
+        assert_eq!(res.access_token, "token_fallback_123");
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_endpoint_resolver_explicit_identity_strips_redundant_token_path() {
+        let urls = EnvironmentUrls::resolve(
+            "https://vault.bitwarden.com",
+            Some("https://identity.bitwarden.com/connect/token/"),
+        );
+        assert_eq!(urls.identity_url, "https://identity.bitwarden.com");
+    }
+
+    #[test]
+    fn test_client_connect_token_400_does_not_fallback() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&request_count);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                count_clone.fetch_add(1, Ordering::SeqCst);
+
+                if req.contains("POST /identity/connect/token") {
+                    // HTTP 400 Bad Request (e.g. invalid credentials)
+                    let body = r#"{"error":"invalid_grant","error_description":"Invalid username or password."}"#;
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let err = client.login_apikey("bad_client", "bad_secret").unwrap_err();
+        assert!(err.to_string().contains("Invalid username or password"));
+        let _ = handle.join();
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_get_device_identifier_format() {
+        let id = get_device_identifier();
+        assert_eq!(id.len(), 36);
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0].len(), 8);
+        assert_eq!(parts[1].len(), 4);
+        assert_eq!(parts[2].len(), 4);
+        assert_eq!(parts[3].len(), 4);
+        assert_eq!(parts[4].len(), 12);
+        for c in id.chars() {
+            assert!(c == '-' || c.is_ascii_hexdigit());
+        }
+    }
+
+    #[test]
+    fn test_client_device_parameters_and_2fa_response() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                {
+                    let body = r#"{"kdf":0,"kdfIterations":600000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    // Verify device parameters in request body
+                    assert!(
+                        req.contains("deviceType=8"),
+                        "Expected deviceType=8, got: {}",
+                        req
+                    );
+                    assert!(
+                        req.contains("deviceName=linux"),
+                        "Expected deviceName=linux, got: {}",
+                        req
+                    );
+                    assert!(
+                        req.contains("deviceIdentifier="),
+                        "Expected deviceIdentifier in request: {}",
+                        req
+                    );
+
+                    // Return official Bitwarden 2FA challenge
+                    let body = r#"{"error":"invalid_grant","error_description":"Two factor required.","TwoFactorProviders":["0","1"]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let pwd = zeroize::Zeroizing::new("master_password".to_string());
+        let res = client.login_password("user@example.com", &pwd, None, None, None);
+        match res {
+            Err(ApiError::TwoFactorRequired { providers, .. }) => {
+                assert_eq!(providers, vec![0, 1]);
+            }
+            other => panic!("Expected TwoFactorRequired, got {:?}", other),
+        }
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_login_password_new_device_verification_challenge_and_otp() {
+        use aes::Aes256;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use cbc::cipher::block_padding::Pkcs7;
+        use cbc::cipher::BlockEncryptMut;
+        use cbc::cipher::KeyIvInit;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let email = "user@example.com";
+        let password = "master_password";
+        let master_key =
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+
+        let iv = [3u8; 16];
+        let plaintext = [4u8; 64];
+        type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+        let enc = Aes256CbcEnc::new_from_slices(&sym_key.enc_key, &iv).unwrap();
+        let mut buf = vec![0u8; 128];
+        let ct_len = enc
+            .encrypt_padded_b2b_mut::<Pkcs7>(&plaintext, &mut buf)
+            .unwrap()
+            .len();
+        let ct = &buf[..ct_len];
+
+        let mut hmac = Hmac::<Sha256>::new_from_slice(sym_key.mac_key.as_ref().unwrap()).unwrap();
+        hmac.update(&iv);
+        hmac.update(ct);
+        let mac = hmac.finalize().into_bytes();
+
+        let valid_enc_key = format!(
+            "2.{}|{}|{}",
+            BASE64.encode(iv),
+            BASE64.encode(ct),
+            BASE64.encode(mac)
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let valid_key_clone = valid_enc_key.clone();
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                    || req.contains("POST /accounts/prelogin")
+                {
+                    let body = r#"{"Kdf":0,"KdfIterations":100000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    if req.contains("newDeviceOtp=654321") {
+                        // Successful response when newDeviceOtp is provided
+                        let body = format!(
+                            r#"{{"access_token":"token123","expires_in":3600,"token_type":"Bearer","refresh_token":"ref123","Key":"{}"}}"#,
+                            valid_key_clone
+                        );
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        break;
+                    } else {
+                        // Return official Bitwarden New Device Verification challenge
+                        let body = r#"{"error":"device_error","error_description":"New device verification required","ErrorModel":{"Message":"new device verification required"}}"#;
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let pwd = zeroize::Zeroizing::new("master_password".to_string());
+
+        // First attempt without OTP -> triggers NewDeviceVerificationRequired
+        let res1 = client.login_password("user@example.com", &pwd, None, None, None);
+        match res1 {
+            Err(ApiError::NewDeviceVerificationRequired) => {}
+            other => panic!("Expected NewDeviceVerificationRequired, got {:?}", other),
+        }
+
+        // Second attempt with new_device_otp -> succeeds
+        let res2 = client.login_password("user@example.com", &pwd, None, None, Some("654321"));
+        assert!(
+            res2.is_ok(),
+            "Expected login with new_device_otp to succeed: {:?}",
+            res2.err()
+        );
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_login_password_new_device_otp_auto_retry_from_2fa_token() {
+        use aes::Aes256;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use cbc::cipher::block_padding::Pkcs7;
+        use cbc::cipher::BlockEncryptMut;
+        use cbc::cipher::KeyIvInit;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let email = "user@example.com";
+        let password = "master_password";
+        let master_key =
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+
+        let iv = [3u8; 16];
+        let plaintext = [4u8; 64];
+        type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+        let enc = Aes256CbcEnc::new_from_slices(&sym_key.enc_key, &iv).unwrap();
+        let mut buf = vec![0u8; 128];
+        let ct_len = enc
+            .encrypt_padded_b2b_mut::<Pkcs7>(&plaintext, &mut buf)
+            .unwrap()
+            .len();
+        let ct = &buf[..ct_len];
+
+        let mut hmac = Hmac::<Sha256>::new_from_slice(sym_key.mac_key.as_ref().unwrap()).unwrap();
+        hmac.update(&iv);
+        hmac.update(ct);
+        let mac = hmac.finalize().into_bytes();
+
+        let valid_enc_key = format!(
+            "2.{}|{}|{}",
+            BASE64.encode(iv),
+            BASE64.encode(ct),
+            BASE64.encode(mac)
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let valid_key_clone = valid_enc_key.clone();
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                    || req.contains("POST /accounts/prelogin")
+                {
+                    let body = r#"{"Kdf":0,"KdfIterations":100000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    if req.contains("twoFactorToken=999888") {
+                        // Server refuses twoFactorToken with New device verification required challenge
+                        let body = r#"{"error":"device_error","error_description":"New device verification required"}"#;
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    } else if req.contains("newDeviceOtp=999888") {
+                        // Automatic retry with newDeviceOtp succeeds!
+                        let body = format!(
+                            r#"{{"access_token":"token123","expires_in":3600,"token_type":"Bearer","refresh_token":"ref123","Key":"{}"}}"#,
+                            valid_key_clone
+                        );
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        break;
+                    }
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let pwd = zeroize::Zeroizing::new("master_password".to_string());
+
+        // Passed as twoFactorToken, client auto-retries with newDeviceOtp and succeeds!
+        let res = client.login_password("user@example.com", &pwd, Some("999888"), None, None);
+        assert!(
+            res.is_ok(),
+            "Expected auto-retry with newDeviceOtp to succeed: {:?}",
+            res.err()
+        );
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_login_password_email_2fa_provider_and_auto_retry() {
+        use aes::Aes256;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use cbc::cipher::block_padding::Pkcs7;
+        use cbc::cipher::BlockEncryptMut;
+        use cbc::cipher::KeyIvInit;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let email = "user@example.com";
+        let password = "master_password";
+        let master_key =
+            derive_master_key(email, password, KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+
+        let iv = [5u8; 16];
+        let plaintext = [6u8; 64];
+        type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+        let enc = Aes256CbcEnc::new_from_slices(&sym_key.enc_key, &iv).unwrap();
+        let mut buf = vec![0u8; 128];
+        let ct_len = enc
+            .encrypt_padded_b2b_mut::<Pkcs7>(&plaintext, &mut buf)
+            .unwrap()
+            .len();
+        let ct = &buf[..ct_len];
+
+        let mut hmac = Hmac::<Sha256>::new_from_slice(sym_key.mac_key.as_ref().unwrap()).unwrap();
+        hmac.update(&iv);
+        hmac.update(ct);
+        let mac = hmac.finalize().into_bytes();
+
+        let valid_enc_key = format!(
+            "2.{}|{}|{}",
+            BASE64.encode(iv),
+            BASE64.encode(ct),
+            BASE64.encode(mac)
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let valid_key_clone = valid_enc_key.clone();
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let mut success_count = 0;
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                    || req.contains("POST /accounts/prelogin")
+                {
+                    let body = r#"{"Kdf":0,"KdfIterations":100000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /identity/connect/token") {
+                    if req.contains("twoFactorProvider=1") && req.contains("twoFactorToken=112233")
+                    {
+                        // Successful response when email provider (1) and code is submitted
+                        let body = format!(
+                            r#"{{"access_token":"token_email_2fa","expires_in":3600,"token_type":"Bearer","refresh_token":"ref123","Key":"{}"}}"#,
+                            valid_key_clone
+                        );
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        success_count += 1;
+                        if success_count >= 2 {
+                            break;
+                        }
+                    } else if req.contains("twoFactorProvider=0") {
+                        // Server indicates only email 2FA (provider 1) is active
+                        let body = r#"{"error":"invalid_grant","error_description":"Two factor required.","TwoFactorProviders":["1"]}"#;
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    } else {
+                        let body = r#"{"error":"invalid_grant","error_description":"Two factor required.","TwoFactorProviders":["1"]}"#;
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let pwd = zeroize::Zeroizing::new("master_password".to_string());
+
+        // Attempt 1: Explicitly specify two_factor_provider = Some(1)
+        let res1 = client.login_password("user@example.com", &pwd, Some("112233"), Some(1), None);
+        assert!(
+            res1.is_ok(),
+            "Expected login with explicit two_factor_provider=1 to succeed: {:?}",
+            res1.err()
+        );
+
+        // Attempt 2: Auto-retry when caller specifies two_factor_token without provider (defaults to 0),
+        // and server returns TwoFactorProviders: ["1"]
+        let res2 = client.login_password("user@example.com", &pwd, Some("112233"), None, None);
+        assert!(
+            res2.is_ok(),
+            "Expected auto-retry with two_factor_provider=1 to succeed: {:?}",
+            res2.err()
+        );
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_send_two_factor_email_success() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                    || req.contains("POST /accounts/prelogin")
+                {
+                    let body = r#"{"kdf":0,"kdfIterations":100000}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req.contains("POST /api/two-factor/send-email-login") {
+                    assert!(req.contains("masterPasswordHash"));
+                    assert!(req.contains("user@example.com"));
+                    let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let res = client.send_two_factor_email("user@example.com", "password123");
+        assert!(res.is_ok(), "Expected send_two_factor_email to succeed");
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_read_response_limited_oversized_content_length_rejected() {
+        let mut mock_data = std::io::Cursor::new(vec![b'A'; 100]);
+        // Advertised length 10MB exceeds 2MB limit
+        let res = read_response_limited(&mut mock_data, Some(10 * 1024 * 1024), 2 * 1024 * 1024);
+        match res {
+            Err(ApiError::ResponseTooLarge { size, max_allowed }) => {
+                assert_eq!(size, 10 * 1024 * 1024);
+                assert_eq!(max_allowed, 2 * 1024 * 1024);
+            }
+            other => panic!("Expected ResponseTooLarge, got {:?}", other),
+        }
+        // Reader position remains untouched at 0 (rejected before reading)
+        assert_eq!(mock_data.position(), 0);
+    }
+
+    #[test]
+    fn test_read_response_limited_stream_overflow_rejected() {
+        // Stream sends 100 bytes without Content-Length, but max allowed is 50 bytes
+        let mut mock_data = std::io::Cursor::new(vec![b'B'; 100]);
+        let res = read_response_limited(&mut mock_data, None, 50);
+        match res {
+            Err(ApiError::ResponseTooLarge { size, max_allowed }) => {
+                assert_eq!(size, 51); // Aborted as soon as limit + 1 byte is encountered
+                assert_eq!(max_allowed, 50);
+            }
+            other => panic!("Expected ResponseTooLarge, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_read_response_limited_within_limit_succeeds() {
+        let mut mock_data = std::io::Cursor::new(b"{\"ok\":true}".to_vec());
+        let res = read_response_limited(&mut mock_data, Some(11), 1024).unwrap();
+        assert_eq!(res, b"{\"ok\":true}");
+    }
+
+    #[test]
+    fn test_prelogin_rejects_oversized_advertised_response() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]);
+
+                if req.contains("POST /identity/accounts/prelogin")
+                    || req.contains("POST /api/accounts/prelogin")
+                    || req.contains("POST /accounts/prelogin")
+                {
+                    // Malicious server advertises 100MB Content-Length for prelogin (exceeds 2MB MAX_API_BODY_SIZE)
+                    let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 104857600\r\nConnection: close\r\n\r\n{}";
+                    let _ = stream.write_all(resp.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let client = BitwardenApiClient::new(&server_url);
+        let res = client.prelogin("victim@example.com");
+        match res {
+            Err(ApiError::ResponseTooLarge { size, max_allowed }) => {
+                assert_eq!(size, 104857600);
+                assert_eq!(max_allowed, MAX_API_BODY_SIZE);
+            }
+            other => panic!("Expected ApiError::ResponseTooLarge, got {:?}", other),
+        }
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_build_http_client_default_headers_and_timeout() {
+        use std::io::{Read, Write};
+        let client = build_http_client(Duration::from_secs(5));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let os = std::env::consts::OS;
+                let os_label = if os == "macos" {
+                    "macOS".to_string()
+                } else {
+                    let mut c = os.chars();
+                    c.next()
+                        .map(|x| x.to_uppercase().collect::<String>() + c.as_str())
+                        .unwrap_or_default()
+                };
+                let expected_ua = format!(
+                    "user-agent: Omawarden/{} (Bitwarden/2026.7.0; {})",
+                    env!("CARGO_PKG_VERSION"),
+                    os_label
+                );
+                assert!(req.contains(&expected_ua));
+                assert!(req.contains("bitwarden-client-name: desktop"));
+                assert!(req.contains("bitwarden-client-version: 2026.7.0"));
+                assert!(req.contains("device-type: 8"));
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+
+        let res = client.get(&server_url).send();
+        assert!(
+            res.is_ok(),
+            "Expected request with default headers to succeed"
+        );
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_client_context_validation_and_crlf_rejection() {
+        let valid1 = ClientContext::new("Omawarden_Desktop", "0.11.2");
+        assert!(valid1.is_valid());
+
+        let valid2 = ClientContext::new("my-custom-client.v1", "1.0.0-beta.2");
+        assert!(valid2.is_valid());
+
+        let injection_crlf = ClientContext::new("evil\r\nX-Injected: true", "1.0.0");
+        assert!(!injection_crlf.is_valid());
+
+        let injection_ver = ClientContext::new("valid_name", "1.0\nSet-Cookie: evil");
+        assert!(!injection_ver.is_valid());
+
+        let space_name = ClientContext::new("Omawarden Desktop", "0.11.2");
+        assert!(!space_name.is_valid());
+
+        let colon_name = ClientContext::new("client:foo", "1.0");
+        assert!(!colon_name.is_valid());
+
+        let empty_name = ClientContext::new("", "1.0");
+        assert!(!empty_name.is_valid());
+
+        let empty_ver = ClientContext::new("client", "");
+        assert!(!empty_ver.is_valid());
+
+        let long_name = ClientContext::new("a".repeat(33), "1.0");
+        assert!(!long_name.is_valid());
+
+        let max_len = ClientContext::new("a".repeat(32), "1.0");
+        assert!(max_len.is_valid());
+    }
+
+    #[test]
+    fn test_format_user_agent_cli_and_ui() {
+        let engine_ver = env!("CARGO_PKG_VERSION");
+        let os = std::env::consts::OS;
+        let os_label = if os == "macos" {
+            "macOS".to_string()
+        } else {
+            let mut c = os.chars();
+            c.next()
+                .map(|x| x.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        };
+
+        let cli_ua = format_user_agent(None);
+        assert_eq!(
+            cli_ua,
+            format!(
+                "Omawarden/{} (Bitwarden/2026.7.0; {})",
+                engine_ver, os_label
+            )
+        );
+
+        let ui_ctx = ClientContext::new("Omawarden_Desktop", "0.11.2");
+        let ui_ua = format_user_agent(Some(&ui_ctx));
+        assert_eq!(
+            ui_ua,
+            format!(
+                "Omawarden_Desktop/0.11.2 (Omawarden/{}; Bitwarden/2026.7.0; {})",
+                engine_ver, os_label
+            )
+        );
+
+        let invalid_ctx = ClientContext::new("evil\r\nHeader: foo", "0.11.2");
+        let fallback_ua = format_user_agent(Some(&invalid_ctx));
+        assert_eq!(
+            fallback_ua,
+            format!(
+                "Omawarden/{} (Bitwarden/2026.7.0; {})",
+                engine_ver, os_label
+            )
+        );
+    }
+
+    #[test]
+    fn test_probe_client_context_from_path() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let valid_path = temp.path().join("client_valid.json");
+        std::fs::write(
+            &valid_path,
+            r#"{"client_name": " MyClient ", "client_version": "0.11.2"}"#,
+        )
+        .unwrap();
+        let ctx = probe_client_context_from_path(&valid_path).unwrap();
+        assert_eq!(ctx.name, "MyClient");
+        assert_eq!(ctx.version, "0.11.2");
+
+        let default_name_path = temp.path().join("client_default_name.json");
+        std::fs::write(&default_name_path, r#"{"version": "0.11.2"}"#).unwrap();
+        let ctx = probe_client_context_from_path(&default_name_path).unwrap();
+        assert_eq!(ctx.name, DEFAULT_CLIENT_NAME);
+        assert_eq!(ctx.version, "0.11.2");
+
+        let corrupt_path = temp.path().join("client_corrupt.json");
+        std::fs::write(&corrupt_path, "{ broken json...").unwrap();
+        assert!(probe_client_context_from_path(&corrupt_path).is_none());
+
+        let no_ver_path = temp.path().join("client_no_ver.json");
+        std::fs::write(&no_ver_path, r#"{"name": "MyClient"}"#).unwrap();
+        assert!(probe_client_context_from_path(&no_ver_path).is_none());
+
+        let invalid_ver_path = temp.path().join("client_invalid_ver.json");
+        std::fs::write(&invalid_ver_path, r#"{"version": "1.0\r\nevil"}"#).unwrap();
+        assert!(probe_client_context_from_path(&invalid_ver_path).is_none());
+
+        assert!(probe_client_context_from_path(&temp.path().join("missing.json")).is_none());
+    }
+
+    #[test]
+    fn test_resolve_effective_client_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let context_path = temp.path().join("client.json");
+        std::fs::write(&context_path, r#"{"version": "0.11.2"}"#).unwrap();
+
+        let explicit = ClientContext::new("Custom_UI", "1.2.3");
+        let res = resolve_effective_client_context_internal(
+            Some(&explicit),
+            || true,
+            Some(&context_path),
+        );
+        assert_eq!(res, Some(explicit));
+
+        let invalid_explicit = ClientContext::new("bad name", "1.0");
+        let res = resolve_effective_client_context_internal(
+            Some(&invalid_explicit),
+            || true,
+            Some(&context_path),
+        );
+        assert_eq!(res, None);
+
+        let res = resolve_effective_client_context_internal(None, || true, Some(&context_path));
+        assert_eq!(res, None);
+
+        let res = resolve_effective_client_context_internal(None, || false, Some(&context_path));
+        assert_eq!(res, Some(ClientContext::new(DEFAULT_CLIENT_NAME, "0.11.2")));
+
+        let res = resolve_effective_client_context_internal(None, || false, None);
+        assert_eq!(res, None);
+    }
+
+    #[test]
+    fn test_build_http_client_with_context_wire_headers() {
+        use std::io::{Read, Write};
+        let ctx = ClientContext::new("Omawarden_Desktop", "0.11.2");
+        let client = build_http_client_with_context(Duration::from_secs(5), Some(&ctx));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_url = format!("http://127.0.0.1:{}", port);
+
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let os = std::env::consts::OS;
+                let os_label = if os == "macos" {
+                    "macOS".to_string()
+                } else {
+                    let mut c = os.chars();
+                    c.next()
+                        .map(|x| x.to_uppercase().collect::<String>() + c.as_str())
+                        .unwrap_or_default()
+                };
+                let expected_ua = format!(
+                    "user-agent: Omawarden_Desktop/0.11.2 (Omawarden/{}; Bitwarden/2026.7.0; {})",
+                    env!("CARGO_PKG_VERSION"),
+                    os_label
+                );
+                assert!(req.contains(&expected_ua));
+                assert!(req.contains("bitwarden-client-name: desktop"));
+                assert!(req.contains("bitwarden-client-version: 2026.7.0"));
+                assert!(req.contains("device-type: 8"));
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+
+        let res = client.get(&server_url).send();
+        assert!(res.is_ok());
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_tls_verification_fails_closed_on_untrusted_endpoint() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Point an HTTPS URL to a non-TLS server to ensure TLS handshake fails closed
+        let server_url = format!("https://127.0.0.1:{}", port);
+
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                // Return plain HTTP response rather than valid TLS handshake
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+
+        let client = build_http_client(Duration::from_secs(2));
+        let res = client.get(&server_url).send();
+        assert!(
+            res.is_err(),
+            "Expected HTTPS connection to fail closed on invalid TLS handshake"
+        );
+
+        let _ = handle.join();
+    }
+
+    const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
+MIIDDTCCAfWgAwIBAgIUKd1YAPlr7WPqEf/C5Gclfb6ZbiYwDQYJKoZIhvcNAQEL
+BQAwFjEUMBIGA1UEAwwLdGVzdC1jbGllbnQwHhcNMjYxMDI1MDExNjI4WhcNMjcx
+MDI1MDExNjI4WjAWMRQwEgYDVQQDDAt0ZXN0LWNsaWVudDCCASIwDQYJKoZIhvcN
+AQEBBQADggEPADCCAQoCggEBAMNvAYv523yTZch694uH9yzFXaHoAW3tjmiCxEAK
+8XUvDWKS3cZRrwxowGp6J2MSSvsDCF7aTQ0Feeb1C4HkszpG4slL3WVUbnDoe9RL
+IcnfCDvhe088VTQMSLAmyEy47+kxKO1zlQoxDYIejWjcbk94kNJ2PxdplawK5isy
+Juu8LEMpdmjztGvi62mpa8gWy49E32/jH6j3p1uB21aC1T8tO9GOa05dmFLqRtEU
+K5mxXd/FavNJGMjHgYMvZvoLvj95vPS/4VFFe4NtBZdGxCwV7GwA3bdCcz52Tu4N
+mocFavQmMfne61d96G6P46t5w0uY887n+7KRlYxVimacoZ0CAwEAAaNTMFEwHQYD
+VR0OBBYEFIjn5AVlKlksM5e+CWIVYRA0bWHYMB8GA1UdIwQYMBaAFIjn5AVlKlks
+M5e+CWIVYRA0bWHYMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEB
+ADMo0Dp0BHpIuJVHrV+9TAzaA6zLJo7nZeU088+ZQkYuMbnUkrq231WgYHcsuMPb
+w/7Dxl4/eCiqK7HiljYqqQ0zXAOT5KxnkpQFoZ1LHi58n3x6PKr/EQycF7zh1d+m
+BujDCiTF7Z7ANsn0NlQuGAjxHnOTC4sVnKhD/BvQZqTAiErFoZC8fghvDCu8a5gI
+ecQjCXd/SD159xsrCk7z4c8W2z3vWqE1Js03/UkBa4GgEi3AkBAwt/Xz2TvoL4Lz
+WXZ0kusm6H60UL99LcJAuevDm3NtCk0jvKDxGom3vYATKznB6aED2mRSg5lsyoKI
+eYvOsT7YxRgCmWt7SWLgz+A=
+-----END CERTIFICATE-----"#;
+
+    const TEST_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDDbwGL+dt8k2XI
+eveLh/csxV2h6AFt7Y5ogsRACvF1Lw1ikt3GUa8MaMBqeidjEkr7Awhe2k0NBXnm
+9QuB5LM6RuLJS91lVG5w6HvUSyHJ3wg74XtPPFU0DEiwJshMuO/pMSjtc5UKMQ2C
+Ho1o3G5PeJDSdj8XaZWsCuYrMibrvCxDKXZo87Rr4utpqWvIFsuPRN9v4x+o96db
+gdtWgtU/LTvRjmtOXZhS6kbRFCuZsV3fxWrzSRjIx4GDL2b6C74/ebz0v+FRRXuD
+bQWXRsQsFexsAN23QnM+dk7uDZqHBWr0JjH53utXfehuj+OrecNLmPPO5/uykZWM
+VYpmnKGdAgMBAAECggEANAcOS1xmASEgXKHX2u6EcAfO6HZiQwiV+96sLjx7kW3I
+S3C717sRNeWBLBd++tH44iApj07galIF5OVhfeALkr0iTOKEeyBiEm7h4F9sDFjy
+0TYy5KI0MJoAk9yPQFWPkO4Ebkpx5/etF/HYRY1BVKjNLSpLm4kBTn7MTb2ZPPIw
+oW/u1PfRWyLp9sDmLCzt9ufk/IdbyiD7/nE0Tn3x7uhJ1j03lOHApOspAOZ/RHmG
+dUmR/9VqLQihFp5KqaqC4gC4a3T+EIoJdXdMUEY9m3lwnWI5j6Ipy0mDISLwttTK
+kPQww2+XGNSPNLdUn8hAAppHNHCMW0NJMIILdN6opQKBgQD6SgBPys0TfMOP0gq/
+fLnwuco2CMSvvbpTALN32eSOvq/Oyj2Ev1bWvHfATAO3RjPe/gDZq7z+wQUPrHi9
+GkScHK1r6y1KuDfzsllRIhmheYhXix78szEQqg4mJsi2W8VGtjPix4tclzfukGLp
+FKyxk5sfqIibidkozuskIPIdnwKBgQDH5JS2+OiZ4ITVuHmFpQNn9hls3tS3Hq+7
+sMH+XWezQqtXbBMlAW1MU2jE4RJFecKuCzB39m3FvfFHdZ3cr/h8PD829fpkZMk+
+DFDDNdqpCHZ8JHBxV3ks+PxhQoz7Yo91QWIx+TL9inFv3TqPosaswYKUCHF4blWc
+Lkbn8FN/QwKBgGbZ0AT6DonKhEZuhtIne/VLM6g+tCyPp6iCKj2/AWgTPgWZH+yU
+AChf7EnOMty2cYxaDplkNFbvlJfbRQZYbAdG1ZD6ZHNG/l8bVA6+F5A+c+OdnM81
+B52UdBoDaAlf7tJe/zVa0I7s6SQUm0CyqUCTqnQ4+mIIJH/bf88p5rR7AoGBAJub
+3BFcT2aKm53sj910CeTCdiSEiz9Kii8oeLxVZkbsXYoevgCOzdEfFW4+cATZtq3a
+VA7vLaFELjIc45lK+7trAyL79cJ1mxvMZoqwv9nalrIpg8cX+2MBKSdlsW542YjE
+L3cLsaAiSBB3PgFXDCasNcSblgnUipycgeJI+hcVAoGBAL71D+Dfg1QJgMPO/PML
+p1haUeWINIpI/VakVbqN5T7VkkJtQFaPeGPtDHmvHHYgUEpcCLnwNWcYAnlEFQPw
+dkmT/1gHofouoz8GYm1PWfgRgzWmJj+fzaeoNpheNRneXZeKCW6JmcQHc/KC5Wmi
+ahSH5xq0hju1mYXz4VFLTIfJ
+-----END PRIVATE KEY-----"#;
+
+    const WEAK_1024_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIICdwIBADANBgkqhkiG9w0BAQEFAASCAmEwggJdAgEAAoGBAPyet2dCVv2py35G
+fnB8+uTSzzutOsHbr0DfwCwkK6J8f2qIvnCtx1T8f5sypoI/tSVtnEjVJempuYxV
+nf64hfQu2r4ssLTuu2IN0gQFw6zvWfJ0/0WluU0HlbfjWLFE3zmYbti3UR7mAazk
+ghrJkdXIEPl2Fzh9pOGeQI35MFuDAgMBAAECgYBb/4U1QrChgoOMQinr12gbizZT
+OlwKm3Gwg4vdx3Joo0RXzOLl8DOGnMnwADspdgAHWGqxD4bWGKxtEgUO7a5CLM+s
+HwXlu16YmBcYYdb7hCBFMMBc821tLiTrXHP7N0VbqQSf9AlK1TEgWAOnI15j3/p2
+Q4342o9yV1TmYmPUmQJBAP+RupuIrOBtO/DgUiyKPeBg/h1JD/Qs95P8X3guLzUS
+sWpkUlKpllQ97s4zSrAWfi166jDyFhyEjd5SKP+lhp0CQQD9C7cHXlyg3P/jehqy
+adOB33HDRGiwDZ6pbqkpJ2aqHroS26xz+roANjduGeC/CJo4QZ8Crv4ZFiYtSAOc
+XMCfAkEA83n+cdbP/C+U/3J2VwCM2osNDRFiJZoBc/bnbTNyvflFFLrmwuHV2gP2
+0nODICcNpn6HRoIcFqciET/s10D28QJBAN90Redi46dGIU2umP6uRxFr0Nkfgtbc
+4Bw81XK7EYTu52AZzrsIUNI5Dk/S2E25+f3trM5A27ApiAL6kf21Rn8CQHZq67a6
+MLC62jYKG2dIdS5jh3VtXQlyr7M6wIWLQCcezPkA8/AsmC3w8fsbz7Zj2qTzke+z
+7YmIRob1MJCNisA=
+-----END PRIVATE KEY-----"#;
+
+    #[test]
+    fn test_load_client_identity_missing_files_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let nonexistent_cert = dir.path().join("missing.pem");
+        let res = load_client_identity_from_pem(&nonexistent_cert, None);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("not found"));
+
+        let cert = dir.path().join("cert.pem");
+        std::fs::write(&cert, TEST_CERT_PEM).unwrap();
+        let nonexistent_key = dir.path().join("missing.key");
+        let res2 = load_client_identity_from_pem(&cert, Some(&nonexistent_key));
+        assert!(res2.is_err());
+        assert!(res2.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_load_client_identity_insecure_permissions_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let combined_file = dir.path().join("client.pem");
+        let combined_content = format!("{}\n{}", TEST_CERT_PEM, TEST_KEY_PEM);
+        std::fs::write(&combined_file, &combined_content).unwrap();
+
+        // Set permissions to 0644 (world readable)
+        std::fs::set_permissions(&combined_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let res = load_client_identity_from_pem(&combined_file, None);
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("Insecure permissions"));
+        assert!(err_msg.contains("0600 or 0400"));
+
+        // Tighten to 0600 -> must succeed
+        std::fs::set_permissions(&combined_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let res_ok = load_client_identity_from_pem(&combined_file, None);
+        assert!(res_ok.is_ok());
+    }
+
+    #[test]
+    fn test_load_client_identity_weak_rsa_key_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let combined_file = dir.path().join("weak_client.pem");
+        let combined_content = format!("{}\n{}", TEST_CERT_PEM, WEAK_1024_KEY_PEM);
+        std::fs::write(&combined_file, &combined_content).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&combined_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let res = load_client_identity_from_pem(&combined_file, None);
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("1024 bits") && err_msg.contains("2048 bits"),
+            "Expected error about weak RSA key length, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_load_client_identity_valid_split_files_succeeds() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cert_file = dir.path().join("client.crt");
+        let key_file = dir.path().join("client.key");
+
+        std::fs::write(&cert_file, TEST_CERT_PEM).unwrap();
+        std::fs::write(&key_file, TEST_KEY_PEM).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let res = load_client_identity_from_pem(&cert_file, Some(&key_file));
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_build_http_client_for_url_origin_gating() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_dir = dir.path().join("omawarden");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+
+        let cert_file = cfg_dir.join("client.crt");
+        let key_file = cfg_dir.join("client.key");
+        std::fs::write(&cert_file, TEST_CERT_PEM).unwrap();
+        std::fs::write(&key_file, TEST_KEY_PEM).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let test_cfg = crate::config::Config {
+            server_url: "https://vault.mycorp.internal:8443".to_string(),
+            client_cert_path: Some(cert_file.to_str().unwrap().to_string()),
+            client_key_path: Some(key_file.to_str().unwrap().to_string()),
+            client_cert_server: Some("https://vault.mycorp.internal:8443".to_string()),
+            ..Default::default()
+        };
+
+        // Target matching origin: client should successfully build with identity
+        let client_matching = build_http_client_for_url_with_config(
+            Duration::from_secs(5),
+            None,
+            Some("https://vault.mycorp.internal:8443/api/sync"),
+            Some(&test_cfg),
+        )
+        .unwrap();
+        // Verify client can attempt requests
+        assert!(client_matching.get("http://localhost").build().is_ok());
+
+        // Target foreign origin (e.g. public cloud): client builds without identity
+        let client_foreign = build_http_client_for_url_with_config(
+            Duration::from_secs(5),
+            None,
+            Some("https://vault.bitwarden.com/api/sync"),
+            Some(&test_cfg),
+        )
+        .unwrap();
+        assert!(client_foreign.get("http://localhost").build().is_ok());
+
+        // Target matching origin with insecure key permissions (0644) must fail closed
+        #[cfg(unix)]
+        {
+            std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let client_insecure = build_http_client_for_url_with_config(
+                Duration::from_secs(5),
+                None,
+                Some("https://vault.mycorp.internal:8443/api/sync"),
+                Some(&test_cfg),
+            );
+            assert!(client_insecure.is_err());
+            let err_msg = client_insecure.unwrap_err().to_string();
+            assert!(err_msg.contains("Insecure permissions"));
+
+            // BitwardenApiClient with insecure key must fail closed on calls
+            let api_client = BitwardenApiClient::with_options_and_config(
+                "https://vault.mycorp.internal:8443",
+                None,
+                None,
+                Some(&test_cfg),
+            );
+            let sync_res = api_client.sync_vault("dummy-token");
+            assert!(sync_res.is_err());
+        }
+    }
+
+    #[test]
+    fn test_validate_client_key_strength_rejections() {
+        // Non-UTF-8 bytes
+        let non_utf8 = [0xff, 0xfe, 0xfd];
+        let res_utf8 = validate_client_key_strength(&non_utf8);
+        assert!(res_utf8.is_err());
+        assert!(res_utf8
+            .unwrap_err()
+            .to_string()
+            .contains("not valid UTF-8"));
+
+        // Encrypted private keys
+        let encrypted_pem = b"-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIB...==\n-----END ENCRYPTED PRIVATE KEY-----";
+        let res_enc = validate_client_key_strength(encrypted_pem);
+        assert!(res_enc.is_err());
+        assert!(res_enc
+            .unwrap_err()
+            .to_string()
+            .contains("Encrypted private keys are not supported"));
+
+        // Unknown / empty PEM
+        let empty_pem = b"-----BEGIN CERTIFICATE-----\nMIIB...==\n-----END CERTIFICATE-----";
+        let res_empty = validate_client_key_strength(empty_pem);
+        assert!(res_empty.is_err());
+        assert!(res_empty
+            .unwrap_err()
+            .to_string()
+            .contains("No recognized private key found"));
+    }
+}

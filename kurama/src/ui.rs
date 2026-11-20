@@ -1,0 +1,217 @@
+//! Kurama's main window: top bar, category rail, item list, detail pane and status bar.
+//! Started from `rune/examples/hello` (state + view + AppSpec).
+
+use rune::tok::{self, type_};
+use rune::{Color, Cx, El, ScrollSpec, Tx, col, el, row, text, text_input};
+
+use crate::backend::Request;
+use crate::state::{Category, State, dispatch, submit_search};
+use crate::theme::{META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE, accent, selected_row};
+
+pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    let dark = s.dark(cx.system_dark());
+    let t = tok::theme(dark);
+    let connected = !s.snapshot.status.is_empty();
+    let unlocked = s.snapshot.status == "unlocked";
+
+    let content = if !connected {
+        placeholder(s, dark, "Vault not connected", "Start the Omawarden daemon to browse your vault.", "Retry", Request::Refresh)
+    } else if !unlocked {
+        placeholder(s, dark, "Vault locked", "Unlock with `omawarden auth unlock` or Quick Unlock, then refresh.", "Refresh", Request::Refresh)
+    } else {
+        vault(s, dark)
+    };
+
+    col().key("root").w_full().h_full().fill(t.bg)
+        .child(top_bar(s, dark))
+        .child(content)
+        .child(status_bar(s, dark))
+}
+
+fn top_bar(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let search = text_input(&s.query, type_::BODY).key("search").label("Search vault")
+        .placeholder("Search vault", t.text_secondary).color(t.text)
+        .h(34.0).w(320.0).padding(10.0).radius(8.0).fill(t.card)
+        .border(1.0, t.card_border)
+        .on_edit(|s: &mut State| &mut s.query).on_submit(submit_search);
+
+    let brand = col().gap(1.0)
+        .child(text("Kurama").key("brand").font(WINDOW_TITLE).color(t.text))
+        .child(text("VAULT").font(SECTION_TITLE).color(t.text_secondary));
+
+    row().key("top-bar").w_full().h(64.0).px(18.0).gap(16.0).center_y()
+        .fill(t.card).border(1.0, t.card_border)
+        .child(brand)
+        .child(search)
+        .child(el().grow(1.0))
+        .child(action("theme", if dark { "Light" } else { "Dark" }, dark, move |s| {
+            s.dark_override = Some(!dark);
+        }))
+        .child(action("sync", "Sync", dark, |s| dispatch(s, Request::Sync)))
+        .child(action("lock", "Lock", dark, |s| dispatch(s, Request::Lock)))
+}
+
+fn vault(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    row().key("vault").w_full().grow(1.0).shrink().min_h(0.0)
+        .child(sidebar(s, dark))
+        .child(item_list(s, dark))
+        .child(details(s, dark))
+        .fill(t.bg)
+}
+
+fn sidebar(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let mut nav = col().key("sidebar").w(190.0).h_full().padding(12.0).gap(3.0).fill(t.card)
+        .border(1.0, t.card_border)
+        .child(text("LIBRARY").key("library-label").font(SECTION_TITLE).color(t.text_secondary).padding(8.0));
+
+    for category in Category::ALL {
+        let active = s.category == category;
+        let label = category.label();
+        let count = match category {
+            Category::All => s.rows.len(),
+            Category::Favorites => s.rows.iter().filter(|item| item.favorite).count(),
+            _ => s.rows.iter().filter(|item| category.matches(item)).count(),
+        };
+        nav = nav.child(
+            el().key(format!("category-{label}")).h(34.0).px(10.0).radius(8.0)
+                .role("button").label(label).checked(active).focusable(true)
+                .fill(if active { selected_row(dark) } else { Color::TRANSPARENT })
+                .on_press(move |s: &mut State| s.category = category)
+                .child(row().w_full().center_y().gap(8.0)
+                    .child(text(label).font(type_::LABEL).color(if active { accent(dark) } else { t.text }).grow(1.0))
+                    .child(text(count.to_string()).font(META).color(t.text_secondary))),
+        );
+    }
+
+    nav.child(el().grow(1.0))
+        .child(text("Kurama · Rune").font(META).color(t.text_secondary).padding(8.0))
+}
+
+fn item_list(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let visible = s.visible();
+    let mut list = col().key("item-rows").padding(8.0).gap(2.0);
+    for item in &visible {
+        let id = item.id.clone();
+        let selected = s.selected.as_deref() == Some(id.as_str());
+        let star = if item.favorite { "★" } else { "" };
+        list = list.child(
+            el().key(format!("item-{}", item.id)).h(56.0).px(12.0).radius(8.0)
+                .role("listitem").label(format!("{}, {}", item.name, item.subtitle))
+                .checked(selected).focusable(true)
+                .fill(if selected { selected_row(dark) } else { Color::TRANSPARENT })
+                .on_press(move |s: &mut State| s.selected = Some(id.clone()))
+                .child(col().w_full().gap(2.0)
+                    .child(row().w_full().gap(6.0).center_y()
+                        .child(text(item.name.clone()).key("item-name").font(ROW_TITLE).color(t.text).grow(1.0).truncate())
+                        .child(text(star).font(ROW_TITLE).color(accent(dark))))
+                    .child(text(if item.subtitle.is_empty() { item.type_name.as_str() } else { item.subtitle.as_str() })
+                        .font(ROW_SUBTITLE).color(t.text_secondary).truncate())),
+        );
+    }
+
+    let empty = if visible.is_empty() {
+        el().key("list-empty").padding(24.0)
+            .child(text("No items match this view.").font(ROW_SUBTITLE).color(t.text_secondary))
+    } else {
+        el()
+    };
+
+    col().key("items").w(292.0).h_full().fill(t.card).border(1.0, t.card_border)
+        .child(row().key("items-header").w_full().h(42.0).px(14.0).center_y()
+            .child(text(s.category.label()).font(SECTION_TITLE).color(t.text).grow(1.0))
+            .child(text(visible.len().to_string()).font(META).color(t.text_secondary)))
+        .child(el().h(1.0).w_full().fill(t.separator))
+        .child(if visible.is_empty() { empty } else { list.scroll(ScrollSpec { stick_bottom: false }).shrink().min_h(0.0) })
+}
+
+fn details(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let Some(item) = s.selected_item() else {
+        return col().key("details").grow(1.0).h_full().center().gap(6.0).fill(t.bg)
+            .child(text("No item selected").font(WINDOW_TITLE).color(t.text))
+            .child(text("Choose an item from the list to see its details.").font(ROW_SUBTITLE).color(t.text_secondary));
+    };
+
+    let username = item.subtitle.clone();
+    let fields = col().key("detail-fields").padding(20.0).gap(14.0)
+        .child(field("Type", &item.type_name, dark))
+        .child(field("Username", if username.is_empty() { "—" } else { &username }, dark))
+        .child(field("Folder", if item.folder.is_empty() { "—" } else { &item.folder }, dark))
+        .child(field("Updated", if item.updated.is_empty() { "—" } else { &item.updated }, dark));
+
+    col().key("details").grow(1.0).h_full().fill(t.bg)
+        .child(row().key("detail-header").w_full().h(64.0).px(20.0).gap(12.0).center_y()
+            .child(col().gap(2.0)
+                .child(text(item.name.clone()).key("detail-name").font(WINDOW_TITLE).color(t.text))
+                .child(text("Item details").font(META).color(t.text_secondary)))
+            .child(el().grow(1.0))
+            .child(if username.is_empty() {
+                el()
+            } else {
+                action_tx("copy-user", "Copy username", dark, move |_s, tx| tx.copy(username.clone()))
+            }))
+        .child(el().h(1.0).w_full().fill(t.separator))
+        .child(fields)
+}
+
+fn field(label: &str, value: &str, dark: bool) -> El {
+    let t = tok::theme(dark);
+    col().key(format!("field-{label}")).gap(3.0)
+        .child(text(label.to_uppercase()).font(SECTION_TITLE).color(t.text_secondary))
+        .child(text(value.to_owned()).font(ROW_SUBTITLE).color(t.text).selectable(true))
+}
+
+fn status_bar(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let label = if s.busy {
+        "Working…".to_owned()
+    } else if let Some(notice) = &s.notice {
+        notice.clone()
+    } else if s.snapshot.status.is_empty() {
+        "Backend unavailable".to_owned()
+    } else {
+        format!("{} · {} items", s.snapshot.email, s.snapshot.items_count)
+    };
+    let dot = if s.notice.is_some() || s.snapshot.status.is_empty() {
+        t.text_secondary
+    } else {
+        accent(dark)
+    };
+
+    let sync = if s.snapshot.last_sync.is_empty() {
+        String::new()
+    } else {
+        format!(" · synced {}", s.snapshot.last_sync.chars().take(16).collect::<String>())
+    };
+    let server = format!("{}{}", s.snapshot.server, sync);
+
+    row().key("status-bar").w_full().h(30.0).px(14.0).gap(8.0).center_y().fill(t.card)
+        .child(el().key("status-dot").size(6.0, 6.0).radius(3.0).fill(dot))
+        .child(text(label).key("status-label").font(META).color(t.text_secondary).grow(1.0).truncate())
+        .child(text(server).font(META).color(t.text_secondary).truncate())
+}
+
+fn placeholder(s: &State, dark: bool, title: &str, body: &str, button_label: &str, request: Request) -> El {
+    let t = tok::theme(dark);
+    let notice = s.notice.as_deref().unwrap_or(body);
+    col().key("placeholder").w_full().grow(1.0).center().gap(10.0).fill(t.bg)
+        .child(text(title).key("placeholder-title").font(WINDOW_TITLE).color(t.text))
+        .child(text(notice.to_owned()).key("placeholder-body").font(ROW_SUBTITLE).color(t.text_secondary))
+        .child(action("placeholder-action", button_label, dark, move |s| dispatch(s, request.clone())))
+}
+
+fn action(key: &str, label: &str, dark: bool, on_press: impl Fn(&mut State) + 'static) -> El {
+    action_tx(key, label, dark, move |s, _tx| on_press(s))
+}
+
+fn action_tx(key: &str, label: &str, dark: bool, on_press: impl Fn(&mut State, &mut Tx) + 'static) -> El {
+    let t = tok::theme(dark);
+    el().key(key).role("button").label(label).focusable(true).h(32.0).px(12.0).center()
+        .radius(8.0).fill(t.control_track)
+        .on_press_tx(on_press)
+        .child(text(label.to_owned()).font(type_::LABEL).color(t.text))
+}

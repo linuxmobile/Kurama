@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["kurama"]
+# Both are independent packages with their own manifests/workspaces. Cargo must
+# resolve them on their own terms instead of inheriting this workspace's keys.
+exclude = ["rune", "omawarden"]
+
+# Rune patches these crates; a dependency's [patch] table is not inherited by
+# the workspace that depends on it, so the app repeats them here. Keep them in
+# sync with rune/Cargo.toml at the pinned revision.
+[patch.crates-io]
+wgpu-hal = { path = "rune/vendor/wgpu-hal" }
+winit = { path = "rune/vendor/winit" }
+sctk-adwaita = { path = "rune/vendor/sctk-adwaita" }
+parley_engine = { path = "rune/vendor/parley_engine" }
+accesskit_windows = { path = "rune/vendor/accesskit_windows" }
+accesskit_macos = { path = "rune/vendor/accesskit_macos" }
