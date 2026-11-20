@@ -7,8 +7,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use rune::{edit::TextEdit, Tx, Waker};
 
 use crate::backend::{
-    self, clear_revealed, clear_totp, Approval, CardInput, CustomFieldInput, Event, FieldValue,
-    IdentityInput, ItemDetails, ItemField, Request, Secret, Snapshot, TotpMeta, VaultRow,
+    self, clear_revealed, clear_totp, Approval, AuthOutcome, CardInput, CustomFieldInput, Event,
+    FieldValue, IdentityInput, ItemDetails, ItemField, Request, Secret, Snapshot, TotpMeta,
+    VaultRow,
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -94,6 +95,28 @@ pub struct SshDraft {
     pub fingerprint: TextEdit,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthMode {
+    Password,
+    ApiKey,
+    TwoFactor {
+        provider: Option<i32>,
+        providers: Vec<i32>,
+    },
+    NewDevice,
+}
+
+pub struct AuthDraft {
+    pub mode: AuthMode,
+    pub server: TextEdit,
+    pub email: TextEdit,
+    pub password: TextEdit,
+    pub client_id: TextEdit,
+    pub client_secret: TextEdit,
+    pub code: TextEdit,
+    pub new_device_code: TextEdit,
+}
+
 pub struct IdentityDraft {
     pub first_name: TextEdit,
     pub last_name: TextEdit,
@@ -149,6 +172,7 @@ pub struct State {
     pub details: Option<ItemDetails>,
     pub edit: Option<EditDraft>,
     pub create: Option<CreateDraft>,
+    pub auth: Option<AuthDraft>,
     pub revealed: Option<String>,
     pub totp: Option<TotpMeta>,
     pub busy: bool,
@@ -183,6 +207,7 @@ impl Default for State {
             details: None,
             edit: None,
             create: None,
+            auth: None,
             revealed: None,
             totp: None,
             busy: true,
@@ -430,6 +455,133 @@ fn optional_secret(field: &TextEdit) -> Option<String> {
 
 fn uri_values(fields: &[TextEdit]) -> Vec<String> {
     fields.iter().filter_map(optional_text).collect()
+}
+
+fn empty_auth_draft(server: &str) -> AuthDraft {
+    AuthDraft {
+        mode: AuthMode::Password,
+        server: TextEdit::new(server),
+        email: TextEdit::new(""),
+        password: TextEdit::new("").secure(),
+        client_id: TextEdit::new(""),
+        client_secret: TextEdit::new("").secure(),
+        code: TextEdit::new(""),
+        new_device_code: TextEdit::new(""),
+    }
+}
+
+pub fn set_auth_mode(state: &mut State, mode: AuthMode) {
+    if let Some(auth) = state.auth.as_mut() {
+        auth.mode = mode;
+    }
+    state.form_error = None;
+    state.notice = None;
+}
+
+pub fn submit_auth(state: &mut State) {
+    let Some(auth) = state.auth.as_ref() else {
+        return;
+    };
+    let server_url = auth.server.text.trim().to_owned();
+    let request = if server_url.is_empty() {
+        Err("Server URL is required.".to_owned())
+    } else {
+        match &auth.mode {
+            AuthMode::Password => {
+                let email = auth.email.text.trim().to_owned();
+                if email.is_empty() || auth.password.text.is_empty() {
+                    Err("Email and password are required.".to_owned())
+                } else {
+                    Ok(Request::LoginPassword {
+                        server_url,
+                        email,
+                        password: Secret::new(auth.password.text.clone()),
+                        code: None,
+                        two_factor_provider: None,
+                        new_device_otp: None,
+                    })
+                }
+            }
+            AuthMode::ApiKey => {
+                let client_id = auth.client_id.text.trim().to_owned();
+                if client_id.is_empty() || auth.client_secret.text.is_empty() {
+                    Err("Client ID and secret are required.".to_owned())
+                } else {
+                    Ok(Request::LoginApiKey {
+                        server_url,
+                        client_id: Secret::new(client_id),
+                        client_secret: Secret::new(auth.client_secret.text.clone()),
+                    })
+                }
+            }
+            AuthMode::TwoFactor { provider, .. } => {
+                let code = auth.code.text.trim().to_owned();
+                if code.is_empty() {
+                    Err("Verification code is required.".to_owned())
+                } else {
+                    Ok(Request::LoginPassword {
+                        server_url,
+                        email: auth.email.text.trim().to_owned(),
+                        password: Secret::new(auth.password.text.clone()),
+                        code: Some(Secret::new(code)),
+                        two_factor_provider: *provider,
+                        new_device_otp: None,
+                    })
+                }
+            }
+            AuthMode::NewDevice => {
+                let code = auth.new_device_code.text.trim().to_owned();
+                if code.is_empty() {
+                    Err("Verification code is required.".to_owned())
+                } else {
+                    Ok(Request::LoginPassword {
+                        server_url,
+                        email: auth.email.text.trim().to_owned(),
+                        password: Secret::new(auth.password.text.clone()),
+                        code: None,
+                        two_factor_provider: None,
+                        new_device_otp: Some(Secret::new(code)),
+                    })
+                }
+            }
+        }
+    };
+    match request {
+        Ok(request) => {
+            state.form_error = None;
+            state.notice = None;
+            dispatch(state, request);
+        }
+        Err(error) => state.form_error = Some(error),
+    }
+}
+
+pub fn send_two_factor_email(state: &mut State) {
+    let Some(auth) = state.auth.as_ref() else {
+        return;
+    };
+    let server_url = auth.server.text.trim().to_owned();
+    let email = auth.email.text.trim().to_owned();
+    let password = auth.password.text.clone();
+    if server_url.is_empty() || email.is_empty() || password.is_empty() {
+        state.form_error = Some("Server, email and password are required.".to_owned());
+        return;
+    }
+    state.form_error = None;
+    dispatch(
+        state,
+        Request::SendTwoFactorEmail {
+            server_url,
+            email,
+            password: Secret::new(password),
+        },
+    );
+}
+
+pub fn logout(state: &mut State) {
+    state.auth = None;
+    state.form_error = None;
+    dispatch(state, Request::Logout);
 }
 
 fn prefilled_uri_draft(state: &State, item_id: &str) -> Vec<TextEdit> {
@@ -1133,6 +1285,38 @@ fn visible_fingerprint(state: &State) -> u64 {
     hasher.finish()
 }
 
+fn apply_auth_outcome(state: &mut State, outcome: AuthOutcome) {
+    if !outcome.ok {
+        state.form_error = None;
+        state.notice = outcome.error;
+        return;
+    }
+    state.form_error = None;
+    state.notice = None;
+    if outcome.new_device_verification_required {
+        if let Some(auth) = state.auth.as_mut() {
+            auth.mode = AuthMode::NewDevice;
+        }
+        return;
+    }
+    if outcome.two_factor_required {
+        if let Some(auth) = state.auth.as_mut() {
+            auth.mode = AuthMode::TwoFactor {
+                provider: outcome
+                    .two_factor_provider
+                    .or_else(|| outcome.two_factor_providers.first().copied()),
+                providers: outcome.two_factor_providers,
+            };
+        }
+        return;
+    }
+    if outcome.fido2_status.is_some() {
+        state.notice = outcome.fido2_status;
+        return;
+    }
+    dispatch(state, Request::Refresh);
+}
+
 fn apply(state: &mut State, event: Event) {
     state.busy = false;
     match event {
@@ -1163,7 +1347,16 @@ fn apply(state: &mut State, event: Event) {
                 state.selected = state.rows.first().map(|item| item.id.clone());
             }
             request_details(state);
+            if state.snapshot.status == "unauthenticated" {
+                if state.auth.is_none() {
+                    let server = state.snapshot.server.clone();
+                    state.auth = Some(empty_auth_draft(&server));
+                }
+            } else {
+                state.auth = None;
+            }
         }
+        Event::Auth(outcome) => apply_auth_outcome(state, outcome),
         Event::Items(items) => {
             if state.location == Location::Trash {
                 return;
@@ -1480,9 +1673,33 @@ pub fn scene_stress(state: &mut State) {
     state.busy = false;
 }
 
+pub fn scene_account(state: &mut State) {
+    state.snapshot = Snapshot {
+        status: "unauthenticated".to_owned(),
+        server: "https://vault.example.com".to_owned(),
+        ..Snapshot::default()
+    };
+    state.auth = Some(empty_auth_draft(&state.snapshot.server));
+    state.form_error = None;
+    state.notice = None;
+    state.busy = false;
+}
+
 pub fn scene_disconnected(state: &mut State) {
     state.busy = false;
     state.notice = Some("Kurama backend is not running.".to_owned());
+}
+
+pub fn scene_account_two_factor(state: &mut State) {
+    scene_account(state);
+    if let Some(auth) = state.auth.as_mut() {
+        auth.mode = AuthMode::TwoFactor {
+            provider: Some(0),
+            providers: vec![0],
+        };
+        auth.email.replace_text("user@example.com");
+        auth.password.replace_text("master-secret");
+    }
 }
 
 pub fn scene_create_card(state: &mut State) {
@@ -1580,6 +1797,53 @@ fn fixtures() -> Vec<VaultRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_challenges_switch_the_active_form() {
+        let mut state = State::default();
+        state.auth = Some(empty_auth_draft("https://vault.example.com"));
+        apply_auth_outcome(
+            &mut state,
+            AuthOutcome {
+                ok: true,
+                two_factor_required: true,
+                two_factor_providers: vec![0],
+                ..AuthOutcome::default()
+            },
+        );
+        assert!(matches!(
+            state.auth.as_ref().map(|auth| auth.mode.clone()),
+            Some(AuthMode::TwoFactor {
+                provider: Some(0),
+                ..
+            })
+        ));
+
+        apply_auth_outcome(
+            &mut state,
+            AuthOutcome {
+                ok: true,
+                new_device_verification_required: true,
+                ..AuthOutcome::default()
+            },
+        );
+        assert_eq!(
+            state.auth.as_ref().map(|auth| auth.mode.clone()),
+            Some(AuthMode::NewDevice)
+        );
+    }
+
+    #[test]
+    fn auth_validation_keeps_the_draft_open() {
+        let mut state = State::default();
+        scene_account(&mut state);
+        submit_auth(&mut state);
+        assert_eq!(
+            state.form_error.as_deref(),
+            Some("Email and password are required.")
+        );
+        assert!(state.auth.is_some());
+    }
 
     #[test]
     fn favorite_toggle_updates_row_and_refreshes() {

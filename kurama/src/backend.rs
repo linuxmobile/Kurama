@@ -80,6 +80,19 @@ pub struct Snapshot {
     pub quick_unlock_ready: bool,
 }
 
+/// Non-secret result of an account authentication request.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuthOutcome {
+    pub ok: bool,
+    pub status: Option<String>,
+    pub two_factor_required: bool,
+    pub two_factor_providers: Vec<i32>,
+    pub two_factor_provider: Option<i32>,
+    pub new_device_verification_required: bool,
+    pub fido2_status: Option<String>,
+    pub error: Option<String>,
+}
+
 /// Non-secret status or error notice from the backend event log.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Notice {
@@ -256,6 +269,25 @@ pub enum Request {
     Search(String),
     Sync,
     Lock,
+    Logout,
+    LoginPassword {
+        server_url: String,
+        email: String,
+        password: Secret,
+        code: Option<Secret>,
+        two_factor_provider: Option<i32>,
+        new_device_otp: Option<Secret>,
+    },
+    LoginApiKey {
+        server_url: String,
+        client_id: Secret,
+        client_secret: Secret,
+    },
+    SendTwoFactorEmail {
+        server_url: String,
+        email: String,
+        password: Secret,
+    },
     Unlock {
         password: Secret,
     },
@@ -381,6 +413,7 @@ pub enum Event {
         notices: Vec<Notice>,
     },
     Approvals(Vec<Approval>),
+    Auth(AuthOutcome),
     Error(String),
 }
 
@@ -621,6 +654,73 @@ pub fn perform(request: Request) -> Event {
             },
             Err(error) => Event::Error(error),
         },
+        Request::Logout => match call(json!({ "action": "logout" })) {
+            Ok(response) => Event::Auth(auth_outcome(&response)),
+            Err(error) => Event::Auth(AuthOutcome {
+                error: Some(error),
+                ..AuthOutcome::default()
+            }),
+        },
+        Request::LoginPassword {
+            server_url,
+            email,
+            password,
+            code,
+            two_factor_provider,
+            new_device_otp,
+        } => {
+            let body = json!({
+                "action": "login_password",
+                "server_url": server_url,
+                "email": email,
+                "password": password.as_str(),
+                "code": code.as_ref().map(Secret::as_str),
+                "two_factor_provider": two_factor_provider,
+                "new_device_otp": new_device_otp.as_ref().map(Secret::as_str)
+            });
+            match call(body) {
+                Ok(response) => Event::Auth(auth_outcome(&response)),
+                Err(error) => Event::Auth(AuthOutcome {
+                    error: Some(error),
+                    ..AuthOutcome::default()
+                }),
+            }
+        }
+        Request::LoginApiKey {
+            server_url,
+            client_id,
+            client_secret,
+        } => {
+            let body = json!({
+                "action": "login_apikey",
+                "server_url": server_url,
+                "client_id": client_id.as_str(),
+                "client_secret": client_secret.as_str()
+            });
+            match call(body) {
+                Ok(response) => Event::Auth(auth_outcome(&response)),
+                Err(error) => Event::Auth(AuthOutcome {
+                    error: Some(error),
+                    ..AuthOutcome::default()
+                }),
+            }
+        }
+        Request::SendTwoFactorEmail {
+            server_url,
+            email,
+            password,
+        } => {
+            let body = json!({
+                "action": "send_two_factor_email",
+                "server_url": server_url,
+                "email": email,
+                "password": password.as_str()
+            });
+            match call(body) {
+                Ok(_) => Event::Notice("Two-factor code sent to your email.".to_owned()),
+                Err(error) => Event::Error(error),
+            }
+        }
         Request::Unlock { password } => {
             match call(json!({ "action": "unlock", "password": password.as_str() })) {
                 Ok(_) => match snapshot() {
@@ -651,6 +751,47 @@ pub fn perform(request: Request) -> Event {
             Ok(response) => Event::Approvals(approvals(&response)),
             Err(_) => Event::Approvals(Vec::new()),
         },
+    }
+}
+
+fn auth_outcome(response: &Value) -> AuthOutcome {
+    AuthOutcome {
+        ok: response.get("ok").and_then(Value::as_bool).unwrap_or(false),
+        status: response
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        two_factor_required: response
+            .get("two_factor_required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        two_factor_providers: response
+            .get("two_factor_providers")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_i64)
+                    .filter_map(|v| i32::try_from(v).ok())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        two_factor_provider: response
+            .get("two_factor_provider")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok()),
+        new_device_verification_required: response
+            .get("new_device_verification_required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        fido2_status: response
+            .get("fido2_status")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        error: response
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     }
 }
 
@@ -1171,6 +1312,44 @@ mod tests {
         let debug = format!("{:?}", secret);
         assert!(!debug.contains("hunter2"));
         assert!(debug.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_requests_redact_credentials() {
+        let request = Request::LoginPassword {
+            server_url: "https://vault.example.com".to_owned(),
+            email: "user@example.com".to_owned(),
+            password: Secret::new("master-secret".to_owned()),
+            code: Some(Secret::new("123456".to_owned())),
+            two_factor_provider: Some(0),
+            new_device_otp: Some(Secret::new("device-secret".to_owned())),
+        };
+        let debug = format!("{:?}", request);
+        assert!(!debug.contains("master-secret"));
+        assert!(!debug.contains("123456"));
+        assert!(!debug.contains("device-secret"));
+        assert!(debug.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_outcome_keeps_challenge_flags_only() {
+        let outcome = auth_outcome(&json!({
+            "ok": true,
+            "status": "locked",
+            "two_factor_required": true,
+            "two_factor_providers": [0, 1],
+            "two_factor_provider": 0,
+            "new_device_verification_required": true,
+            "fido2_status": "pending",
+            "session": "secret-session",
+            "session_token": "secret-token"
+        }));
+        assert!(outcome.ok);
+        assert_eq!(outcome.two_factor_providers, vec![0, 1]);
+        assert_eq!(outcome.two_factor_provider, Some(0));
+        assert!(outcome.new_device_verification_required);
+        assert_eq!(outcome.fido2_status.as_deref(), Some("pending"));
+        assert!(!format!("{:?}", outcome).contains("secret-"));
     }
 
     #[test]

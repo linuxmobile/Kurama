@@ -49,6 +49,8 @@ fn main() -> ExitCode {
             ("stress", state::scene_stress),
             ("locked", state::scene_locked),
             ("disconnected", state::scene_disconnected),
+            ("account", state::scene_account),
+            ("account-two-factor", state::scene_account_two_factor),
             ("trash", state::scene_trash),
             ("create-card", state::scene_create_card),
             ("create-identity", state::scene_create_identity),
@@ -181,6 +183,144 @@ mod tests {
                 scale: 1.0,
             },
         )
+    }
+
+    #[test]
+    fn account_scene_shows_connection_form() {
+        let mut rt = runtime(state::scene_account);
+        rt.frame(1.0 / 60.0);
+        for key in [
+            "account-form",
+            "account-server",
+            "account-modes",
+            "account-mode-password",
+            "account-mode-api",
+            "account-email",
+            "account-password",
+            "account-submit",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+        let (x, y) = rt.find("account-submit").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("account-form-error").is_some());
+        assert_eq!(
+            rt.state.form_error.as_deref(),
+            Some("Email and password are required.")
+        );
+    }
+
+    #[test]
+    fn account_form_submits_password_login() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_account(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(1.0 / 60.0);
+        {
+            let auth = rt.state.auth.as_mut().unwrap();
+            auth.email.replace_text("user@example.com");
+            auth.password.replace_text("master-secret");
+        }
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("account-submit").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::LoginPassword {
+                server_url,
+                email,
+                password,
+                code,
+                ..
+            } if server_url == "https://vault.example.com"
+                && email == "user@example.com"
+                && password.as_str() == "master-secret"
+                && code.is_none()
+        )));
+    }
+
+    #[test]
+    fn account_form_submits_api_key_login() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_account(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("account-mode-api").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("account-client-id").is_some());
+        assert!(rt.find("account-client-secret").is_some());
+        {
+            let auth = rt.state.auth.as_mut().unwrap();
+            auth.client_id.replace_text("user.123");
+            auth.client_secret.replace_text("api-secret");
+        }
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("account-submit").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::LoginApiKey {
+                client_id,
+                client_secret,
+                ..
+            } if client_id.as_str() == "user.123"
+                && client_secret.as_str() == "api-secret"
+        )));
+    }
+
+    #[test]
+    fn two_factor_form_submits_verification_code() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_account_two_factor(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("account-code").is_some());
+        assert!(rt.find("account-send-email").is_some());
+        rt.state.auth.as_mut().unwrap().code.replace_text("123456");
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("account-submit").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::LoginPassword {
+                code: Some(code),
+                two_factor_provider: Some(0),
+                ..
+            } if code.as_str() == "123456"
+        )));
+    }
+
+    #[test]
+    fn logout_is_dispatched_from_the_top_bar() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("logout").expect("logout button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rx
+            .try_iter()
+            .any(|request| matches!(request, crate::backend::Request::Logout)));
     }
 
     #[test]

@@ -10,12 +10,12 @@ use crate::icons;
 use crate::state::{
     add_create_field, add_create_uri, add_edit_uri, cancel_create, cancel_edit, copy_field,
     cycle_create_field_type, cycle_create_folder, cycle_edit_folder, delete_item, dispatch,
-    folder_label, move_selection, open_attachment, open_trash, remove_create_field,
+    folder_label, logout, move_selection, open_attachment, open_trash, remove_create_field,
     remove_create_uri, remove_edit_uri, restore_item, select_category, select_folder, select_item,
-    set_create_type, set_favorite, start_edit, submit_create, submit_edit, submit_quick_unlock,
-    submit_search, submit_unlock, toggle_create_favorite, toggle_create_field_value,
-    toggle_edit_favorite, toggle_reveal, CardDraft, Category, CustomFieldDraft, IdentityDraft,
-    Location, SshDraft, State,
+    send_two_factor_email, set_auth_mode, set_create_type, set_favorite, start_edit, submit_auth,
+    submit_create, submit_edit, submit_quick_unlock, submit_search, submit_unlock,
+    toggle_create_favorite, toggle_create_field_value, toggle_edit_favorite, toggle_reveal,
+    AuthMode, CardDraft, Category, CustomFieldDraft, IdentityDraft, Location, SshDraft, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -42,6 +42,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             "Retry",
             Request::Refresh,
         )
+    } else if s.snapshot.status == "unauthenticated" {
+        account(s, dark)
     } else if !unlocked {
         unlock(s, dark)
     } else {
@@ -1065,6 +1067,11 @@ fn top_bar(s: &State, dark: bool) -> El {
         .child(action("sync", "Sync", dark, |s| dispatch(s, Request::Sync)))
         .child(action("?", "?", dark, |s| s.help = !s.help))
         .child(action("lock", "Lock", dark, |s| dispatch(s, Request::Lock)))
+        .child(if s.snapshot.status == "unlocked" {
+            action("logout", "Log out", dark, logout)
+        } else {
+            el()
+        })
 }
 
 fn vault(s: &State, dark: bool) -> El {
@@ -1699,6 +1706,163 @@ fn status_bar(s: &State, dark: bool) -> El {
                 .truncate(),
         )
         .child(text(server).font(META).color(t.text_secondary).truncate())
+}
+
+fn account(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let Some(auth) = s.auth.as_ref() else {
+        return el();
+    };
+    let title = match &auth.mode {
+        AuthMode::Password | AuthMode::ApiKey => "Connect account",
+        AuthMode::TwoFactor { .. } => "Two-factor verification",
+        AuthMode::NewDevice => "Verify new device",
+    };
+    let header = text("Connect Kurama to your vault server.")
+        .font(ROW_SUBTITLE)
+        .color(t.text_secondary);
+
+    let modes = row()
+        .key("account-modes")
+        .gap(12.0)
+        .child(action(
+            "account-mode-password",
+            if auth.mode == AuthMode::Password {
+                "• Master password"
+            } else {
+                "Master password"
+            },
+            dark,
+            |state| set_auth_mode(state, AuthMode::Password),
+        ))
+        .child(action(
+            "account-mode-api",
+            if auth.mode == AuthMode::ApiKey {
+                "• API key"
+            } else {
+                "API key"
+            },
+            dark,
+            |state| set_auth_mode(state, AuthMode::ApiKey),
+        ));
+
+    let mut body = col()
+        .child(form_field(
+            "account-server",
+            "Server URL",
+            "https://vault.example.com",
+            &auth.server,
+            dark,
+            |state| &mut state.auth.as_mut().unwrap().server,
+            submit_auth,
+        ))
+        .child(modes);
+    match &auth.mode {
+        AuthMode::Password => {
+            body = body
+                .child(form_field(
+                    "account-email",
+                    "Email",
+                    "user@example.com",
+                    &auth.email,
+                    dark,
+                    |state| &mut state.auth.as_mut().unwrap().email,
+                    submit_auth,
+                ))
+                .child(form_field(
+                    "account-password",
+                    "Master password",
+                    "Master password",
+                    &auth.password,
+                    dark,
+                    |state| &mut state.auth.as_mut().unwrap().password,
+                    submit_auth,
+                ));
+        }
+        AuthMode::ApiKey => {
+            body = body
+                .child(form_field(
+                    "account-client-id",
+                    "Client ID",
+                    "user.id",
+                    &auth.client_id,
+                    dark,
+                    |state| &mut state.auth.as_mut().unwrap().client_id,
+                    submit_auth,
+                ))
+                .child(form_field(
+                    "account-client-secret",
+                    "Client secret",
+                    "Client secret",
+                    &auth.client_secret,
+                    dark,
+                    |state| &mut state.auth.as_mut().unwrap().client_secret,
+                    submit_auth,
+                ));
+        }
+        AuthMode::TwoFactor { provider, .. } => {
+            let method = match provider {
+                Some(0) => "Authenticator app",
+                Some(1) => "Email",
+                Some(2) => "Duo",
+                Some(3) => "YubiKey",
+                Some(4) => "FIDO2 WebAuthn",
+                _ => "Two-factor provider",
+            };
+            body = body
+                .child(
+                    text(format!("Method: {method}"))
+                        .key("account-provider")
+                        .font(ROW_SUBTITLE)
+                        .color(t.text_secondary),
+                )
+                .child(form_field(
+                    "account-code",
+                    "Verification code",
+                    "123456",
+                    &auth.code,
+                    dark,
+                    |state| &mut state.auth.as_mut().unwrap().code,
+                    submit_auth,
+                ))
+                .child(action(
+                    "account-send-email",
+                    "Send code by email",
+                    dark,
+                    send_two_factor_email,
+                ));
+        }
+        AuthMode::NewDevice => {
+            body = body.child(form_field(
+                "account-new-device",
+                "Verification code",
+                "Code from your email",
+                &auth.new_device_code,
+                dark,
+                |state| &mut state.auth.as_mut().unwrap().new_device_code,
+                submit_auth,
+            ));
+        }
+    }
+
+    let mut footer = row()
+        .gap(12.0)
+        .child(action("account-submit", "Connect", dark, submit_auth));
+    if matches!(&auth.mode, AuthMode::TwoFactor { .. } | AuthMode::NewDevice) {
+        footer = footer.child(action("account-back", "Back", dark, |state| {
+            set_auth_mode(state, AuthMode::Password)
+        }));
+    }
+
+    form_panel(
+        "account-form",
+        title,
+        dark,
+        header,
+        body,
+        footer,
+        s.form_error.as_deref().or(s.notice.as_deref()),
+    )
 }
 
 fn unlock(s: &State, dark: bool) -> El {
