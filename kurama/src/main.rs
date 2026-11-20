@@ -171,9 +171,6 @@ mod tests {
             "detail-field-totp",
             "detail-field-created",
             "detail-field-updated",
-            "copy-password",
-            "copy-uri-0",
-            "copy-user",
             "favorite-toggle",
         ] {
             assert!(rt.find(key).is_some(), "missing key: {key}");
@@ -186,6 +183,27 @@ mod tests {
             .text
             .expect("masked field value");
         assert_eq!(masked, "••••••••");
+    }
+
+    #[test]
+    fn detail_fields_copy_on_click_without_copy_buttons() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(1.0 / 60.0);
+        for key in ["copy-user", "copy-password", "copy-uri-0"] {
+            assert!(rt.find(key).is_none(), "unexpected button: {key}");
+        }
+        let (x, y) = rt.find("field-value-Username").expect("username field");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            backend::Request::CopyField { key, .. } if key == "username"
+        )));
     }
 
     #[test]

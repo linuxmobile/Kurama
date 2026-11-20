@@ -265,8 +265,8 @@ fn top_bar(s: &State, dark: bool) -> El {
     let t = tok::theme(dark);
     let search = text_input(&s.query, type_::BODY)
         .key("search")
-        .label("Search vault")
-        .placeholder("Search vault", t.text_secondary)
+        .label("Search items")
+        .placeholder("Search items", t.text_secondary)
         .color(t.text)
         .h(34.0)
         .w(320.0)
@@ -288,10 +288,7 @@ fn top_bar(s: &State, dark: bool) -> El {
             },
         );
 
-    let brand = col()
-        .gap(1.0)
-        .child(text("Kurama").key("brand").font(WINDOW_TITLE).color(t.text))
-        .child(text("VAULT").font(SECTION_TITLE).color(t.text_secondary));
+    let brand = text("Kurama").key("brand").font(WINDOW_TITLE).color(t.text);
 
     row()
         .key("top-bar")
@@ -505,12 +502,7 @@ fn sidebar(s: &State, dark: bool) -> El {
             ),
     );
 
-    nav.child(el().grow(1.0)).child(
-        text("Kurama · Rune")
-            .font(META)
-            .color(t.text_secondary)
-            .padding(8.0),
-    )
+    nav.child(el().grow(1.0))
 }
 
 fn item_list(s: &State, dark: bool) -> El {
@@ -683,7 +675,6 @@ fn details(s: &State, dark: bool) -> El {
             );
     };
 
-    let username = item.subtitle.clone();
     let favorite = item.favorite;
     let type_label = icons::label(&item.type_name);
     let mut fields = col()
@@ -714,11 +705,20 @@ fn details(s: &State, dark: bool) -> El {
             } else {
                 shown
             };
-            let value = field(&detail.label, &shown, dark)
-                .grow(1.0)
-                .key(format!("detail-field-{}", detail.key));
             let key = detail.key.clone();
             let label = detail.label.clone();
+            let copy_key = key.clone();
+            let copy_label = label.clone();
+            let value = field(&label, &shown, dark)
+                .grow(1.0)
+                .key(format!("detail-field-{key}"))
+                .role("button")
+                .label(format!("Copy {label}"))
+                .help(format!("Copy {label}"))
+                .cursor(Cursor::Pointer)
+                .hover(t.hover)
+                .press(t.press)
+                .on_press(move |state| copy_field(state, &copy_key, &copy_label, sensitive));
             let mut buttons = row().gap(6.0);
             if sensitive {
                 let reveal_key = key.clone();
@@ -730,10 +730,6 @@ fn details(s: &State, dark: bool) -> El {
                     move |state| toggle_reveal(state, reveal_key.clone()),
                 ));
             }
-            let copy_key = key.clone();
-            buttons = buttons.child(action(&format!("copy-{key}"), "Copy", dark, move |state| {
-                copy_field(state, &copy_key, &label, sensitive)
-            }));
             if key.starts_with("uri-") {
                 if let FieldValue::Text(url) = &detail.value {
                     let url = url.clone();
@@ -880,13 +876,6 @@ fn details(s: &State, dark: bool) -> El {
                         .child(text(type_label.as_ref()).font(META).color(t.text_secondary)),
                 )
                 .child(el().grow(1.0))
-                .child(if username.is_empty() {
-                    el()
-                } else {
-                    action("copy-user", "Copy username", dark, move |state| {
-                        copy_field(state, "username", "username", false)
-                    })
-                })
                 .child(action(
                     "favorite-toggle",
                     if favorite { "Unfavorite" } else { "Favorite" },
