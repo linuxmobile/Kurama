@@ -1,7 +1,8 @@
 use rune::tok::{self, type_};
-use rune::{col, el, row, text, text_input, Color, Cx, El, GrowthSpec, ScrollSpec, Tx};
+use rune::{col, el, icon, row, text, text_input, Color, Cx, El, GrowthSpec, ScrollSpec, Tx};
 
 use crate::backend::{Request, VaultRow};
+use crate::icons;
 use crate::state::{dispatch, submit_quick_unlock, submit_search, submit_unlock, Category, State};
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -269,11 +270,14 @@ fn item_row(item: &VaultRow, selected: bool, dark: bool) -> El {
     let t = tok::theme(dark);
     let id = item.id.clone();
     let star = if item.favorite { "★" } else { "" };
+    let type_label = icons::label(&item.type_name);
 
     el().key(format!("item-{}", item.id))
         .h(56.0)
         .w_full()
         .px(12.0)
+        .gap(10.0)
+        .center_y()
         .radius(8.0)
         .role("listitem")
         .label(format!("{}, {}", item.name, item.subtitle))
@@ -286,8 +290,14 @@ fn item_row(item: &VaultRow, selected: bool, dark: bool) -> El {
         })
         .on_press(move |s: &mut State| s.selected = Some(id.clone()))
         .child(
+            icon(icons::for_type(&item.type_name), 18.0)
+                .key(format!("item-icon-{}-{}", item.type_name, item.id))
+                .label(format!("{} icon", type_label))
+                .color(t.text_secondary),
+        )
+        .child(
             col()
-                .w_full()
+                .grow(1.0)
                 .gap(2.0)
                 .child(
                     row()
@@ -306,7 +316,7 @@ fn item_row(item: &VaultRow, selected: bool, dark: bool) -> El {
                 )
                 .child(
                     text(if item.subtitle.is_empty() {
-                        item.type_name.as_str()
+                        type_label.as_ref()
                     } else {
                         item.subtitle.as_str()
                     })
@@ -336,11 +346,12 @@ fn details(s: &State, dark: bool) -> El {
     };
 
     let username = item.subtitle.clone();
+    let type_label = icons::label(&item.type_name);
     let fields = col()
         .key("detail-fields")
         .padding(20.0)
         .gap(14.0)
-        .child(field("Type", &item.type_name, dark))
+        .child(field("Type", type_label.as_ref(), dark))
         .child(field(
             "Username",
             if username.is_empty() {
@@ -383,6 +394,12 @@ fn details(s: &State, dark: bool) -> El {
                 .gap(12.0)
                 .center_y()
                 .child(
+                    icon(icons::for_type(&item.type_name), 22.0)
+                        .key(format!("detail-icon-{}", item.type_name))
+                        .label(format!("{} icon", type_label))
+                        .color(t.text_secondary),
+                )
+                .child(
                     col()
                         .gap(2.0)
                         .child(
@@ -391,7 +408,7 @@ fn details(s: &State, dark: bool) -> El {
                                 .font(WINDOW_TITLE)
                                 .color(t.text),
                         )
-                        .child(text("Item details").font(META).color(t.text_secondary)),
+                        .child(text(type_label.as_ref()).font(META).color(t.text_secondary)),
                 )
                 .child(el().grow(1.0))
                 .child(if username.is_empty() {

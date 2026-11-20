@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 mod backend;
+mod icons;
 mod state;
 mod theme;
 mod ui;
@@ -86,7 +87,9 @@ mod tests {
             "sidebar",
             "items",
             "item-1",
+            "item-icon-login-1",
             "details",
+            "detail-icon-login",
             "status-bar",
         ] {
             assert!(rt.find(key).is_some(), "missing key: {key}");
