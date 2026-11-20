@@ -168,6 +168,22 @@ mod tests {
     }
 
     #[test]
+    fn totp_field_shows_code_and_countdown() {
+        backend::stash_totp("1", "123456".to_owned());
+        let mut rt = runtime(state::scene_populated);
+        rt.frame(1.0 / 60.0);
+        let shown = rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("field-value-TOTP"))
+            .expect("TOTP field text")
+            .text
+            .expect("TOTP field value");
+        assert_eq!(shown, "123456 · 18s");
+        backend::clear_totp("1");
+    }
+
+    #[test]
     fn arrow_keys_move_item_selection() {
         let mut rt = runtime(state::scene_populated);
         rt.on_key = Some(on_key);

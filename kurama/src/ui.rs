@@ -4,7 +4,7 @@ use rune::{
     ScrollSpec, Tx,
 };
 
-use crate::backend::{revealed_value, FieldValue, Request, VaultRow};
+use crate::backend::{revealed_value, totp_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
     copy_field, dispatch, move_selection, open_trash, select_category, select_folder,
@@ -479,6 +479,18 @@ fn details(s: &State, dark: bool) -> El {
                     revealed_value(&detail.key).unwrap_or_else(|| "••••••••".to_owned())
                 }
                 FieldValue::Masked => "••••••••".to_owned(),
+            };
+            let shown = if detail.key == "totp" {
+                s.totp
+                    .as_ref()
+                    .filter(|meta| meta.item_id == item.id)
+                    .map(|meta| {
+                        let code = totp_value(&meta.item_id).unwrap_or_else(|| "······".to_owned());
+                        format!("{code} · {}s", meta.ttl)
+                    })
+                    .unwrap_or(shown)
+            } else {
+                shown
             };
             let value = field(&detail.label, &shown, dark)
                 .grow(1.0)

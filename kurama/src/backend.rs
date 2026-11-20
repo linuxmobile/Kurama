@@ -9,6 +9,14 @@ use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
+/// Timing data for a TOTP code. The code itself stays in a dedicated store.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct TotpMeta {
+    pub item_id: String,
+    pub ttl: u64,
+    pub period: u64,
+}
+
 /// Non-secret information shown in the item list and detail pane.
 #[derive(Clone, Debug, Default)]
 pub struct VaultRow {
@@ -90,6 +98,9 @@ pub enum Request {
         label: String,
         sensitive: bool,
     },
+    Totp {
+        item_id: String,
+    },
     Search(String),
     Sync,
     Lock,
@@ -133,6 +144,31 @@ static REVEALED: Mutex<Option<(String, Secret)>> = Mutex::new(None);
 #[cfg(test)]
 pub static REVEAL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+static TOTP: Mutex<Option<(String, String)>> = Mutex::new(None);
+
+pub fn stash_totp(item_id: &str, code: String) {
+    if let Ok(mut totp) = TOTP.lock() {
+        *totp = Some((item_id.to_owned(), code));
+    }
+}
+
+pub fn totp_value(item_id: &str) -> Option<String> {
+    let totp = TOTP.lock().ok()?;
+    let (stored_id, code) = totp.as_ref()?;
+    (stored_id == item_id).then(|| code.clone())
+}
+
+pub fn clear_totp(item_id: &str) {
+    if let Ok(mut totp) = TOTP.lock() {
+        if totp
+            .as_ref()
+            .is_some_and(|(stored_id, _)| stored_id == item_id)
+        {
+            *totp = None;
+        }
+    }
+}
+
 pub fn stash_revealed(key: &str, value: String) {
     if let Ok(mut revealed) = REVEALED.lock() {
         *revealed = Some((key.to_owned(), Secret::new(value)));
@@ -159,6 +195,7 @@ pub enum Event {
     Details(ItemDetails),
     Revealed { item_id: String, key: String },
     Notice(String),
+    Totp(TotpMeta),
     Notices { cursor: u64, notices: Vec<Notice> },
     Approvals(Vec<Approval>),
     Error(String),
@@ -201,18 +238,32 @@ pub fn perform(request: Request) -> Event {
             key,
             label,
             sensitive,
-        } => match revealed_field(&item_id, &key) {
-            Ok(value) => {
-                let copy = json!({
-                    "action": "copy",
-                    "text": value,
-                    "sensitive": sensitive,
-                    "timeout": 30
-                });
-                match call(copy) {
-                    Ok(_) => Event::Notice(format!("Copied {label}")),
-                    Err(error) => Event::Error(error),
+        } => {
+            let value = if key == "totp" {
+                totp_response(&item_id).map(|(_, code)| code)
+            } else {
+                revealed_field(&item_id, &key)
+            };
+            match value {
+                Ok(value) => {
+                    let copy = json!({
+                        "action": "copy",
+                        "text": value,
+                        "sensitive": sensitive,
+                        "timeout": 30
+                    });
+                    match call(copy) {
+                        Ok(_) => Event::Notice(format!("Copied {label}")),
+                        Err(error) => Event::Error(error),
+                    }
                 }
+                Err(error) => Event::Error(error),
+            }
+        }
+        Request::Totp { item_id } => match totp_response(&item_id) {
+            Ok((meta, code)) => {
+                stash_totp(&item_id, code);
+                Event::Totp(meta)
             }
             Err(error) => Event::Error(error),
         },
@@ -513,6 +564,19 @@ fn first_text(value: &Value, keys: &[&str]) -> String {
             (!found.is_empty()).then_some(found)
         })
         .unwrap_or_default()
+}
+
+fn totp_response(item_id: &str) -> Result<(TotpMeta, String), String> {
+    let response = call(json!({ "action": "totp", "query": item_id }))?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(text(&response, "error"));
+    }
+    let meta = TotpMeta {
+        item_id: item_id.to_owned(),
+        ttl: response.get("ttl").and_then(Value::as_u64).unwrap_or(0),
+        period: response.get("period").and_then(Value::as_u64).unwrap_or(30),
+    };
+    Ok((meta, text(&response, "code")))
 }
 
 fn revealed_field(item_id: &str, key: &str) -> Result<String, String> {
@@ -833,6 +897,15 @@ mod tests {
         let debug = format!("{:?}", fields);
         assert!(!debug.contains("secret-private-material"));
         assert!(!debug.contains("secret-passphrase-value"));
+    }
+
+    #[test]
+    fn totp_store_is_keyed_by_item() {
+        stash_totp("backend-totp-test", "123456".to_owned());
+        assert_eq!(totp_value("backend-totp-test").as_deref(), Some("123456"));
+        assert_eq!(totp_value("other"), None);
+        clear_totp("backend-totp-test");
+        assert_eq!(totp_value("backend-totp-test"), None);
     }
 
     #[test]

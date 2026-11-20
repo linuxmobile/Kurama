@@ -7,8 +7,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use rune::{edit::TextEdit, Tx, Waker};
 
 use crate::backend::{
-    self, clear_revealed, Approval, Event, FieldValue, ItemDetails, ItemField, Request, Secret,
-    Snapshot, VaultRow,
+    self, clear_revealed, clear_totp, Approval, Event, FieldValue, ItemDetails, ItemField, Request,
+    Secret, Snapshot, TotpMeta, VaultRow,
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -76,6 +76,7 @@ pub struct State {
     pub selected: Option<String>,
     pub details: Option<ItemDetails>,
     pub revealed: Option<String>,
+    pub totp: Option<TotpMeta>,
     pub busy: bool,
     pub notice: Option<String>,
     pub approvals: Vec<Approval>,
@@ -86,6 +87,7 @@ pub struct State {
     events: Option<Receiver<Event>>,
     event_cursor: u64,
     event_timer: f64,
+    totp_timer: f64,
 }
 
 impl Default for State {
@@ -102,6 +104,7 @@ impl Default for State {
             selected: None,
             details: None,
             revealed: None,
+            totp: None,
             busy: true,
             notice: None,
             approvals: Vec::new(),
@@ -112,6 +115,7 @@ impl Default for State {
             events: None,
             event_cursor: 0,
             event_timer: 0.0,
+            totp_timer: 0.0,
         }
     }
 }
@@ -280,6 +284,9 @@ fn clear_reveal(state: &mut State) {
     if state.revealed.take().is_some() {
         clear_revealed();
     }
+    if let Some(totp) = state.totp.take() {
+        clear_totp(&totp.item_id);
+    }
 }
 
 pub fn copy_field(state: &State, key: &str, label: &str, sensitive: bool) {
@@ -385,6 +392,7 @@ pub fn setup(state: &mut State, wake: Waker) {
 
 pub fn poll(state: &mut State, seconds: f64, _tx: &mut Tx) -> bool {
     let before = visible_fingerprint(state);
+    tick_totp(state, seconds);
     state.event_timer += seconds;
     if state.event_timer >= 1.0 {
         state.event_timer = 0.0;
@@ -397,16 +405,33 @@ pub fn poll(state: &mut State, seconds: f64, _tx: &mut Tx) -> bool {
     }
 
     let Some(events) = &state.events else {
-        return false;
+        return visible_fingerprint(state) != before;
     };
     let queued: Vec<Event> = events.try_iter().collect();
     if queued.is_empty() {
-        return false;
+        return visible_fingerprint(state) != before;
     }
     for event in queued {
         apply(state, event);
     }
     visible_fingerprint(state) != before
+}
+
+fn tick_totp(state: &mut State, seconds: f64) {
+    let Some(totp) = state.totp.as_mut() else {
+        return;
+    };
+    state.totp_timer += seconds;
+    while state.totp_timer >= 1.0 {
+        state.totp_timer -= 1.0;
+        totp.ttl = totp.ttl.saturating_sub(1);
+    }
+    if totp.ttl == 0 {
+        let item_id = totp.item_id.clone();
+        state.totp = None;
+        clear_totp(&item_id);
+        send_quiet(state, Request::Totp { item_id });
+    }
 }
 
 fn visible_fingerprint(state: &State) -> u64 {
@@ -430,6 +455,7 @@ fn visible_fingerprint(state: &State) -> u64 {
     state.selected.hash(&mut hasher);
     state.details.hash(&mut hasher);
     state.revealed.hash(&mut hasher);
+    state.totp.hash(&mut hasher);
     for folder in &state.folders {
         folder.hash(&mut hasher);
     }
@@ -509,7 +535,19 @@ fn apply(state: &mut State, event: Event) {
         }
         Event::Details(details) => {
             if state.selected.as_deref() == Some(details.id.as_str()) {
+                let has_totp = details.fields.iter().any(|field| field.key == "totp");
                 state.details = Some(details);
+                if has_totp {
+                    send_quiet(
+                        state,
+                        Request::Totp {
+                            item_id: state.selected.clone().unwrap_or_default(),
+                        },
+                    );
+                } else if let Some(previous) = state.totp.take() {
+                    state.totp_timer = 0.0;
+                    clear_totp(&previous.item_id);
+                }
             }
         }
         Event::Revealed { item_id, key } => {
@@ -549,6 +587,12 @@ fn apply(state: &mut State, event: Event) {
             }
         }
         Event::Notice(message) => state.notice = Some(message),
+        Event::Totp(meta) => {
+            if state.selected.as_deref() == Some(meta.item_id.as_str()) {
+                state.totp_timer = 0.0;
+                state.totp = Some(meta);
+            }
+        }
         Event::Error(message) => state.notice = Some(message),
     }
 }
@@ -624,6 +668,11 @@ pub fn scene_populated(state: &mut State) {
                 value: FieldValue::Masked,
             },
         ],
+    });
+    state.totp = Some(TotpMeta {
+        item_id: "1".to_owned(),
+        ttl: 18,
+        period: 30,
     });
     state.busy = false;
 }
@@ -721,6 +770,41 @@ fn fixtures() -> Vec<VaultRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn totp_request_ticks_and_refreshes() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        let (_event_tx, event_rx) = mpsc::channel();
+        state.events = Some(event_rx);
+        let details = state.details.clone().unwrap();
+
+        apply(&mut state, Event::Details(details));
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            Request::Totp { item_id } if item_id == "1"
+        )));
+
+        apply(
+            &mut state,
+            Event::Totp(TotpMeta {
+                item_id: "1".to_owned(),
+                ttl: 2,
+                period: 30,
+            }),
+        );
+        let mut ui_tx = Tx::default();
+        assert!(poll(&mut state, 1.0, &mut ui_tx));
+        assert_eq!(state.totp.as_ref().unwrap().ttl, 1);
+        assert!(poll(&mut state, 1.0, &mut ui_tx));
+        assert!(state.totp.is_none());
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            Request::Totp { item_id } if item_id == "1"
+        )));
+    }
 
     #[test]
     fn copy_field_queues_a_redacted_request_and_shows_notice() {
