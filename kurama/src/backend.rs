@@ -20,6 +20,28 @@ pub struct VaultRow {
     pub updated: String,
 }
 
+/// Value of a detail field. Sensitive values never leave the daemon.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub enum FieldValue {
+    Text(String),
+    Masked,
+}
+
+/// Non-secret field shown in the item inspector.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct ItemField {
+    pub key: String,
+    pub label: String,
+    pub value: FieldValue,
+}
+
+/// Metadata-only view of one decrypted vault item.
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
+pub struct ItemDetails {
+    pub id: String,
+    pub fields: Vec<ItemField>,
+}
+
 /// Non-secret view of the daemon's `status` response.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -54,6 +76,7 @@ pub struct Approval {
 pub enum Request {
     Refresh,
     Trash,
+    Details { id: String },
     Search(String),
     Sync,
     Lock,
@@ -93,6 +116,7 @@ pub enum Event {
     Snapshot(Snapshot),
     Items(Vec<VaultRow>),
     Trash(Vec<VaultRow>),
+    Details(ItemDetails),
     Notices { cursor: u64, notices: Vec<Notice> },
     Approvals(Vec<Approval>),
     Error(String),
@@ -119,6 +143,10 @@ pub fn perform(request: Request) -> Event {
                 Err(error) => Event::Error(error),
             }
         }
+        Request::Details { id } => match details(&id) {
+            Ok(details) => Event::Details(details),
+            Err(error) => Event::Error(error),
+        },
         Request::Sync => match call(json!({ "action": "sync" })) {
             Ok(_) => match snapshot() {
                 Ok(snapshot) => Event::Snapshot(snapshot),
@@ -248,6 +276,194 @@ fn row(value: &Value) -> Option<VaultRow> {
         folder: text(value, "folder_name"),
         updated: text(value, "updated_at"),
     })
+}
+
+fn details(id: &str) -> Result<ItemDetails, String> {
+    let response = call(json!({ "action": "get_item", "query": id }))?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(text(&response, "error"));
+    }
+    let item = response
+        .get("item")
+        .ok_or_else(|| "Item details are unavailable".to_owned())?;
+    Ok(ItemDetails {
+        id: id.to_owned(),
+        fields: item_fields(item),
+    })
+}
+
+fn item_fields(item: &Value) -> Vec<ItemField> {
+    let mut fields = Vec::new();
+    match text(item, "type_name").as_str() {
+        "login" => {
+            if let Some(login) = item.get("login") {
+                push_text(
+                    &mut fields,
+                    "username",
+                    "Username",
+                    first_text(login, &["username"]),
+                );
+                push_masked(
+                    &mut fields,
+                    "password",
+                    "Password",
+                    !first_text(login, &["password"]).is_empty(),
+                );
+                push_masked(
+                    &mut fields,
+                    "totp",
+                    "TOTP",
+                    !first_text(login, &["totp"]).is_empty(),
+                );
+                if let Some(uris) = login.get("uris").and_then(Value::as_array) {
+                    for (index, uri) in uris.iter().enumerate() {
+                        push_text(
+                            &mut fields,
+                            &format!("uri-{index}"),
+                            "Website",
+                            first_text(uri, &["uri"]),
+                        );
+                    }
+                }
+            }
+        }
+        "card" => {
+            if let Some(card) = item.get("card") {
+                push_text(
+                    &mut fields,
+                    "cardholder",
+                    "Cardholder",
+                    first_text(card, &["cardholderName", "cardholder_name"]),
+                );
+                push_text(&mut fields, "brand", "Brand", first_text(card, &["brand"]));
+                push_masked(
+                    &mut fields,
+                    "number",
+                    "Number",
+                    !first_text(card, &["number"]).is_empty(),
+                );
+                let month = first_text(card, &["expMonth", "exp_month"]);
+                let year = first_text(card, &["expYear", "exp_year"]);
+                let expiry = match (month.is_empty(), year.is_empty()) {
+                    (false, false) => format!("{month}/{year}"),
+                    (false, true) => month,
+                    (true, false) => year,
+                    (true, true) => String::new(),
+                };
+                push_text(&mut fields, "expiry", "Expires", expiry);
+                push_masked(
+                    &mut fields,
+                    "code",
+                    "Security code",
+                    !first_text(card, &["code"]).is_empty(),
+                );
+            }
+        }
+        "identity" => {
+            if let Some(identity) = item.get("identity") {
+                let first = first_text(identity, &["firstName", "first_name"]);
+                let last = first_text(identity, &["lastName", "last_name"]);
+                let full = match (first.is_empty(), last.is_empty()) {
+                    (false, false) => format!("{first} {last}"),
+                    (false, true) => first,
+                    (true, false) => last,
+                    (true, true) => String::new(),
+                };
+                push_text(&mut fields, "name", "Name", full);
+                push_text(
+                    &mut fields,
+                    "email",
+                    "Email",
+                    first_text(identity, &["email"]),
+                );
+                push_text(
+                    &mut fields,
+                    "phone",
+                    "Phone",
+                    first_text(identity, &["phone"]),
+                );
+            }
+        }
+        "ssh_key" => {
+            if let Some(key) = item.get("ssh_key") {
+                push_text(
+                    &mut fields,
+                    "key-type",
+                    "Key type",
+                    first_text(key, &["key_type", "keyType"]),
+                );
+                push_text(
+                    &mut fields,
+                    "fingerprint",
+                    "Fingerprint",
+                    first_text(key, &["fingerprint", "keyFingerprint"]),
+                );
+                push_text(
+                    &mut fields,
+                    "public-key",
+                    "Public key",
+                    first_text(key, &["public_key", "publicKey"]),
+                );
+                push_masked(
+                    &mut fields,
+                    "private-key",
+                    "Private key",
+                    !first_text(key, &["private_key", "privateKey"]).is_empty(),
+                );
+                push_masked(
+                    &mut fields,
+                    "passphrase",
+                    "Passphrase",
+                    !first_text(key, &["passphrase"]).is_empty(),
+                );
+            }
+        }
+        _ => {}
+    }
+    push_masked(
+        &mut fields,
+        "notes",
+        "Notes",
+        !text(item, "notes").is_empty(),
+    );
+    if let Some(values) = item.get("fields").and_then(Value::as_array) {
+        for (index, field) in values.iter().enumerate() {
+            let name = first_text(field, &["name"]);
+            if !name.is_empty() {
+                push_masked(&mut fields, &format!("custom-{index}"), &name, true);
+            }
+        }
+    }
+    fields
+}
+
+fn first_text(value: &Value, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|key| {
+            let found = text(value, key);
+            (!found.is_empty()).then_some(found)
+        })
+        .unwrap_or_default()
+}
+
+fn push_text(fields: &mut Vec<ItemField>, key: &str, label: &str, value: String) {
+    if !value.is_empty() {
+        fields.push(ItemField {
+            key: key.to_owned(),
+            label: label.to_owned(),
+            value: FieldValue::Text(value),
+        });
+    }
+}
+
+fn push_masked(fields: &mut Vec<ItemField>, key: &str, label: &str, present: bool) {
+    if present {
+        fields.push(ItemField {
+            key: key.to_owned(),
+            label: label.to_owned(),
+            value: FieldValue::Masked,
+        });
+    }
 }
 
 fn notices(response: &Value) -> (u64, Vec<Notice>) {
@@ -417,5 +633,67 @@ mod tests {
         let debug = format!("{:?}", found);
         assert!(!debug.contains("super-secret"));
         assert!(!debug.contains("secretfp"));
+    }
+
+    #[test]
+    fn item_fields_mask_secrets_but_keep_field_labels() {
+        let item = json!({
+            "id": "item-1",
+            "type_name": "login",
+            "notes": "private note",
+            "login": {
+                "username": "dev@example.com",
+                "password": "super-secret",
+                "totp": "otpauth://totp/example?secret=private-seed",
+                "uris": [{ "uri": "https://github.com" }]
+            },
+            "fields": [{ "name": "Recovery code", "value": "private-code" }]
+        });
+        let fields = item_fields(&item);
+        assert!(fields.contains(&ItemField {
+            key: "username".to_owned(),
+            label: "Username".to_owned(),
+            value: FieldValue::Text("dev@example.com".to_owned()),
+        }));
+        assert!(fields.contains(&ItemField {
+            key: "uri-0".to_owned(),
+            label: "Website".to_owned(),
+            value: FieldValue::Text("https://github.com".to_owned()),
+        }));
+        for key in ["password", "totp", "notes", "custom-0"] {
+            let found = fields.iter().find(|field| field.key == key).unwrap();
+            assert_eq!(found.value, FieldValue::Masked);
+        }
+        let debug = format!("{:?}", fields);
+        assert!(!debug.contains("super-secret"));
+        assert!(!debug.contains("private note"));
+        assert!(!debug.contains("private-seed"));
+        assert!(!debug.contains("private-code"));
+    }
+
+    #[test]
+    fn ssh_item_fields_keep_public_metadata_only() {
+        let item = json!({
+            "type_name": "ssh_key",
+            "ssh_key": {
+                "key_type": "ed25519",
+                "fingerprint": "SHA256:publicfp",
+                "public_key": "ssh-ed25519 AAAA public",
+                "private_key": "secret-private-material",
+                "passphrase": "secret-passphrase-value"
+            }
+        });
+        let fields = item_fields(&item);
+        assert_eq!(fields[0].value, FieldValue::Text("ed25519".to_owned()));
+        assert_eq!(
+            fields[1].value,
+            FieldValue::Text("SHA256:publicfp".to_owned())
+        );
+        assert_eq!(fields[2].label, "Public key");
+        assert_eq!(fields[3].value, FieldValue::Masked);
+        assert_eq!(fields[4].value, FieldValue::Masked);
+        let debug = format!("{:?}", fields);
+        assert!(!debug.contains("secret-private-material"));
+        assert!(!debug.contains("secret-passphrase-value"));
     }
 }

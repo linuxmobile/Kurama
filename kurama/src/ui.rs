@@ -4,7 +4,7 @@ use rune::{
     ScrollSpec, Tx,
 };
 
-use crate::backend::{Request, VaultRow};
+use crate::backend::{FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
     dispatch, move_selection, open_trash, select_category, select_folder, submit_quick_unlock,
@@ -464,20 +464,25 @@ fn details(s: &State, dark: bool) -> El {
 
     let username = item.subtitle.clone();
     let type_label = icons::label(&item.type_name);
-    let fields = col()
+    let mut fields = col()
         .key("detail-fields")
         .padding(20.0)
         .gap(14.0)
-        .child(field("Type", type_label.as_ref(), dark))
-        .child(field(
-            "Username",
-            if username.is_empty() {
-                "—"
-            } else {
-                &username
-            },
-            dark,
-        ))
+        .child(field("Type", type_label.as_ref(), dark));
+    if let Some(details) = s.details.as_ref().filter(|details| details.id == item.id) {
+        for detail in &details.fields {
+            let value = match &detail.value {
+                FieldValue::Text(value) => value.as_str(),
+                FieldValue::Masked => "••••••••",
+            };
+            fields = fields.child(
+                field(&detail.label, value, dark).key(format!("detail-field-{}", detail.key)),
+            );
+        }
+    } else if !item.subtitle.is_empty() {
+        fields = fields.child(field("Username", &item.subtitle, dark));
+    }
+    fields = fields
         .child(field(
             "Folder",
             if item.folder.is_empty() {
@@ -552,6 +557,7 @@ fn field(label: &str, value: &str, dark: bool) -> El {
         )
         .child(
             text(value.to_owned())
+                .key(format!("field-value-{label}"))
                 .font(ROW_SUBTITLE)
                 .color(t.text)
                 .selectable(true),

@@ -114,6 +114,28 @@ mod tests {
     }
 
     #[test]
+    fn detail_fields_show_type_fields_and_mask_secrets() {
+        let mut rt = runtime(state::scene_populated);
+        rt.frame(1.0 / 60.0);
+        for key in [
+            "detail-field-username",
+            "detail-field-uri-0",
+            "detail-field-password",
+            "detail-field-totp",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+        let masked = rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("field-value-Password"))
+            .expect("masked field text")
+            .text
+            .expect("masked field value");
+        assert_eq!(masked, "••••••••");
+    }
+
+    #[test]
     fn arrow_keys_move_item_selection() {
         let mut rt = runtime(state::scene_populated);
         rt.on_key = Some(on_key);

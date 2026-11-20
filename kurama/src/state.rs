@@ -6,7 +6,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use rune::{edit::TextEdit, Tx, Waker};
 
-use crate::backend::{self, Approval, Event, Request, Secret, Snapshot, VaultRow};
+use crate::backend::{
+    self, Approval, Event, FieldValue, ItemDetails, ItemField, Request, Secret, Snapshot, VaultRow,
+};
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Category {
@@ -71,6 +73,7 @@ pub struct State {
     pub folder: Option<String>,
     pub folders: Vec<String>,
     pub selected: Option<String>,
+    pub details: Option<ItemDetails>,
     pub busy: bool,
     pub notice: Option<String>,
     pub approvals: Vec<Approval>,
@@ -95,6 +98,7 @@ impl Default for State {
             folder: None,
             folders: Vec::new(),
             selected: None,
+            details: None,
             busy: true,
             notice: None,
             approvals: Vec::new(),
@@ -251,8 +255,26 @@ fn select_row(state: &mut State, index: usize, tx: &mut Tx) -> bool {
         return false;
     }
     state.selected = Some(id.clone());
+    request_details(state);
     tx.scroll_into_view_in("item-scroller", format!("item-{id}"));
     true
+}
+
+fn request_details(state: &mut State) {
+    if state.snapshot.status != "unlocked" {
+        return;
+    }
+    let Some(id) = state.selected.clone() else {
+        return;
+    };
+    if state
+        .details
+        .as_ref()
+        .is_some_and(|details| details.id == id)
+    {
+        return;
+    }
+    send_quiet(state, Request::Details { id });
 }
 
 pub fn open_trash(state: &mut State) {
@@ -265,6 +287,7 @@ pub fn open_trash(state: &mut State) {
     state.query.clear();
     state.rows.clear();
     state.selected = None;
+    state.details = None;
     state.bump_rows_version();
     dispatch(state, Request::Trash);
 }
@@ -278,6 +301,7 @@ fn leave_trash(state: &mut State) -> bool {
     state.query.clear();
     state.rows.clear();
     state.selected = None;
+    state.details = None;
     state.bump_rows_version();
     true
 }
@@ -365,6 +389,7 @@ fn visible_fingerprint(state: &State) -> u64 {
     state.location.hash(&mut hasher);
     state.folder.hash(&mut hasher);
     state.selected.hash(&mut hasher);
+    state.details.hash(&mut hasher);
     for folder in &state.folders {
         folder.hash(&mut hasher);
     }
@@ -413,6 +438,7 @@ fn apply(state: &mut State, event: Event) {
             if state.selected.is_none() {
                 state.selected = state.rows.first().map(|item| item.id.clone());
             }
+            request_details(state);
         }
         Event::Items(items) => {
             if state.location == Location::Trash {
@@ -423,6 +449,7 @@ fn apply(state: &mut State, event: Event) {
             if state.selected.is_none() {
                 state.selected = state.rows.first().map(|item| item.id.clone());
             }
+            request_details(state);
         }
         Event::Trash(items) => {
             if state.location != Location::Trash {
@@ -432,6 +459,12 @@ fn apply(state: &mut State, event: Event) {
             state.bump_rows_version();
             if state.selected.is_none() {
                 state.selected = state.rows.first().map(|item| item.id.clone());
+            }
+            request_details(state);
+        }
+        Event::Details(details) => {
+            if state.selected.as_deref() == Some(details.id.as_str()) {
+                state.details = Some(details);
             }
         }
         Event::Notices { cursor, notices } => {
@@ -511,6 +544,31 @@ pub fn scene_populated(state: &mut State) {
     state.bump_rows_version();
     state.snapshot.items = state.rows.clone();
     state.selected = state.rows.first().map(|item| item.id.clone());
+    state.details = Some(ItemDetails {
+        id: "1".to_owned(),
+        fields: vec![
+            ItemField {
+                key: "username".to_owned(),
+                label: "Username".to_owned(),
+                value: FieldValue::Text("dev@example.com".to_owned()),
+            },
+            ItemField {
+                key: "uri-0".to_owned(),
+                label: "Website".to_owned(),
+                value: FieldValue::Text("https://github.com".to_owned()),
+            },
+            ItemField {
+                key: "password".to_owned(),
+                label: "Password".to_owned(),
+                value: FieldValue::Masked,
+            },
+            ItemField {
+                key: "totp".to_owned(),
+                label: "TOTP".to_owned(),
+                value: FieldValue::Masked,
+            },
+        ],
+    });
     state.busy = false;
 }
 
@@ -607,6 +665,41 @@ fn fixtures() -> Vec<VaultRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selecting_an_item_requests_its_details() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        state.details = None;
+        let mut ui_tx = Tx::default();
+
+        assert!(move_selection(&mut state, 1, &mut ui_tx));
+        assert!(rx
+            .try_iter()
+            .any(|request| matches!(request, Request::Details { id } if id == "2")));
+
+        apply(
+            &mut state,
+            Event::Details(ItemDetails {
+                id: "1".to_owned(),
+                fields: Vec::new(),
+            }),
+        );
+        assert!(state.details.is_none());
+
+        let details = ItemDetails {
+            id: "2".to_owned(),
+            fields: vec![ItemField {
+                key: "username".to_owned(),
+                label: "Username".to_owned(),
+                value: FieldValue::Text("ops@example.com".to_owned()),
+            }],
+        };
+        apply(&mut state, Event::Details(details.clone()));
+        assert_eq!(state.details, Some(details));
+    }
 
     #[test]
     fn keyboard_selection_moves_through_visible_rows() {
