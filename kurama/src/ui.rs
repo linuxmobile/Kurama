@@ -1,13 +1,14 @@
 use rune::tok::{self, type_};
 use rune::{
-    col, el, icon, row, text, text_input, Color, Cursor, Cx, El, GrowthSpec, ScrollSpec, Tx,
+    col, el, icon, row, text, text_input, Color, Cursor, Cx, El, GrowthSpec, Key, KeyEvent,
+    ScrollSpec, Tx,
 };
 
 use crate::backend::{Request, VaultRow};
 use crate::icons;
 use crate::state::{
-    dispatch, open_trash, select_category, select_folder, submit_quick_unlock, submit_search,
-    submit_unlock, Category, Location, State,
+    dispatch, move_selection, open_trash, select_category, select_folder, submit_quick_unlock,
+    submit_search, submit_unlock, Category, Location, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -58,7 +59,18 @@ fn top_bar(s: &State, dark: bool) -> El {
         .fill(t.card)
         .border(1.0, t.card_border)
         .on_edit(|s: &mut State| &mut s.query)
-        .on_submit(submit_search);
+        .on_submit(submit_search)
+        .on_input_key(
+            |s: &mut State, event: &KeyEvent, tx: &mut Tx| match &event.key {
+                Key::Down => move_selection(s, 1, tx),
+                Key::Up => move_selection(s, -1, tx),
+                Key::Enter => {
+                    submit_search(s, tx);
+                    true
+                }
+                _ => false,
+            },
+        );
 
     let brand = col()
         .gap(1.0)

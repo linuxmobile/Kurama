@@ -10,7 +10,7 @@ mod state;
 mod theme;
 mod ui;
 
-use rune::AppSpec;
+use rune::{AppSpec, Key, KeyEvent, Tx};
 use state::State;
 use std::process::ExitCode;
 
@@ -53,16 +53,30 @@ fn main() -> ExitCode {
         ],
         setup: Some(state::setup),
         poll: Some(state::poll),
+        on_key: Some(on_key),
         ..AppSpec::new("Kurama", (1160.0, 760.0), State::default, ui::view)
     });
     ExitCode::SUCCESS
+}
+
+fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
+    if state.snapshot.status != "unlocked" {
+        return false;
+    }
+    match &event.key {
+        Key::Down => state::move_selection(state, 1, tx),
+        Key::Up => state::move_selection(state, -1, tx),
+        Key::Home => state::select_first(state, tx),
+        Key::End => state::select_last(state, tx),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::Approval;
-    use rune::{Env, Runtime};
+    use rune::{Env, Mods, Runtime};
 
     fn runtime(scene: fn(&mut State)) -> Runtime<State> {
         let mut state = State::default();
@@ -97,6 +111,27 @@ mod tests {
         ] {
             assert!(rt.find(key).is_some(), "missing key: {key}");
         }
+    }
+
+    #[test]
+    fn arrow_keys_move_item_selection() {
+        let mut rt = runtime(state::scene_populated);
+        rt.on_key = Some(on_key);
+        rt.frame(0.0);
+
+        rt.key(KeyEvent {
+            key: Key::Down,
+            mods: Mods::default(),
+        });
+        rt.frame(0.0);
+        assert_eq!(rt.state.selected.as_deref(), Some("2"));
+
+        rt.key(KeyEvent {
+            key: Key::Up,
+            mods: Mods::default(),
+        });
+        rt.frame(0.0);
+        assert_eq!(rt.state.selected.as_deref(), Some("1"));
     }
 
     #[test]

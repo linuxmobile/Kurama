@@ -210,6 +210,51 @@ pub fn select_folder(state: &mut State, folder: String) {
     }
 }
 
+pub fn move_selection(state: &mut State, delta: isize, tx: &mut Tx) -> bool {
+    let visible = state.visible_indices();
+    let Some(first) = visible.first() else {
+        return false;
+    };
+    let current = state.selected.as_ref().and_then(|id| {
+        visible
+            .iter()
+            .position(|&index| state.rows[index].id == *id)
+    });
+    let index = match current {
+        Some(position) => {
+            let next = (position as isize + delta).clamp(0, visible.len() as isize - 1);
+            visible[next as usize]
+        }
+        None if delta < 0 => *visible.last().unwrap_or(first),
+        None => *first,
+    };
+    select_row(state, index, tx)
+}
+
+pub fn select_first(state: &mut State, tx: &mut Tx) -> bool {
+    state
+        .visible_indices()
+        .first()
+        .is_some_and(|&index| select_row(state, index, tx))
+}
+
+pub fn select_last(state: &mut State, tx: &mut Tx) -> bool {
+    state
+        .visible_indices()
+        .last()
+        .is_some_and(|&index| select_row(state, index, tx))
+}
+
+fn select_row(state: &mut State, index: usize, tx: &mut Tx) -> bool {
+    let id = state.rows[index].id.clone();
+    if state.selected.as_deref() == Some(id.as_str()) {
+        return false;
+    }
+    state.selected = Some(id.clone());
+    tx.scroll_into_view_in("item-scroller", format!("item-{id}"));
+    true
+}
+
 pub fn open_trash(state: &mut State) {
     if state.location == Location::Trash {
         return;
@@ -562,6 +607,26 @@ fn fixtures() -> Vec<VaultRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyboard_selection_moves_through_visible_rows() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let mut tx = Tx::default();
+        assert_eq!(state.selected.as_deref(), Some("1"));
+
+        assert!(move_selection(&mut state, 1, &mut tx));
+        assert_eq!(state.selected.as_deref(), Some("2"));
+        assert!(move_selection(&mut state, -1, &mut tx));
+        assert_eq!(state.selected.as_deref(), Some("1"));
+
+        assert!(select_last(&mut state, &mut tx));
+        assert_eq!(state.selected.as_deref(), Some("4"));
+        assert!(!move_selection(&mut state, 1, &mut tx));
+        assert_eq!(state.selected.as_deref(), Some("4"));
+        assert!(select_first(&mut state, &mut tx));
+        assert_eq!(state.selected.as_deref(), Some("1"));
+    }
 
     #[test]
     fn folder_selection_filters_rows() {
