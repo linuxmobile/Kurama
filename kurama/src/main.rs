@@ -64,6 +64,7 @@ fn main() -> ExitCode {
             ("send-form", state::scene_send_form),
             ("attachment-preview", state::scene_attachment_preview),
             ("ssh-tools", state::scene_ssh_tools),
+            ("ssh-approval", state::scene_ssh_approval),
         ],
         setup: Some(state::setup),
         poll: Some(state::poll),
@@ -250,6 +251,16 @@ mod tests {
         ] {
             assert!(rt.find(key).is_some(), "missing key: {key}");
         }
+    }
+
+    #[test]
+    fn ssh_approval_scene_shows_agent_status_and_reply_actions() {
+        let mut rt = runtime(state::scene_ssh_approval);
+        rt.frame(1.0 / 60.0);
+        for key in ["approvals-banner", "ssh-approve-42", "ssh-deny-42"] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+        assert!(rt.state.agent_running);
     }
 
     #[test]

@@ -9,21 +9,22 @@ use crate::backend::{revealed_value, totp_value, FieldValue, Request, Secret, Va
 use crate::icons;
 use crate::state::{
     add_create_field, add_create_uri, add_edit_uri, adjust_generator_length,
-    adjust_generator_words, cancel_create, cancel_delete_send, cancel_edit, cancel_send,
-    close_attachment, close_generator, close_sends, close_ssh_tools, confirm_delete_send,
-    copy_field, copy_generated, copy_send, cycle_create_field_type, cycle_create_folder,
-    cycle_edit_folder, cycle_ssh_algorithm, delete_item, disable_send, dispatch, folder_label,
-    generate_password, logout, move_selection, new_send, open_attachment, open_generator,
-    open_sends, open_ssh_tools, open_trash, remove_create_field, remove_create_uri,
-    remove_edit_uri, request_delete_send, restore_item, save_ssh_tool_key, select_category,
-    select_folder, select_item, select_send, send_two_factor_email, set_auth_mode, set_create_type,
-    set_favorite, set_generator_passphrase, set_ssh_tool_mode, start_edit, submit_auth,
-    submit_create, submit_edit, submit_fido2, submit_quick_unlock, submit_search, submit_send,
-    submit_ssh_export, submit_ssh_generate, submit_ssh_import, submit_unlock,
-    toggle_create_favorite, toggle_create_field_value, toggle_edit_favorite,
-    toggle_generator_option, toggle_reveal, toggle_send_hidden, use_generated, AttachmentView,
-    AuthMode, CardDraft, Category, CustomFieldDraft, GeneratorOption, GeneratorTarget,
-    IdentityDraft, Location, SendDraft, SshDraft, SshToolMode, State,
+    adjust_generator_words, answer_approval, apply_agent_settings, cancel_create,
+    cancel_delete_send, cancel_edit, cancel_send, close_attachment, close_generator, close_sends,
+    close_ssh_tools, confirm_delete_send, copy_field, copy_generated, copy_send,
+    cycle_create_field_type, cycle_create_folder, cycle_edit_folder, cycle_ssh_algorithm,
+    delete_item, disable_send, dispatch, folder_label, generate_password, logout, move_selection,
+    new_send, open_attachment, open_generator, open_sends, open_ssh_tools, open_trash,
+    refresh_agent_status, remove_create_field, remove_create_uri, remove_edit_uri,
+    request_delete_send, restore_item, save_ssh_tool_key, select_category, select_folder,
+    select_item, select_send, send_two_factor_email, set_auth_mode, set_create_type, set_favorite,
+    set_generator_passphrase, set_ssh_tool_mode, start_edit, submit_auth, submit_create,
+    submit_edit, submit_fido2, submit_quick_unlock, submit_search, submit_send, submit_ssh_export,
+    submit_ssh_generate, submit_ssh_import, submit_unlock, toggle_create_favorite,
+    toggle_create_field_value, toggle_edit_favorite, toggle_generator_option, toggle_reveal,
+    toggle_send_hidden, use_generated, AttachmentView, AuthMode, CardDraft, Category,
+    CustomFieldDraft, GeneratorOption, GeneratorTarget, IdentityDraft, Location, SendDraft,
+    SshDraft, SshToolMode, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -1089,6 +1090,35 @@ fn ssh_tools(s: &State, dark: bool) -> El {
             dark,
             |state| set_ssh_tool_mode(state, SshToolMode::Export),
         ));
+    let agent = row()
+        .key("ssh-agent-status")
+        .gap(10.0)
+        .center_y()
+        .child(
+            text(format!(
+                "SSH agent: {}",
+                if s.agent_running {
+                    "running"
+                } else {
+                    "stopped"
+                }
+            ))
+            .font(ROW_SUBTITLE)
+            .color(tok::theme(dark).text),
+        )
+        .child(action(
+            "ssh-agent-refresh",
+            "Refresh",
+            dark,
+            refresh_agent_status,
+        ))
+        .child(action(
+            "ssh-agent-apply",
+            "Apply settings",
+            dark,
+            apply_agent_settings,
+        ));
+    let header = col().gap(8.0).child(tabs).child(agent);
     let mut body = col().gap(14.0).child(labeled_input(
         &draft.name,
         "ssh-tool-name",
@@ -1216,7 +1246,7 @@ fn ssh_tools(s: &State, dark: bool) -> El {
         "ssh-tools-form",
         "SSH keys",
         dark,
-        tabs,
+        header,
         body,
         footer,
         s.form_error.as_deref(),
@@ -1688,18 +1718,46 @@ fn vault(s: &State, dark: bool) -> El {
         } else {
             &approval.title
         };
+        let id = approval.id;
+        let key_name = approval.key_name.clone();
+        let client = approval.client.clone();
         let banner = row()
             .key("approvals-banner")
             .w_full()
-            .h(36.0)
+            .h(52.0)
             .px(14.0)
+            .gap(12.0)
             .center_y()
             .fill(t.control_track)
             .child(
                 text(format!("SSH approval requested · {title}"))
                     .font(type_::LABEL)
                     .color(t.text),
-            );
+            )
+            .child(
+                text(if key_name.is_empty() {
+                    client
+                } else if client.is_empty() {
+                    key_name
+                } else {
+                    format!("{key_name} · {client}")
+                })
+                .font(META)
+                .color(t.text_secondary),
+            )
+            .child(el().grow(1.0))
+            .child(action(
+                &format!("ssh-deny-{id}"),
+                "Deny",
+                dark,
+                move |state| answer_approval(state, id, false),
+            ))
+            .child(action(
+                &format!("ssh-approve-{id}"),
+                "Approve",
+                dark,
+                move |state| answer_approval(state, id, true),
+            ));
         return col()
             .key("vault")
             .w_full()

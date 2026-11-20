@@ -259,6 +259,8 @@ pub struct State {
     pub send_error: Option<String>,
     pub attachment_preview: Option<AttachmentView>,
     pub ssh_tools: Option<SshToolsDraft>,
+    pub agent_running: bool,
+    pub agent_socket: String,
     pub revealed: Option<String>,
     pub totp: Option<TotpMeta>,
     pub busy: bool,
@@ -274,6 +276,7 @@ pub struct State {
     events: Option<Receiver<Event>>,
     event_cursor: u64,
     event_timer: f64,
+    agent_timer: f64,
     totp_timer: f64,
 }
 
@@ -303,6 +306,8 @@ impl Default for State {
             send_error: None,
             attachment_preview: None,
             ssh_tools: None,
+            agent_running: false,
+            agent_socket: String::new(),
             revealed: None,
             totp: None,
             busy: true,
@@ -318,6 +323,7 @@ impl Default for State {
             events: None,
             event_cursor: 0,
             event_timer: 0.0,
+            agent_timer: 0.0,
             totp_timer: 0.0,
         }
     }
@@ -1433,6 +1439,12 @@ pub fn poll(state: &mut State, seconds: f64, _tx: &mut Tx) -> bool {
                 since: state.event_cursor,
             },
         );
+        send_quiet(state, Request::Approvals);
+        state.agent_timer += 1.0;
+        if state.agent_timer >= 5.0 {
+            state.agent_timer = 0.0;
+            send_quiet(state, Request::AgentStatus);
+        }
     }
 
     let Some(events) = &state.events else {
@@ -1529,6 +1541,8 @@ fn visible_fingerprint(state: &State) -> u64 {
         .as_ref()
         .map(|draft| draft.fingerprint.text.as_str())
         .hash(&mut hasher);
+    state.agent_running.hash(&mut hasher);
+    state.agent_socket.hash(&mut hasher);
     for send in &state.sends {
         send.id.hash(&mut hasher);
         send.name.hash(&mut hasher);
@@ -1855,6 +1869,19 @@ fn apply(state: &mut State, event: Event) {
             }
             state.notice = Some("SSH key exported".to_owned());
         }
+        Event::AgentStatus { running, socket } => {
+            state.agent_running = running;
+            state.agent_socket = socket;
+        }
+        Event::ApprovalAnswered { id, approve } => {
+            state.approvals.retain(|prompt| prompt.id != id);
+            state.notice = Some(if approve {
+                "SSH request approved".to_owned()
+            } else {
+                "SSH request denied".to_owned()
+            });
+            send_quiet(state, Request::Approvals);
+        }
         Event::FavoriteChanged { id, favorite } => {
             for row in state.rows.iter_mut().chain(state.snapshot.items.iter_mut()) {
                 if row.id == id {
@@ -2180,11 +2207,26 @@ pub fn open_ssh_tools(state: &mut State) {
     state.ssh_tools = Some(empty_ssh_tools_draft());
     state.attachment_preview = None;
     state.form_error = None;
+    dispatch(state, Request::AgentStatus);
+    dispatch(state, Request::Approvals);
 }
 
 pub fn close_ssh_tools(state: &mut State) {
     state.ssh_tools = None;
     state.form_error = None;
+}
+
+pub fn refresh_agent_status(state: &mut State) {
+    dispatch(state, Request::AgentStatus);
+}
+
+pub fn apply_agent_settings(state: &mut State) {
+    dispatch(state, Request::AgentApply);
+}
+
+pub fn answer_approval(state: &mut State, id: u64, approve: bool) {
+    state.approvals.retain(|prompt| prompt.id != id);
+    dispatch(state, Request::AgentReply { id, approve });
 }
 
 pub fn set_ssh_tool_mode(state: &mut State, mode: SshToolMode) {
@@ -2519,6 +2561,20 @@ pub fn scene_ssh_tools(state: &mut State) {
     draft.fingerprint.replace_text("SHA256:example-fingerprint");
     draft.name.replace_text("Laptop key");
     state.ssh_tools = Some(draft);
+}
+
+pub fn scene_ssh_approval(state: &mut State) {
+    scene_populated(state);
+    state.agent_running = true;
+    state.agent_socket = "/run/user/1000/kurama-ssh-agent.sock".to_owned();
+    state.approvals = vec![Approval {
+        id: 42,
+        title: "Sign a Git commit?".to_owned(),
+        action: "git commit -S".to_owned(),
+        key_name: "Laptop key".to_owned(),
+        client: "git (ssh)".to_owned(),
+    }];
+    state.notice = Some("SSH approval requested".to_owned());
 }
 
 pub fn scene_create_card(state: &mut State) {
@@ -3503,6 +3559,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         state.requests = Some(tx);
         open_ssh_tools(&mut state);
+        let _: Vec<Request> = rx.try_iter().collect();
         cycle_ssh_algorithm(&mut state, 1);
         state
             .ssh_tools
@@ -3526,6 +3583,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         state.requests = Some(tx);
         open_ssh_tools(&mut state);
+        let _: Vec<Request> = rx.try_iter().collect();
         submit_ssh_import(&mut state);
         assert!(state.form_error.is_some());
         assert!(rx.try_iter().next().is_none());
@@ -3549,6 +3607,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         state.requests = Some(tx);
         open_ssh_tools(&mut state);
+        let _: Vec<Request> = rx.try_iter().collect();
         apply(
             &mut state,
             Event::SshKeyGenerated {
@@ -3567,5 +3626,47 @@ mod tests {
         let requests: Vec<Request> = rx.try_iter().collect();
         assert!(!format!("{requests:?}").contains("private-key-material"));
         assert!(matches!(requests[0], Request::CreateSshKey { .. }));
+    }
+
+    #[test]
+    fn ssh_agent_events_update_status_and_clear_answered_prompts() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        apply(
+            &mut state,
+            Event::AgentStatus {
+                running: true,
+                socket: "/run/kurama-agent.sock".to_owned(),
+            },
+        );
+        assert!(state.agent_running);
+        assert_eq!(state.agent_socket, "/run/kurama-agent.sock");
+
+        state.approvals = vec![Approval {
+            id: 7,
+            title: "Sign a commit?".to_owned(),
+            action: "git commit".to_owned(),
+            key_name: "Laptop".to_owned(),
+            client: "git".to_owned(),
+        }];
+        answer_approval(&mut state, 7, true);
+        assert!(state.approvals.is_empty());
+        assert!(matches!(
+            rx.try_iter().next(),
+            Some(Request::AgentReply {
+                id: 7,
+                approve: true
+            })
+        ));
+
+        apply(
+            &mut state,
+            Event::ApprovalAnswered {
+                id: 7,
+                approve: true,
+            },
+        );
+        assert_eq!(state.notice.as_deref(), Some("SSH request approved"));
     }
 }

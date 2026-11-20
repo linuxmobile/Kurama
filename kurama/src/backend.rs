@@ -362,6 +362,12 @@ pub enum Request {
     ExportSshKey {
         item_id: String,
     },
+    AgentStatus,
+    AgentApply,
+    AgentReply {
+        id: u64,
+        approve: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -546,6 +552,14 @@ pub enum Event {
         private: Secret,
         public: String,
         fingerprint: String,
+    },
+    AgentStatus {
+        running: bool,
+        socket: String,
+    },
+    ApprovalAnswered {
+        id: u64,
+        approve: bool,
     },
     Auth(AuthOutcome),
     Generated {
@@ -1045,6 +1059,34 @@ pub fn perform(request: Request) -> Event {
                 },
                 Err(error) => Event::Error(error),
             },
+            Err(error) => Event::Error(error),
+        },
+        Request::AgentStatus => match call(json!({ "action": "ssh_agent_status" })) {
+            Ok(response) => Event::AgentStatus {
+                running: response
+                    .get("running")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                socket: text(&response, "socket"),
+            },
+            Err(error) => Event::Error(error),
+        },
+        Request::AgentApply => match call(json!({ "action": "ssh_agent_apply" })) {
+            Ok(response) => Event::AgentStatus {
+                running: response
+                    .get("running")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                socket: String::new(),
+            },
+            Err(error) => Event::Error(error),
+        },
+        Request::AgentReply { id, approve } => match call(json!({
+            "action": "ssh_agent_reply",
+            "id": id,
+            "approve": approve,
+        })) {
+            Ok(_) => Event::ApprovalAnswered { id, approve },
             Err(error) => Event::Error(error),
         },
     }
