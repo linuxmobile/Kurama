@@ -100,6 +100,22 @@ mod tests {
     }
 
     #[test]
+    fn clickable_controls_show_hover_feedback() {
+        let mut rt = runtime(state::scene_populated);
+        rt.frame(0.0);
+        let (x, y) = rt.find("trash-nav").expect("trash button");
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 60.0);
+        let hover = rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("trash-nav"))
+            .expect("tooling element")
+            .hover;
+        assert!(hover > 0.0, "hover was {hover}");
+    }
+
+    #[test]
     fn locked_state_hides_the_vault() {
         let mut rt = runtime(state::scene_locked);
         rt.frame(1.0 / 60.0);

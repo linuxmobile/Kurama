@@ -1,5 +1,7 @@
 use rune::tok::{self, type_};
-use rune::{col, el, icon, row, text, text_input, Color, Cx, El, GrowthSpec, ScrollSpec, Tx};
+use rune::{
+    col, el, icon, row, text, text_input, Color, Cursor, Cx, El, GrowthSpec, ScrollSpec, Tx,
+};
 
 use crate::backend::{Request, VaultRow};
 use crate::icons;
@@ -169,6 +171,9 @@ fn sidebar(s: &State, dark: bool) -> El {
                 } else {
                     Color::TRANSPARENT
                 })
+                .hover(t.hover)
+                .press(t.press)
+                .cursor(Cursor::Pointer)
                 .on_press(move |s: &mut State| select_category(s, category))
                 .child(
                     row()
@@ -226,6 +231,9 @@ fn sidebar(s: &State, dark: bool) -> El {
                 } else {
                     Color::TRANSPARENT
                 })
+                .hover(t.hover)
+                .press(t.press)
+                .cursor(Cursor::Pointer)
                 .on_press(move |s: &mut State| select_folder(s, target.clone()))
                 .child(
                     text(folder.clone())
@@ -249,6 +257,9 @@ fn sidebar(s: &State, dark: bool) -> El {
             } else {
                 Color::TRANSPARENT
             })
+            .hover(t.hover)
+            .press(t.press)
+            .cursor(Cursor::Pointer)
             .on_press(|s: &mut State| open_trash(s))
             .child(
                 text("Trash")
@@ -379,6 +390,9 @@ fn item_row(item: &VaultRow, selected: bool, dark: bool) -> El {
         } else {
             Color::TRANSPARENT
         })
+        .hover(t.hover)
+        .press(t.press)
+        .cursor(Cursor::Pointer)
         .on_press(move |s: &mut State| s.selected = Some(id.clone()))
         .child(
             icon(icons::for_type(&item.type_name), 18.0)
@@ -694,6 +708,9 @@ fn action_tx(
         .center()
         .radius(8.0)
         .fill(t.control_track)
+        .hover(t.hover)
+        .press(t.press)
+        .cursor(Cursor::Pointer)
         .on_press_tx(on_press)
         .child(text(label.to_owned()).font(type_::LABEL).color(t.text))
 }
