@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -77,12 +77,14 @@ pub struct CreateDraft {
     pub name: TextEdit,
     pub item_type: i64,
     pub favorite: bool,
+    pub folder_id: Option<String>,
 }
 
 pub struct EditDraft {
     pub id: String,
     pub name: TextEdit,
     pub favorite: bool,
+    pub folder_id: Option<String>,
 }
 
 pub struct State {
@@ -94,6 +96,7 @@ pub struct State {
     pub location: Location,
     pub folder: Option<String>,
     pub folders: Vec<String>,
+    pub folder_ids: BTreeMap<String, String>,
     pub selected: Option<String>,
     pub details: Option<ItemDetails>,
     pub edit: Option<EditDraft>,
@@ -125,6 +128,7 @@ impl Default for State {
             location: Location::Vault,
             folder: None,
             folders: Vec::new(),
+            folder_ids: BTreeMap::new(),
             selected: None,
             details: None,
             edit: None,
@@ -351,12 +355,58 @@ pub fn start_create() -> CreateDraft {
         name: TextEdit::new(""),
         item_type: 1,
         favorite: false,
+        folder_id: None,
     }
 }
 
 pub fn toggle_create_favorite(state: &mut State) {
     if let Some(draft) = state.create.as_mut() {
         draft.favorite = !draft.favorite;
+    }
+}
+
+fn stepped_folder(
+    folders: &[String],
+    ids: &BTreeMap<String, String>,
+    current: &Option<String>,
+    delta: isize,
+) -> Option<String> {
+    if folders.is_empty() {
+        return None;
+    }
+    let index = current
+        .as_ref()
+        .and_then(|id| folders.iter().position(|name| ids.get(name) == Some(id)))
+        .map(|index| index as isize + 1)
+        .unwrap_or(0);
+    let len = folders.len() as isize + 1;
+    let next = (index + delta).rem_euclid(len);
+    if next == 0 {
+        None
+    } else {
+        ids.get(&folders[next as usize - 1]).cloned()
+    }
+}
+
+pub fn folder_label(state: &State, folder_id: Option<&str>) -> String {
+    folder_id
+        .and_then(|id| {
+            state
+                .folders
+                .iter()
+                .find(|name| state.folder_ids.get(*name).map(String::as_str) == Some(id))
+        })
+        .cloned()
+        .unwrap_or_else(|| "None".to_owned())
+}
+
+pub fn cycle_create_folder(state: &mut State, delta: isize) {
+    let Some(current) = state.create.as_ref().map(|draft| draft.folder_id.clone()) else {
+        return;
+    };
+    let next = stepped_folder(&state.folders, &state.folder_ids, &current, delta);
+    if let Some(draft) = state.create.as_mut() {
+        draft.folder_id = next;
     }
 }
 
@@ -382,6 +432,7 @@ pub fn submit_create(state: &mut State) {
             name,
             item_type: draft.item_type,
             favorite: draft.favorite,
+            folder_id: draft.folder_id,
         },
     );
 }
@@ -398,12 +449,23 @@ pub fn start_edit(state: &mut State) {
         id: item.id.clone(),
         name: TextEdit::new(&item.name),
         favorite: item.favorite,
+        folder_id: (!item.folder_id.is_empty()).then(|| item.folder_id.clone()),
     });
 }
 
 pub fn toggle_edit_favorite(state: &mut State) {
     if let Some(draft) = state.edit.as_mut() {
         draft.favorite = !draft.favorite;
+    }
+}
+
+pub fn cycle_edit_folder(state: &mut State, delta: isize) {
+    let Some(current) = state.edit.as_ref().map(|draft| draft.folder_id.clone()) else {
+        return;
+    };
+    let next = stepped_folder(&state.folders, &state.folder_ids, &current, delta);
+    if let Some(draft) = state.edit.as_mut() {
+        draft.folder_id = next;
     }
 }
 
@@ -423,6 +485,7 @@ pub fn submit_edit(state: &mut State) {
             id: draft.id,
             name,
             favorite: draft.favorite,
+            folder_id: draft.folder_id,
         },
     );
 }
@@ -551,6 +614,7 @@ pub fn setup(state: &mut State, wake: Waker) {
     });
 
     let _ = request_tx.send(Request::Refresh);
+    let _ = request_tx.send(Request::Folders);
 }
 
 pub fn poll(state: &mut State, seconds: f64, _tx: &mut Tx) -> bool {
@@ -652,6 +716,11 @@ fn visible_fingerprint(state: &State) -> u64 {
         .map(|draft| draft.favorite)
         .hash(&mut hasher);
     state
+        .edit
+        .as_ref()
+        .and_then(|draft| draft.folder_id.as_deref())
+        .hash(&mut hasher);
+    state
         .create
         .as_ref()
         .map(|draft| draft.item_type)
@@ -660,6 +729,11 @@ fn visible_fingerprint(state: &State) -> u64 {
         .create
         .as_ref()
         .map(|draft| draft.favorite)
+        .hash(&mut hasher);
+    state
+        .create
+        .as_ref()
+        .and_then(|draft| draft.folder_id.as_deref())
         .hash(&mut hasher);
     hasher.finish()
 }
@@ -840,6 +914,13 @@ fn apply(state: &mut State, event: Event) {
             state.notice = Some("Item renamed".to_owned());
             send_quiet(state, Request::Refresh);
         }
+        Event::Folders(folders) => {
+            state.folders = folders.iter().map(|folder| folder.name.clone()).collect();
+            state.folder_ids = folders
+                .into_iter()
+                .map(|folder| (folder.name, folder.id))
+                .collect();
+        }
         Event::Restored { id } => {
             state.pending_delete = None;
             state.rows.retain(|row| row.id != id);
@@ -911,6 +992,11 @@ pub fn scene_populated(state: &mut State) {
     };
     state.rows = fixtures();
     state.folders = folders_from(&state.rows);
+    state.folder_ids = state
+        .folders
+        .iter()
+        .map(|name| (name.clone(), name.to_lowercase()))
+        .collect();
     state.bump_rows_version();
     state.snapshot.items = state.rows.clone();
     state.selected = state.rows.first().map(|item| item.id.clone());
@@ -983,6 +1069,7 @@ pub fn scene_stress(state: &mut State) {
             type_name: "login".to_owned(),
             favorite: false,
             folder: String::new(),
+            folder_id: String::new(),
             updated: "2026-01-02T03:04:05Z".to_owned(),
         })
         .collect();
@@ -1008,6 +1095,7 @@ pub fn scene_trash(state: &mut State) {
         type_name: "note".to_owned(),
         favorite: false,
         folder: "Personal".to_owned(),
+        folder_id: "folder-personal".to_owned(),
         updated: "2026-01-01T00:00:00Z".to_owned(),
     }];
     state.snapshot.items = state.rows.clone();
@@ -1046,6 +1134,7 @@ fn fixtures() -> Vec<VaultRow> {
             type_name: type_name.to_owned(),
             favorite,
             folder: folder.to_owned(),
+            folder_id: folder.to_lowercase(),
             updated: "2026-01-02T03:04:05Z".to_owned(),
         },
     )
@@ -1142,6 +1231,44 @@ mod tests {
     }
 
     #[test]
+    fn folder_cycling_sets_draft_folder_ids() {
+        let mut state = State::default();
+        apply(
+            &mut state,
+            Event::Folders(vec![
+                crate::backend::FolderMeta {
+                    id: "folder-a".to_owned(),
+                    name: "Alpha".to_owned(),
+                },
+                crate::backend::FolderMeta {
+                    id: "folder-b".to_owned(),
+                    name: "Beta".to_owned(),
+                },
+            ]),
+        );
+        assert_eq!(folder_label(&state, Some("folder-b")), "Beta");
+
+        state.create = Some(start_create());
+        cycle_create_folder(&mut state, 1);
+        assert_eq!(
+            state.create.as_ref().unwrap().folder_id.as_deref(),
+            Some("folder-a")
+        );
+        cycle_create_folder(&mut state, 1);
+        assert_eq!(
+            state.create.as_ref().unwrap().folder_id.as_deref(),
+            Some("folder-b")
+        );
+        cycle_create_folder(&mut state, -1);
+        assert_eq!(
+            state.create.as_ref().unwrap().folder_id.as_deref(),
+            Some("folder-a")
+        );
+        cycle_create_folder(&mut state, -1);
+        assert_eq!(state.create.as_ref().unwrap().folder_id, None);
+    }
+
+    #[test]
     fn create_draft_submits_name_and_type() {
         let mut state = State::default();
         scene_populated(&mut state);
@@ -1161,7 +1288,7 @@ mod tests {
         assert!(state.create.is_none());
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            Request::CreateItem { name, item_type, favorite }
+            Request::CreateItem { name, item_type, favorite, .. }
                 if name == "Recovery sheet" && item_type == 2 && favorite
         )));
 
@@ -1214,7 +1341,7 @@ mod tests {
         assert!(state.edit.is_none());
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            Request::UpdateName { id, name, favorite }
+            Request::UpdateName { id, name, favorite, .. }
                 if id == "1" && name == "Renamed GitHub" && !favorite
         )));
 

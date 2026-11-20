@@ -26,6 +26,7 @@ pub struct VaultRow {
     pub type_name: String,
     pub favorite: bool,
     pub folder: String,
+    pub folder_id: String,
     pub updated: String,
 }
 
@@ -58,6 +59,13 @@ pub struct ItemDetails {
     pub id: String,
     pub fields: Vec<ItemField>,
     pub attachments: Vec<AttachmentMeta>,
+}
+
+/// Non-secret folder metadata used by the create and edit forms.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct FolderMeta {
+    pub id: String,
+    pub name: String,
 }
 
 /// Non-secret view of the daemon's `status` response.
@@ -124,12 +132,15 @@ pub enum Request {
         id: String,
         name: String,
         favorite: bool,
+        folder_id: Option<String>,
     },
     CreateItem {
         name: String,
         item_type: i64,
         favorite: bool,
+        folder_id: Option<String>,
     },
+    Folders,
     Restore {
         id: String,
     },
@@ -250,6 +261,7 @@ pub enum Event {
         id: String,
         name: String,
     },
+    Folders(Vec<FolderMeta>),
     Restored {
         id: String,
     },
@@ -353,10 +365,15 @@ pub fn perform(request: Request) -> Event {
                 Err(error) => Event::Error(error),
             }
         }
-        Request::UpdateName { id, name, favorite } => match call(json!({
+        Request::UpdateName {
+            id,
+            name,
+            favorite,
+            folder_id,
+        } => match call(json!({
             "action": "update_item",
             "id": id.clone(),
-            "options": { "name": name.clone(), "favorite": favorite }
+            "options": { "name": name.clone(), "favorite": favorite, "folder_id": folder_id }
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
                 Event::ItemRenamed { id, name, favorite }
@@ -368,12 +385,14 @@ pub fn perform(request: Request) -> Event {
             name,
             item_type,
             favorite,
+            folder_id,
         } => match call(json!({
             "action": "create_item",
             "options": {
                 "name": name.clone(),
                 "item_type": item_type,
-                "favorite": favorite
+                "favorite": favorite,
+                "folder_id": folder_id
             }
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
@@ -386,6 +405,10 @@ pub fn perform(request: Request) -> Event {
                 Event::ItemCreated { id, name }
             }
             Ok(response) => Event::Error(text(&response, "error")),
+            Err(error) => Event::Error(error),
+        },
+        Request::Folders => match folders() {
+            Ok(folders) => Event::Folders(folders),
             Err(error) => Event::Error(error),
         },
         Request::Restore { id } => match call(json!({
@@ -533,6 +556,7 @@ fn row(value: &Value) -> Option<VaultRow> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         folder: text(value, "folder_name"),
+        folder_id: text(value, "folder_id"),
         updated: text(value, "updated_at"),
     })
 }
@@ -550,6 +574,30 @@ fn details(id: &str) -> Result<ItemDetails, String> {
         fields: item_fields(item),
         attachments: attachment_metadata(item),
     })
+}
+
+fn folders() -> Result<Vec<FolderMeta>, String> {
+    let response = call(json!({ "action": "folders" }))?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(text(&response, "error"));
+    }
+    Ok(response
+        .get("folders")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| {
+                    let id = value.get("id")?.as_str()?;
+                    let name = value.get("name")?.as_str()?;
+                    Some(FolderMeta {
+                        id: id.to_owned(),
+                        name: name.to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 fn attachment_metadata(item: &Value) -> Vec<AttachmentMeta> {

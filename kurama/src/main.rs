@@ -318,6 +318,18 @@ mod tests {
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("create-folder-next").expect("folder button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        let shown = rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("create-folder-label"))
+            .expect("folder label")
+            .text
+            .expect("folder text");
+        assert_eq!(shown, "Folder: Development");
         let (x, y) = rt.find("create-submit").expect("create button");
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
@@ -325,8 +337,9 @@ mod tests {
         assert!(rt.state.create.is_none());
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            crate::backend::Request::CreateItem { name, item_type, favorite }
+            crate::backend::Request::CreateItem { name, item_type, favorite, folder_id, .. }
                 if name == "Recovery sheet" && item_type == 2 && favorite
+                    && folder_id.as_deref() == Some("development")
         )));
     }
 
@@ -365,7 +378,7 @@ mod tests {
         assert!(rt.state.edit.is_none());
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            crate::backend::Request::UpdateName { id, name, favorite }
+            crate::backend::Request::UpdateName { id, name, favorite, .. }
                 if id == "1" && name == "Work GitHub" && !favorite
         )));
 

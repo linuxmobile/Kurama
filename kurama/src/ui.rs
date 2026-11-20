@@ -7,11 +7,11 @@ use rune::{
 use crate::backend::{revealed_value, totp_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
-    cancel_create, cancel_edit, copy_field, delete_item, dispatch, move_selection, open_attachment,
-    open_trash, restore_item, select_category, select_folder, select_item, set_create_type,
-    set_favorite, start_edit, submit_create, submit_edit, submit_quick_unlock, submit_search,
-    submit_unlock, toggle_create_favorite, toggle_edit_favorite, toggle_reveal, Category, Location,
-    State,
+    cancel_create, cancel_edit, copy_field, cycle_create_folder, cycle_edit_folder, delete_item,
+    dispatch, folder_label, move_selection, open_attachment, open_trash, restore_item,
+    select_category, select_folder, select_item, set_create_type, set_favorite, start_edit,
+    submit_create, submit_edit, submit_quick_unlock, submit_search, submit_unlock,
+    toggle_create_favorite, toggle_edit_favorite, toggle_reveal, Category, Location, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -123,6 +123,27 @@ fn create_form(s: &State, dark: bool) -> El {
         ))
         .child(
             row()
+                .key("create-folder")
+                .gap(8.0)
+                .center_y()
+                .child(action("create-folder-prev", "‹", dark, |state| {
+                    cycle_create_folder(state, -1)
+                }))
+                .child(
+                    text(format!(
+                        "Folder: {}",
+                        folder_label(s, draft.folder_id.as_deref())
+                    ))
+                    .key("create-folder-label")
+                    .font(ROW_SUBTITLE)
+                    .color(t.text),
+                )
+                .child(action("create-folder-next", "›", dark, |state| {
+                    cycle_create_folder(state, 1)
+                })),
+        )
+        .child(
+            row()
                 .gap(8.0)
                 .child(action("create-submit", "Create", dark, submit_create))
                 .child(action("create-cancel", "Cancel", dark, cancel_create)),
@@ -178,6 +199,21 @@ fn edit_form(s: &State, dark: bool) -> El {
                     dark,
                     toggle_edit_favorite,
                 ))
+                .child(action("edit-folder-prev", "‹", dark, |state| {
+                    cycle_edit_folder(state, -1)
+                }))
+                .child(
+                    text(format!(
+                        "Folder: {}",
+                        folder_label(s, draft.folder_id.as_deref())
+                    ))
+                    .key("edit-folder-label")
+                    .font(ROW_SUBTITLE)
+                    .color(t.text),
+                )
+                .child(action("edit-folder-next", "›", dark, |state| {
+                    cycle_edit_folder(state, 1)
+                }))
                 .child(action("save-edit", "Save", dark, submit_edit))
                 .child(action("cancel-edit", "Cancel", dark, cancel_edit)),
         )
