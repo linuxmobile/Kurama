@@ -81,6 +81,7 @@ pub struct CreateDraft {
     pub username: TextEdit,
     pub password: TextEdit,
     pub website: TextEdit,
+    pub notes: TextEdit,
 }
 
 pub struct EditDraft {
@@ -88,10 +89,12 @@ pub struct EditDraft {
     pub name: TextEdit,
     pub favorite: bool,
     pub folder_id: Option<String>,
+    pub item_type: i64,
     pub login: bool,
     pub username: TextEdit,
     pub password: TextEdit,
     pub website: TextEdit,
+    pub notes: TextEdit,
 }
 
 pub struct State {
@@ -368,6 +371,7 @@ pub fn start_create() -> CreateDraft {
         username: TextEdit::new(""),
         password: TextEdit::new("").secure(),
         website: TextEdit::new(""),
+        notes: TextEdit::new(""),
     }
 }
 
@@ -378,6 +382,17 @@ fn optional_text(field: &TextEdit) -> Option<String> {
 
 fn optional_secret(field: &TextEdit) -> Option<String> {
     (!field.text.is_empty()).then(|| field.text.clone())
+}
+
+fn item_type_id(type_name: &str) -> i64 {
+    match type_name {
+        "login" => 1,
+        "note" => 2,
+        "card" => 3,
+        "identity" => 4,
+        "ssh_key" => 5,
+        _ => 1,
+    }
 }
 
 pub fn toggle_create_favorite(state: &mut State) {
@@ -457,6 +472,7 @@ pub fn submit_create(state: &mut State) {
             username: optional_text(&draft.username),
             password: optional_secret(&draft.password).map(Secret::new),
             website: optional_text(&draft.website),
+            notes: optional_secret(&draft.notes).map(Secret::new),
         },
     );
 }
@@ -474,10 +490,12 @@ pub fn start_edit(state: &mut State) {
         name: TextEdit::new(&item.name),
         favorite: item.favorite,
         folder_id: (!item.folder_id.is_empty()).then(|| item.folder_id.clone()),
+        item_type: item_type_id(&item.type_name),
         login: item.type_name == "login",
         username: TextEdit::new(&item.subtitle),
         password: TextEdit::new("").secure(),
         website: TextEdit::new(""),
+        notes: TextEdit::new(""),
     });
 }
 
@@ -517,6 +535,7 @@ pub fn submit_edit(state: &mut State) {
             username: optional_text(&draft.username),
             password: optional_secret(&draft.password).map(Secret::new),
             website: optional_text(&draft.website),
+            notes: optional_secret(&draft.notes).map(Secret::new),
         },
     );
 }

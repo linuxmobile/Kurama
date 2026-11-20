@@ -136,6 +136,7 @@ pub enum Request {
         username: Option<String>,
         password: Option<Secret>,
         website: Option<String>,
+        notes: Option<Secret>,
     },
     CreateItem {
         name: String,
@@ -145,6 +146,7 @@ pub enum Request {
         username: Option<String>,
         password: Option<Secret>,
         website: Option<String>,
+        notes: Option<Secret>,
     },
     Folders,
     Restore {
@@ -379,6 +381,7 @@ pub fn perform(request: Request) -> Event {
             username,
             password,
             website,
+            notes,
         } => match call(json!({
             "action": "update_item",
             "id": id.clone(),
@@ -388,7 +391,8 @@ pub fn perform(request: Request) -> Event {
                 "folder_id": folder_id,
                 "username": username,
                 "password": password.as_ref().map(Secret::as_str),
-                "website": website
+                "website": website,
+                "notes": notes.as_ref().map(Secret::as_str)
             }
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
@@ -405,6 +409,7 @@ pub fn perform(request: Request) -> Event {
             username,
             password,
             website,
+            notes,
         } => match call(json!({
             "action": "create_item",
             "options": {
@@ -414,7 +419,8 @@ pub fn perform(request: Request) -> Event {
                 "folder_id": folder_id,
                 "username": username,
                 "password": password.as_ref().map(Secret::as_str),
-                "website": website
+                "website": website,
+                "notes": notes.as_ref().map(Secret::as_str)
             }
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
@@ -1027,9 +1033,11 @@ mod tests {
             username: None,
             password: Some(Secret::new("hunter2".to_owned())),
             website: None,
+            notes: Some(Secret::new("private note".to_owned())),
         };
         let debug = format!("{request:?}");
         assert!(!debug.contains("hunter2"));
+        assert!(!debug.contains("private note"));
         assert!(debug.contains("redacted"));
     }
 

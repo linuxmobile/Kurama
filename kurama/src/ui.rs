@@ -136,6 +136,47 @@ fn labeled_input(
         )
 }
 
+fn notes_input(
+    value: &TextEdit,
+    key: &str,
+    dark: bool,
+    on_edit: impl for<'a> Fn(&'a mut State) -> &'a mut TextEdit + 'static,
+) -> El {
+    let t = tok::theme(dark);
+    col()
+        .gap(4.0)
+        .child(
+            text("Secure note")
+                .font(SECTION_TITLE)
+                .color(t.text_secondary),
+        )
+        .child(
+            text_input(value, type_::BODY)
+                .key(key)
+                .label("Secure note")
+                .placeholder("Write your note", t.text_secondary)
+                .w(420.0)
+                .h(120.0)
+                .px(12.0)
+                .radius(8.0)
+                .fill(t.card)
+                .border(1.0, t.card_border)
+                .on_edit(on_edit)
+                .on_input_key(|s: &mut State, event: &KeyEvent, _tx: &mut Tx| {
+                    if matches!(event.key, Key::Escape) {
+                        if s.create.is_some() {
+                            cancel_create(s);
+                        } else {
+                            cancel_edit(s);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }),
+        )
+}
+
 fn create_form(s: &State, dark: bool) -> El {
     let t = tok::theme(dark);
     let Some(draft) = s.create.as_ref() else {
@@ -225,6 +266,13 @@ fn create_form(s: &State, dark: bool) -> El {
                     |state| &mut state.create.as_mut().unwrap().website,
                     submit_create,
                 ))
+        } else {
+            el()
+        })
+        .child(if draft.item_type == 2 {
+            notes_input(&draft.notes, "create-notes", dark, |state| {
+                &mut state.create.as_mut().unwrap().notes
+            })
         } else {
             el()
         })
@@ -338,6 +386,13 @@ fn edit_form(s: &State, dark: bool) -> El {
                     },
                 ),
         )
+        .child(if draft.item_type == 2 {
+            notes_input(&draft.notes, "edit-notes", dark, |state| {
+                &mut state.edit.as_mut().unwrap().notes
+            })
+        } else {
+            el()
+        })
         .child(
             row()
                 .gap(8.0)

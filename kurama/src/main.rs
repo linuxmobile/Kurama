@@ -94,6 +94,8 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                         | "create-username"
                         | "create-password"
                         | "create-website"
+                        | "create-notes"
+                        | "edit-notes"
                 )
             );
             if typing {
@@ -373,6 +375,14 @@ mod tests {
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
+        assert!(rt.find("create-notes").is_some(), "missing notes field");
+        rt.state
+            .create
+            .as_mut()
+            .unwrap()
+            .notes
+            .replace_text("Keep this private");
+        rt.frame(1.0 / 60.0);
         let (x, y) = rt.find("create-favorite").expect("favorite button");
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
@@ -396,9 +406,10 @@ mod tests {
         assert!(rt.state.create.is_none());
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            crate::backend::Request::CreateItem { name, item_type, favorite, folder_id, .. }
+            crate::backend::Request::CreateItem { name, item_type, favorite, folder_id, notes, .. }
                 if name == "Recovery sheet" && item_type == 2 && favorite
                     && folder_id.as_deref() == Some("development")
+                    && notes.as_ref().map(backend::Secret::as_str) == Some("Keep this private")
         )));
     }
 
