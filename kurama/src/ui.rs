@@ -3,7 +3,10 @@ use rune::{col, el, icon, row, text, text_input, Color, Cx, El, GrowthSpec, Scro
 
 use crate::backend::{Request, VaultRow};
 use crate::icons;
-use crate::state::{dispatch, submit_quick_unlock, submit_search, submit_unlock, Category, State};
+use crate::state::{
+    dispatch, open_trash, select_category, select_folder, submit_quick_unlock, submit_search,
+    submit_unlock, Category, Location, State,
+};
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
 };
@@ -166,7 +169,7 @@ fn sidebar(s: &State, dark: bool) -> El {
                 } else {
                     Color::TRANSPARENT
                 })
-                .on_press(move |s: &mut State| s.category = category)
+                .on_press(move |s: &mut State| select_category(s, category))
                 .child(
                     row()
                         .w_full()
@@ -183,6 +186,81 @@ fn sidebar(s: &State, dark: bool) -> El {
         );
     }
 
+    nav = nav.child(
+        text("FOLDERS")
+            .key("folders-label")
+            .font(SECTION_TITLE)
+            .color(t.text_secondary)
+            .padding(8.0),
+    );
+    let mut folders = col()
+        .key("folder-list")
+        .gap(2.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .shrink()
+        .min_h(0.0);
+    if s.folders.is_empty() {
+        folders = folders.child(
+            text("No folders")
+                .font(META)
+                .color(t.text_secondary)
+                .padding(10.0),
+        );
+    }
+    for folder in &s.folders {
+        let active = s.location != Location::Trash && s.folder.as_deref() == Some(folder.as_str());
+        let target = folder.clone();
+        folders = folders.child(
+            el().key(format!("folder-{folder}"))
+                .h(30.0)
+                .px(10.0)
+                .radius(8.0)
+                .role("button")
+                .label(folder.clone())
+                .checked(active)
+                .focusable(true)
+                .fill(if active {
+                    selected_row(dark)
+                } else {
+                    Color::TRANSPARENT
+                })
+                .on_press(move |s: &mut State| select_folder(s, target.clone()))
+                .child(
+                    text(folder.clone())
+                        .font(type_::LABEL)
+                        .color(if active { accent(dark) } else { t.text })
+                        .truncate(),
+                ),
+        );
+    }
+    nav = nav.child(folders).child(
+        el().key("trash-nav")
+            .h(34.0)
+            .px(10.0)
+            .radius(8.0)
+            .role("button")
+            .label("Trash")
+            .checked(s.location == Location::Trash)
+            .focusable(true)
+            .fill(if s.location == Location::Trash {
+                selected_row(dark)
+            } else {
+                Color::TRANSPARENT
+            })
+            .on_press(|s: &mut State| open_trash(s))
+            .child(
+                text("Trash")
+                    .font(type_::LABEL)
+                    .color(if s.location == Location::Trash {
+                        accent(dark)
+                    } else {
+                        t.text
+                    }),
+            ),
+    );
+
     nav.child(el().grow(1.0)).child(
         text("Kurama · Rune")
             .font(META)
@@ -194,7 +272,13 @@ fn sidebar(s: &State, dark: bool) -> El {
 fn item_list(s: &State, dark: bool) -> El {
     let t = tok::theme(dark);
     let visible_count = s.visible_indices().len();
-    let version = (s.rows_version(), s.query.text.clone(), s.category);
+    let version = (
+        s.rows_version(),
+        s.query.text.clone(),
+        s.category,
+        s.location,
+        s.folder.clone(),
+    );
     let list = col()
         .key("item-rows")
         .w_full()
@@ -226,6 +310,13 @@ fn item_list(s: &State, dark: bool) -> El {
         el()
     };
 
+    let title = if s.location == Location::Trash {
+        "Trash"
+    } else if let Some(folder) = &s.folder {
+        folder.as_str()
+    } else {
+        s.category.label()
+    };
     col()
         .key("items")
         .w(292.0)
@@ -240,7 +331,7 @@ fn item_list(s: &State, dark: bool) -> El {
                 .px(14.0)
                 .center_y()
                 .child(
-                    text(s.category.label())
+                    text(title.to_owned())
                         .font(SECTION_TITLE)
                         .color(t.text)
                         .grow(1.0),

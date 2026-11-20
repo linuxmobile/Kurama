@@ -49,6 +49,7 @@ fn main() -> ExitCode {
             ("stress", state::scene_stress),
             ("locked", state::scene_locked),
             ("disconnected", state::scene_disconnected),
+            ("trash", state::scene_trash),
         ],
         setup: Some(state::setup),
         poll: Some(state::poll),
@@ -85,6 +86,8 @@ mod tests {
             "root",
             "search",
             "sidebar",
+            "folder-Work",
+            "trash-nav",
             "items",
             "item-1",
             "item-icon-login-1",
@@ -104,6 +107,14 @@ mod tests {
         assert!(rt.find("unlock-password").is_some());
         assert!(rt.find("unlock-button").is_some());
         assert!(rt.find("quick-unlock-button").is_some());
+        assert!(rt.find("item-1").is_none());
+    }
+
+    #[test]
+    fn trash_scene_shows_deleted_items() {
+        let mut rt = runtime(state::scene_trash);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("item-trash-1").is_some());
         assert!(rt.find("item-1").is_none());
     }
 

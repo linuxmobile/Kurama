@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use rune::{edit::TextEdit, Tx, Waker};
@@ -52,12 +53,21 @@ impl Category {
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum Location {
+    Vault,
+    Trash,
+}
+
 pub struct State {
     pub snapshot: Snapshot,
     pub rows: Vec<VaultRow>,
     pub query: TextEdit,
     pub password: TextEdit,
     pub category: Category,
+    pub location: Location,
+    pub folder: Option<String>,
+    pub folders: Vec<String>,
     pub selected: Option<String>,
     pub busy: bool,
     pub notice: Option<String>,
@@ -79,6 +89,9 @@ impl Default for State {
             query: TextEdit::new(""),
             password: TextEdit::new("").secure(),
             category: Category::All,
+            location: Location::Vault,
+            folder: None,
+            folders: Vec::new(),
             selected: None,
             busy: true,
             notice: None,
@@ -99,6 +112,8 @@ struct VisibleCache {
     version: u64,
     query: String,
     category: Category,
+    location: Location,
+    folder: Option<String>,
     indices: Vec<usize>,
 }
 
@@ -109,6 +124,8 @@ impl State {
             if cache.version == self.rows_version
                 && cache.query == query
                 && cache.category == self.category
+                && cache.location == self.location
+                && cache.folder == self.folder
             {
                 return cache.indices.clone();
             }
@@ -119,6 +136,11 @@ impl State {
             .iter()
             .enumerate()
             .filter(|(_, item)| self.category.matches(item))
+            .filter(|(_, item)| {
+                self.folder
+                    .as_ref()
+                    .is_none_or(|folder| folder == &item.folder)
+            })
             .filter(|(_, item)| {
                 query.is_empty()
                     || item.name.to_lowercase().contains(&query)
@@ -131,6 +153,8 @@ impl State {
             version: self.rows_version,
             query,
             category: self.category,
+            location: self.location,
+            folder: self.folder.clone(),
             indices: indices.clone(),
         });
         indices
@@ -164,6 +188,61 @@ pub fn dispatch(state: &mut State, request: Request) {
     }
     state.busy = false;
     state.notice = Some("Backend worker is unavailable.".to_owned());
+}
+
+pub fn select_category(state: &mut State, category: Category) {
+    let left_trash = leave_trash(state);
+    state.category = category;
+    state.folder = None;
+    if left_trash {
+        dispatch(state, Request::Refresh);
+    }
+}
+
+pub fn select_folder(state: &mut State, folder: String) {
+    let left_trash = leave_trash(state);
+    state.category = Category::All;
+    state.folder = Some(folder);
+    if left_trash {
+        dispatch(state, Request::Refresh);
+    }
+}
+
+pub fn open_trash(state: &mut State) {
+    if state.location == Location::Trash {
+        return;
+    }
+    state.location = Location::Trash;
+    state.category = Category::All;
+    state.folder = None;
+    state.query.clear();
+    state.rows.clear();
+    state.selected = None;
+    state.bump_rows_version();
+    dispatch(state, Request::Trash);
+}
+
+fn leave_trash(state: &mut State) -> bool {
+    if state.location != Location::Trash {
+        return false;
+    }
+    state.location = Location::Vault;
+    state.folder = None;
+    state.query.clear();
+    state.rows.clear();
+    state.selected = None;
+    state.bump_rows_version();
+    true
+}
+
+fn folders_from(items: &[VaultRow]) -> Vec<String> {
+    let mut folders = BTreeSet::new();
+    for item in items {
+        if !item.folder.is_empty() {
+            folders.insert(item.folder.clone());
+        }
+    }
+    folders.into_iter().collect()
 }
 
 fn send_quiet(state: &State, request: Request) {
@@ -225,20 +304,39 @@ fn apply(state: &mut State, event: Event) {
         Event::Snapshot(snapshot) => {
             let changed_vault =
                 (state.snapshot.status == "unlocked") != (snapshot.status == "unlocked");
-            state.rows = snapshot.items.clone();
-            state.bump_rows_version();
+            let items = snapshot.items.clone();
             state.snapshot = snapshot;
-            state.notice = None;
+            state.folders = folders_from(&items);
             if changed_vault {
+                state.location = Location::Vault;
+                state.folder = None;
                 state.selected = None;
                 state.query.clear();
                 state.password.replace_text("");
             }
+            if state.location != Location::Trash {
+                state.rows = items;
+                state.bump_rows_version();
+            }
+            state.notice = None;
             if state.selected.is_none() {
                 state.selected = state.rows.first().map(|item| item.id.clone());
             }
         }
         Event::Items(items) => {
+            if state.location == Location::Trash {
+                return;
+            }
+            state.rows = items;
+            state.bump_rows_version();
+            if state.selected.is_none() {
+                state.selected = state.rows.first().map(|item| item.id.clone());
+            }
+        }
+        Event::Trash(items) => {
+            if state.location != Location::Trash {
+                return;
+            }
             state.rows = items;
             state.bump_rows_version();
             if state.selected.is_none() {
@@ -276,6 +374,9 @@ fn apply(state: &mut State, event: Event) {
 }
 
 pub fn submit_search(state: &mut State, _tx: &mut Tx) {
+    if state.location == Location::Trash {
+        return;
+    }
     let query = state.query.text.trim().to_owned();
     dispatch(state, Request::Search(query));
 }
@@ -315,6 +416,7 @@ pub fn scene_populated(state: &mut State) {
         items_count: 4,
     };
     state.rows = fixtures();
+    state.folders = folders_from(&state.rows);
     state.bump_rows_version();
     state.snapshot.items = state.rows.clone();
     state.selected = state.rows.first().map(|item| item.id.clone());
@@ -357,6 +459,24 @@ pub fn scene_disconnected(state: &mut State) {
     state.notice = Some("Kurama backend is not running.".to_owned());
 }
 
+pub fn scene_trash(state: &mut State) {
+    scene_populated(state);
+    state.location = Location::Trash;
+    state.rows = vec![VaultRow {
+        id: "trash-1".to_owned(),
+        name: "Old recovery sheet".to_owned(),
+        subtitle: String::new(),
+        type_name: "note".to_owned(),
+        favorite: false,
+        folder: "Personal".to_owned(),
+        updated: "2026-01-01T00:00:00Z".to_owned(),
+    }];
+    state.snapshot.items = state.rows.clone();
+    state.snapshot.items_count = state.rows.len();
+    state.selected = state.rows.first().map(|item| item.id.clone());
+    state.bump_rows_version();
+}
+
 fn fixtures() -> Vec<VaultRow> {
     [
         (
@@ -396,6 +516,67 @@ fn fixtures() -> Vec<VaultRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_selection_filters_rows() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        assert_eq!(state.folders, vec!["Development", "Personal", "Work"]);
+
+        select_folder(&mut state, "Work".to_owned());
+        assert_eq!(state.visible_indices(), vec![1]);
+
+        select_category(&mut state, Category::Logins);
+        assert_eq!(state.folder, None);
+        assert_eq!(state.visible_indices(), vec![0, 1]);
+    }
+
+    #[test]
+    fn trash_navigation_switches_datasets() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+
+        open_trash(&mut state);
+        assert_eq!(state.location, Location::Trash);
+        assert!(rx
+            .try_iter()
+            .any(|request| matches!(request, Request::Trash)));
+        apply(
+            &mut state,
+            Event::Trash(vec![VaultRow {
+                id: "trash-1".to_owned(),
+                folder: "Personal".to_owned(),
+                ..VaultRow::default()
+            }]),
+        );
+        assert_eq!(state.visible_indices(), vec![0]);
+
+        select_folder(&mut state, "Work".to_owned());
+        assert_eq!(state.location, Location::Vault);
+        assert!(rx
+            .try_iter()
+            .any(|request| matches!(request, Request::Refresh)));
+        apply(&mut state, Event::Items(fixtures()));
+        assert_eq!(state.visible_indices(), vec![1]);
+    }
+
+    #[test]
+    fn snapshot_does_not_overwrite_open_trash() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        state.location = Location::Trash;
+        let mut snapshot = state.snapshot.clone();
+        snapshot.items = vec![VaultRow {
+            id: "vault-1".to_owned(),
+            ..VaultRow::default()
+        }];
+
+        apply(&mut state, Event::Snapshot(snapshot));
+        assert_eq!(state.location, Location::Trash);
+        assert!(state.rows.iter().all(|item| item.id != "vault-1"));
+    }
 
     #[test]
     fn filter_by_category_and_search_text() {

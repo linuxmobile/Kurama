@@ -53,6 +53,7 @@ pub struct Approval {
 #[derive(Clone, Debug)]
 pub enum Request {
     Refresh,
+    Trash,
     Search(String),
     Sync,
     Lock,
@@ -91,6 +92,7 @@ impl Drop for Secret {
 pub enum Event {
     Snapshot(Snapshot),
     Items(Vec<VaultRow>),
+    Trash(Vec<VaultRow>),
     Notices { cursor: u64, notices: Vec<Notice> },
     Approvals(Vec<Approval>),
     Error(String),
@@ -111,6 +113,12 @@ pub fn perform(request: Request) -> Event {
             Ok(items) => Event::Items(items),
             Err(error) => Event::Error(error),
         },
+        Request::Trash => {
+            match call(json!({ "action": "trash" })).and_then(|response| trash_rows(&response)) {
+                Ok(items) => Event::Trash(items),
+                Err(error) => Event::Error(error),
+            }
+        }
         Request::Sync => match call(json!({ "action": "sync" })) {
             Ok(_) => match snapshot() {
                 Ok(snapshot) => Event::Snapshot(snapshot),
@@ -204,6 +212,13 @@ fn rows(response: &Value) -> Result<Vec<VaultRow>, String> {
         return Err("Unexpected item list from backend".to_owned());
     };
     Ok(values.iter().filter_map(row).collect())
+}
+
+fn trash_rows(response: &Value) -> Result<Vec<VaultRow>, String> {
+    let values = response
+        .get("items")
+        .ok_or("Unexpected Trash response".to_owned())?;
+    rows(values)
 }
 
 fn row(value: &Value) -> Option<VaultRow> {
@@ -339,6 +354,25 @@ mod tests {
         let debug = format!("{:?}", items);
         assert!(!debug.contains("super-secret"));
         assert!(!debug.contains("private note"));
+    }
+
+    #[test]
+    fn trash_rows_keep_deleted_item_metadata() {
+        let response = json!({
+            "ok": true,
+            "items": [{
+                "id": "trash-1",
+                "name": "Old item",
+                "type_name": "note",
+                "folder_name": "Personal",
+                "login": { "password": "super-secret" }
+            }]
+        });
+        let items = trash_rows(&response).unwrap();
+        assert_eq!(items[0].id, "trash-1");
+        assert_eq!(items[0].folder, "Personal");
+        let debug = format!("{:?}", items);
+        assert!(!debug.contains("super-secret"));
     }
 
     #[test]
