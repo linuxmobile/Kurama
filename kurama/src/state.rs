@@ -121,6 +121,40 @@ pub struct AuthDraft {
     pub new_device_code: TextEdit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeneratorTarget {
+    None,
+    Create,
+    Edit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeneratorOption {
+    Uppercase,
+    Lowercase,
+    Numbers,
+    Special,
+    AvoidAmbiguous,
+    Capitalize,
+}
+
+pub struct GeneratorDraft {
+    pub passphrase: bool,
+    pub length: usize,
+    pub words: usize,
+    pub separator: TextEdit,
+    pub capitalize: bool,
+    pub uppercase: bool,
+    pub lowercase: bool,
+    pub numbers: bool,
+    pub special: bool,
+    pub avoid_ambiguous: bool,
+    pub value: TextEdit,
+    pub entropy: f64,
+    pub kind: String,
+    pub target: GeneratorTarget,
+}
+
 pub struct IdentityDraft {
     pub first_name: TextEdit,
     pub last_name: TextEdit,
@@ -177,6 +211,7 @@ pub struct State {
     pub edit: Option<EditDraft>,
     pub create: Option<CreateDraft>,
     pub auth: Option<AuthDraft>,
+    pub generator: Option<GeneratorDraft>,
     pub revealed: Option<String>,
     pub totp: Option<TotpMeta>,
     pub busy: bool,
@@ -212,6 +247,7 @@ impl Default for State {
             edit: None,
             create: None,
             auth: None,
+            generator: None,
             revealed: None,
             totp: None,
             busy: true,
@@ -620,6 +656,140 @@ pub fn logout(state: &mut State) {
     state.auth = None;
     state.form_error = None;
     dispatch(state, Request::Logout);
+}
+
+fn empty_generator(target: GeneratorTarget) -> GeneratorDraft {
+    GeneratorDraft {
+        passphrase: false,
+        length: 20,
+        words: 5,
+        separator: TextEdit::new("-"),
+        capitalize: false,
+        uppercase: true,
+        lowercase: true,
+        numbers: true,
+        special: true,
+        avoid_ambiguous: false,
+        value: TextEdit::new("").secure(),
+        entropy: 0.0,
+        kind: "password".to_owned(),
+        target,
+    }
+}
+
+pub fn open_generator(state: &mut State, target: GeneratorTarget) {
+    state.generator = Some(empty_generator(target));
+    state.form_error = None;
+}
+
+pub fn close_generator(state: &mut State) {
+    state.generator = None;
+}
+
+pub fn set_generator_passphrase(state: &mut State, passphrase: bool) {
+    if let Some(generator) = state.generator.as_mut() {
+        generator.passphrase = passphrase;
+    }
+}
+
+pub fn adjust_generator_length(state: &mut State, delta: isize) {
+    if let Some(generator) = state.generator.as_mut() {
+        generator.length = generator.length.saturating_add_signed(delta).clamp(4, 128);
+    }
+}
+
+pub fn adjust_generator_words(state: &mut State, delta: isize) {
+    if let Some(generator) = state.generator.as_mut() {
+        generator.words = generator.words.saturating_add_signed(delta).clamp(3, 12);
+    }
+}
+
+pub fn toggle_generator_option(state: &mut State, option: GeneratorOption) {
+    if let Some(generator) = state.generator.as_mut() {
+        match option {
+            GeneratorOption::Uppercase => generator.uppercase = !generator.uppercase,
+            GeneratorOption::Lowercase => generator.lowercase = !generator.lowercase,
+            GeneratorOption::Numbers => generator.numbers = !generator.numbers,
+            GeneratorOption::Special => generator.special = !generator.special,
+            GeneratorOption::AvoidAmbiguous => {
+                generator.avoid_ambiguous = !generator.avoid_ambiguous
+            }
+            GeneratorOption::Capitalize => generator.capitalize = !generator.capitalize,
+        }
+    }
+}
+
+pub fn generate_password(state: &mut State) {
+    let Some(generator) = state.generator.as_ref() else {
+        return;
+    };
+    let request = Request::GeneratePassword {
+        passphrase: generator.passphrase,
+        length: generator.length,
+        words: generator.words,
+        separator: generator.separator.text.clone(),
+        capitalize: generator.capitalize,
+        uppercase: generator.uppercase,
+        lowercase: generator.lowercase,
+        numbers: generator.numbers,
+        special: generator.special,
+        avoid_ambiguous: generator.avoid_ambiguous,
+    };
+    state.form_error = None;
+    dispatch(state, request);
+}
+
+pub fn copy_generated(state: &mut State) {
+    let Some(generator) = state.generator.as_ref() else {
+        return;
+    };
+    let value = generator.value.text.clone();
+    if value.is_empty() {
+        state.form_error = Some("Generate a value first.".to_owned());
+        return;
+    }
+    let label = if generator.passphrase {
+        "Passphrase"
+    } else {
+        "Password"
+    }
+    .to_owned();
+    state.form_error = None;
+    dispatch(
+        state,
+        Request::CopyText {
+            text: Secret::new(value),
+            label,
+        },
+    );
+}
+
+pub fn use_generated(state: &mut State) {
+    let Some(generator) = state.generator.as_ref() else {
+        return;
+    };
+    let value = generator.value.text.clone();
+    let target = generator.target;
+    if value.is_empty() {
+        state.form_error = Some("Generate a value first.".to_owned());
+        return;
+    }
+    match target {
+        GeneratorTarget::Create => {
+            if let Some(draft) = state.create.as_mut() {
+                draft.password.replace_text(&value);
+            }
+        }
+        GeneratorTarget::Edit => {
+            if let Some(draft) = state.edit.as_mut() {
+                draft.password.replace_text(&value);
+            }
+        }
+        GeneratorTarget::None => {}
+    }
+    state.generator = None;
+    state.form_error = None;
+    state.notice = Some("Generated value inserted.".to_owned());
 }
 
 fn prefilled_uri_draft(state: &State, item_id: &str) -> Vec<TextEdit> {
@@ -1422,6 +1592,17 @@ fn apply(state: &mut State, event: Event) {
             }
         }
         Event::Auth(outcome) => apply_auth_outcome(state, outcome),
+        Event::Generated {
+            value,
+            entropy,
+            kind,
+        } => {
+            if let Some(generator) = state.generator.as_mut() {
+                generator.value.replace_text(value.as_str());
+                generator.entropy = entropy;
+                generator.kind = kind;
+            }
+        }
         Event::Items(items) => {
             if state.location == Location::Trash {
                 return;
@@ -1808,6 +1989,18 @@ pub fn scene_account_fido2(state: &mut State) {
         auth.email.replace_text("user@example.com");
         auth.password.replace_text("master-secret");
     }
+}
+
+pub fn scene_generator(state: &mut State) {
+    scene_populated(state);
+    open_generator(state, GeneratorTarget::None);
+    state
+        .generator
+        .as_mut()
+        .unwrap()
+        .value
+        .replace_text("Co4rect-Horse-Battery");
+    state.generator.as_mut().unwrap().entropy = 78.4;
 }
 
 pub fn scene_create_card(state: &mut State) {

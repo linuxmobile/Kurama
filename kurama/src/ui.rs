@@ -8,14 +8,17 @@ use rune::{
 use crate::backend::{revealed_value, totp_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
-    add_create_field, add_create_uri, add_edit_uri, cancel_create, cancel_edit, copy_field,
-    cycle_create_field_type, cycle_create_folder, cycle_edit_folder, delete_item, dispatch,
-    folder_label, logout, move_selection, open_attachment, open_trash, remove_create_field,
-    remove_create_uri, remove_edit_uri, restore_item, select_category, select_folder, select_item,
-    send_two_factor_email, set_auth_mode, set_create_type, set_favorite, start_edit, submit_auth,
-    submit_create, submit_edit, submit_fido2, submit_quick_unlock, submit_search, submit_unlock,
-    toggle_create_favorite, toggle_create_field_value, toggle_edit_favorite, toggle_reveal,
-    AuthMode, CardDraft, Category, CustomFieldDraft, IdentityDraft, Location, SshDraft, State,
+    add_create_field, add_create_uri, add_edit_uri, adjust_generator_length,
+    adjust_generator_words, cancel_create, cancel_edit, close_generator, copy_field,
+    copy_generated, cycle_create_field_type, cycle_create_folder, cycle_edit_folder, delete_item,
+    dispatch, folder_label, generate_password, logout, move_selection, open_attachment,
+    open_generator, open_trash, remove_create_field, remove_create_uri, remove_edit_uri,
+    restore_item, select_category, select_folder, select_item, send_two_factor_email,
+    set_auth_mode, set_create_type, set_favorite, set_generator_passphrase, start_edit,
+    submit_auth, submit_create, submit_edit, submit_fido2, submit_quick_unlock, submit_search,
+    submit_unlock, toggle_create_favorite, toggle_create_field_value, toggle_edit_favorite,
+    toggle_generator_option, toggle_reveal, use_generated, AuthMode, CardDraft, Category,
+    CustomFieldDraft, GeneratorOption, GeneratorTarget, IdentityDraft, Location, SshDraft, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -27,7 +30,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let connected = !s.snapshot.status.is_empty();
     let unlocked = s.snapshot.status == "unlocked";
 
-    let content = if s.help {
+    let content = if s.generator.is_some() {
+        generator(s, dark)
+    } else if s.help {
         help(s, dark)
     } else if s.create.is_some() {
         create_form(s, dark)
@@ -786,6 +791,12 @@ fn create_form(s: &State, dark: bool) -> El {
                     |state| &mut state.create.as_mut().unwrap().password,
                     submit_create,
                 ))
+                .child(action(
+                    "create-generate",
+                    "Generate password",
+                    dark,
+                    |state| open_generator(state, GeneratorTarget::Create),
+                ))
                 .child(create_uri_fields(&draft.uris, dark))
         } else {
             el()
@@ -921,6 +932,12 @@ fn edit_form(s: &State, dark: bool) -> El {
                     dark,
                     |state| &mut state.edit.as_mut().unwrap().password,
                     submit_edit,
+                ))
+                .child(action(
+                    "edit-generate",
+                    "Generate password",
+                    dark,
+                    |state| open_generator(state, GeneratorTarget::Edit),
                 ))
                 .child(edit_uri_fields(&draft.uris, dark))
         } else {
@@ -1065,6 +1082,9 @@ fn top_bar(s: &State, dark: bool) -> El {
             },
         ))
         .child(action("sync", "Sync", dark, |s| dispatch(s, Request::Sync)))
+        .child(action("generate", "Generate", dark, |s| {
+            open_generator(s, GeneratorTarget::None)
+        }))
         .child(action("?", "?", dark, |s| s.help = !s.help))
         .child(action("lock", "Lock", dark, |s| dispatch(s, Request::Lock)))
         .child(if s.snapshot.status == "unlocked" {
@@ -1706,6 +1726,209 @@ fn status_bar(s: &State, dark: bool) -> El {
                 .truncate(),
         )
         .child(text(server).font(META).color(t.text_secondary).truncate())
+}
+
+fn generator_toggle(
+    key: &str,
+    label: &str,
+    active: bool,
+    dark: bool,
+    on_press: fn(&mut State),
+) -> El {
+    action(
+        key,
+        if active {
+            format!("✓ {label}")
+        } else {
+            label.to_owned()
+        },
+        dark,
+        on_press,
+    )
+}
+
+fn generator(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let Some(g) = s.generator.as_ref() else {
+        return el();
+    };
+    let header = text("Generate a strong value with the Kurama daemon.")
+        .font(ROW_SUBTITLE)
+        .color(t.text_secondary);
+
+    let modes = row()
+        .key("generator-modes")
+        .gap(12.0)
+        .child(action(
+            "generator-mode-password",
+            if g.passphrase {
+                "Password"
+            } else {
+                "• Password"
+            },
+            dark,
+            |state| set_generator_passphrase(state, false),
+        ))
+        .child(action(
+            "generator-mode-passphrase",
+            if g.passphrase {
+                "• Passphrase"
+            } else {
+                "Passphrase"
+            },
+            dark,
+            |state| set_generator_passphrase(state, true),
+        ));
+
+    let mut body = col().child(modes);
+    if g.passphrase {
+        body = body
+            .child(
+                row()
+                    .key("generator-words")
+                    .gap(12.0)
+                    .child(action("generator-words-decrease", "−", dark, |state| {
+                        adjust_generator_words(state, -1)
+                    }))
+                    .child(
+                        text(format!("Words: {}", g.words))
+                            .key("generator-words-value")
+                            .font(ROW_TITLE)
+                            .color(t.text),
+                    )
+                    .child(action("generator-words-increase", "+", dark, |state| {
+                        adjust_generator_words(state, 1)
+                    })),
+            )
+            .child(form_field(
+                "generator-separator",
+                "Separator",
+                "-",
+                &g.separator,
+                dark,
+                |state| &mut state.generator.as_mut().unwrap().separator,
+                generate_password,
+            ))
+            .child(generator_toggle(
+                "generator-capitalize",
+                "Capitalize words",
+                g.capitalize,
+                dark,
+                |state| toggle_generator_option(state, GeneratorOption::Capitalize),
+            ));
+    } else {
+        body = body
+            .child(
+                row()
+                    .key("generator-length")
+                    .gap(12.0)
+                    .child(action("generator-length-decrease", "−", dark, |state| {
+                        adjust_generator_length(state, -1)
+                    }))
+                    .child(
+                        text(format!("Length: {}", g.length))
+                            .key("generator-length-value")
+                            .font(ROW_TITLE)
+                            .color(t.text),
+                    )
+                    .child(action("generator-length-increase", "+", dark, |state| {
+                        adjust_generator_length(state, 1)
+                    })),
+            )
+            .child(
+                row()
+                    .key("generator-options")
+                    .gap(8.0)
+                    .child(generator_toggle(
+                        "generator-uppercase",
+                        "A-Z",
+                        g.uppercase,
+                        dark,
+                        |state| toggle_generator_option(state, GeneratorOption::Uppercase),
+                    ))
+                    .child(generator_toggle(
+                        "generator-lowercase",
+                        "a-z",
+                        g.lowercase,
+                        dark,
+                        |state| toggle_generator_option(state, GeneratorOption::Lowercase),
+                    ))
+                    .child(generator_toggle(
+                        "generator-numbers",
+                        "0-9",
+                        g.numbers,
+                        dark,
+                        |state| toggle_generator_option(state, GeneratorOption::Numbers),
+                    ))
+                    .child(generator_toggle(
+                        "generator-special",
+                        "!@#",
+                        g.special,
+                        dark,
+                        |state| toggle_generator_option(state, GeneratorOption::Special),
+                    ))
+                    .child(generator_toggle(
+                        "generator-avoid-ambiguous",
+                        "Avoid ambiguous",
+                        g.avoid_ambiguous,
+                        dark,
+                        |state| toggle_generator_option(state, GeneratorOption::AvoidAmbiguous),
+                    )),
+            );
+    }
+
+    body = body.child(action(
+        "generator-generate",
+        "Generate",
+        dark,
+        generate_password,
+    ));
+    if !g.value.text.is_empty() {
+        let result = text_input(&g.value, type_::BODY)
+            .key("generator-value")
+            .label("Generated value")
+            .secure()
+            .revealed(true)
+            .color(t.text)
+            .w(480.0)
+            .h(36.0)
+            .padding(10.0)
+            .radius(8.0)
+            .fill(t.card)
+            .border(1.0, t.card_border)
+            .on_edit(|state: &mut State| &mut state.generator.as_mut().unwrap().value);
+        body = body
+            .child(
+                text("Generated value")
+                    .font(SECTION_TITLE)
+                    .color(t.text_secondary),
+            )
+            .child(result)
+            .child(
+                text(format!("{:.1} bits of entropy", g.entropy))
+                    .key("generator-entropy")
+                    .font(META)
+                    .color(t.text_secondary),
+            );
+    }
+
+    let mut footer = row()
+        .gap(12.0)
+        .child(action("generator-copy", "Copy", dark, copy_generated));
+    if g.target != GeneratorTarget::None {
+        footer = footer.child(action("generator-use", "Use in form", dark, use_generated));
+    }
+    footer = footer.child(action("generator-close", "Close", dark, close_generator));
+
+    form_panel(
+        "generator-form",
+        "Password generator",
+        dark,
+        header,
+        body,
+        footer,
+        s.form_error.as_deref(),
+    )
 }
 
 fn account(s: &State, dark: bool) -> El {

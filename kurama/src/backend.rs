@@ -288,6 +288,22 @@ pub enum Request {
         email: String,
         password: Secret,
     },
+    GeneratePassword {
+        passphrase: bool,
+        length: usize,
+        words: usize,
+        separator: String,
+        capitalize: bool,
+        uppercase: bool,
+        lowercase: bool,
+        numbers: bool,
+        special: bool,
+        avoid_ambiguous: bool,
+    },
+    CopyText {
+        text: Secret,
+        label: String,
+    },
     Unlock {
         password: Secret,
     },
@@ -414,6 +430,11 @@ pub enum Event {
     },
     Approvals(Vec<Approval>),
     Auth(AuthOutcome),
+    Generated {
+        value: Secret,
+        entropy: f64,
+        kind: String,
+    },
     Error(String),
 }
 
@@ -727,6 +748,74 @@ pub fn perform(request: Request) -> Event {
                         .unwrap_or("Backend request failed")
                         .to_owned(),
                 ),
+                Err(error) => Event::Error(error),
+            }
+        }
+        Request::GeneratePassword {
+            passphrase,
+            length,
+            words,
+            separator,
+            capitalize,
+            uppercase,
+            lowercase,
+            numbers,
+            special,
+            avoid_ambiguous,
+        } => {
+            let body = if passphrase {
+                json!({
+                    "action": "generate_password",
+                    "passphrase": true,
+                    "words": words,
+                    "separator": separator,
+                    "capitalize": capitalize
+                })
+            } else {
+                json!({
+                    "action": "generate_password",
+                    "length": length,
+                    "uppercase": uppercase,
+                    "lowercase": lowercase,
+                    "numbers": numbers,
+                    "special": special,
+                    "avoid_ambiguous": avoid_ambiguous
+                })
+            };
+            match call(body) {
+                Ok(response) => {
+                    let value = response
+                        .get("password")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned();
+                    if value.is_empty() {
+                        Event::Error("Password generator returned no value".to_owned())
+                    } else {
+                        Event::Generated {
+                            value: Secret::new(value),
+                            entropy: response
+                                .get("entropy")
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0),
+                            kind: response
+                                .get("type")
+                                .and_then(Value::as_str)
+                                .unwrap_or("password")
+                                .to_owned(),
+                        }
+                    }
+                }
+                Err(error) => Event::Error(error),
+            }
+        }
+        Request::CopyText { text, label } => {
+            match call(json!({
+                "action": "copy",
+                "text": text.as_str(),
+                "sensitive": true
+            })) {
+                Ok(_) => Event::Notice(format!("{label} copied to clipboard")),
                 Err(error) => Event::Error(error),
             }
         }
@@ -1324,6 +1413,17 @@ mod tests {
         let secret = Secret::new("hunter2".to_owned());
         let debug = format!("{:?}", secret);
         assert!(!debug.contains("hunter2"));
+        assert!(debug.contains("redacted"));
+    }
+
+    #[test]
+    fn copy_text_request_redacts_value() {
+        let request = Request::CopyText {
+            text: Secret::new("generated-secret".to_owned()),
+            label: "Password".to_owned(),
+        };
+        let debug = format!("{:?}", request);
+        assert!(!debug.contains("generated-secret"));
         assert!(debug.contains("redacted"));
     }
 

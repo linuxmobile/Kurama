@@ -59,6 +59,7 @@ fn main() -> ExitCode {
             ("create-ssh", state::scene_create_ssh),
             ("create-fields", state::scene_create_fields),
             ("create-uris", state::scene_create_uris),
+            ("generator", state::scene_generator),
         ],
         setup: Some(state::setup),
         poll: Some(state::poll),
@@ -83,6 +84,10 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         }
         Key::Escape if state.create.is_some() => {
             state::cancel_create(state);
+            true
+        }
+        Key::Escape if state.generator.is_some() => {
+            state::close_generator(state);
             true
         }
         Key::Down => state::move_selection(state, 1, tx),
@@ -123,6 +128,8 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                         | "create-private-key"
                         | "create-public-key"
                         | "create-fingerprint"
+                        | "generator-separator"
+                        | "generator-value"
                 )
             ) || focused.is_some_and(|key| {
                 key.starts_with("create-card")
@@ -131,6 +138,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                     || key.starts_with("create-field-value-")
                     || key.starts_with("create-uri-")
                     || key.starts_with("edit-uri-")
+                    || key.starts_with("account-")
             });
             if typing {
                 return false;
@@ -148,6 +156,10 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                     state.create = Some(state::start_create());
                     state.form_error = None;
                     tx.focus("create-name", true);
+                    true
+                }
+                "g" => {
+                    state::open_generator(state, state::GeneratorTarget::None);
                     true
                 }
                 "j" => state::move_selection(state, 1, tx),
@@ -185,6 +197,71 @@ mod tests {
                 scale: 1.0,
             },
         )
+    }
+
+    #[test]
+    fn generator_scene_shows_password_and_result_controls() {
+        let mut rt = runtime(state::scene_generator);
+        rt.frame(1.0 / 60.0);
+        for key in [
+            "generator-form",
+            "generator-modes",
+            "generator-length",
+            "generator-options",
+            "generator-generate",
+            "generator-value",
+            "generator-entropy",
+            "generator-copy",
+            "generator-close",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+    }
+
+    #[test]
+    fn generator_submits_selected_options() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_generator(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("generator-length-increase").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("generator-generate").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::GeneratePassword { length: 21, .. }
+        )));
+    }
+
+    #[test]
+    fn generator_inserts_value_into_create_form() {
+        let mut rt = runtime(state::scene_populated);
+        rt.state.create = Some(state::start_create());
+        state::open_generator(&mut rt.state, state::GeneratorTarget::Create);
+        rt.frame(1.0 / 60.0);
+        rt.state
+            .generator
+            .as_mut()
+            .unwrap()
+            .value
+            .replace_text("generated-secret");
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("generator-use").expect("use generated value");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.generator.is_none());
+        assert_eq!(
+            rt.state.create.as_ref().unwrap().password.text,
+            "generated-secret"
+        );
     }
 
     #[test]
