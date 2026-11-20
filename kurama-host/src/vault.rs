@@ -1925,6 +1925,50 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn requested_uris_uses_all_values_when_present() {
+        let options = ItemOptions {
+            uris: Some(vec![
+                " https://one.example ".to_owned(),
+                "  ".to_owned(),
+                "https://two.example".to_owned(),
+            ]),
+            website: Some("https://legacy.example".to_owned()),
+            ..ItemOptions::default()
+        };
+        assert_eq!(
+            requested_uris(&options),
+            Some(vec![
+                "https://one.example".to_owned(),
+                "https://two.example".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn requested_uris_falls_back_to_website() {
+        let options = ItemOptions {
+            website: Some(" https://legacy.example ".to_owned()),
+            ..ItemOptions::default()
+        };
+        assert_eq!(
+            requested_uris(&options),
+            Some(vec!["https://legacy.example".to_owned()])
+        );
+    }
+
+    #[test]
+    fn requested_uris_distinguishes_clear_from_absent() {
+        let clear = ItemOptions {
+            uris: Some(Vec::new()),
+            ..ItemOptions::default()
+        };
+        assert_eq!(requested_uris(&clear), Some(Vec::new()));
+
+        let absent = ItemOptions::default();
+        assert_eq!(requested_uris(&absent), None);
+    }
+
+    #[test]
     fn test_soft_lock_retains_key_and_quick_unlock_restores() {
         let dir = tempfile::tempdir().unwrap();
         let vault = seeded_vault(dir.path(), "master-pw");
@@ -3233,6 +3277,37 @@ pub struct IdentityFields {
     pub country: Option<String>,
 }
 
+fn requested_uris(options: &ItemOptions) -> Option<Vec<String>> {
+    if let Some(values) = &options.uris {
+        return Some(
+            values
+                .iter()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .collect(),
+        );
+    }
+    options.website.as_deref().map(|website| {
+        let website = website.trim();
+        (!website.is_empty())
+            .then(|| vec![website.to_owned()])
+            .unwrap_or_default()
+    })
+}
+
+fn encrypted_uris(key: &SymmetricCryptoKey, values: &[String]) -> Result<Value, String> {
+    let mut uris = Vec::with_capacity(values.len());
+    for value in values {
+        uris.push(json!({
+            "uri": key
+                .encrypt_string(value)
+                .map_err(|e| format!("Encryption failed: {e:?}"))?,
+            "match": null,
+        }));
+    }
+    Ok(Value::Array(uris))
+}
+
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ItemOptions {
     pub name: Option<String>,
@@ -3240,6 +3315,7 @@ pub struct ItemOptions {
     pub username: Option<String>,
     pub password: Option<String>,
     pub website: Option<String>,
+    pub uris: Option<Vec<String>>,
     pub notes: Option<String>,
     pub folder_id: Option<String>,
     pub favorite: Option<bool>,
@@ -3318,9 +3394,10 @@ impl VaultManager {
         });
         let login_username = options.username.as_deref().filter(|s| !s.is_empty());
         let login_password = options.password.as_deref().filter(|s| !s.is_empty());
+        let login_uris = requested_uris(options);
         if login_username.is_some()
             || login_password.is_some()
-            || options.website.as_deref().is_some_and(|s| !s.is_empty())
+            || login_uris.as_ref().is_some_and(|values| !values.is_empty())
         {
             let mut login = serde_json::Map::new();
             if let Some(username) = login_username {
@@ -3341,14 +3418,8 @@ impl VaultManager {
                     ),
                 );
             }
-            if let Some(website) = options.website.as_deref().filter(|s| !s.is_empty()) {
-                login.insert(
-                    "uris".to_string(),
-                    json!([{
-                        "uri": key.encrypt_string(website).map_err(|e| format!("Encryption failed: {e:?}"))?,
-                        "match": null,
-                    }]),
-                );
+            if let Some(values) = login_uris.as_ref().filter(|values| !values.is_empty()) {
+                login.insert("uris".to_string(), encrypted_uris(&key, values)?);
             }
             payload["login"] = Value::Object(login);
         }
@@ -3437,8 +3508,9 @@ impl VaultManager {
         if let Some(fields) = &options.fields {
             raw["fields"] = Value::Array(encrypted_custom_fields(&key, fields)?);
         }
+        let login_uris = requested_uris(options);
         let update_login =
-            options.username.is_some() || options.password.is_some() || options.website.is_some();
+            options.username.is_some() || options.password.is_some() || login_uris.is_some();
         if update_login {
             let login = raw["login"]
                 .as_object_mut()
@@ -3461,16 +3533,8 @@ impl VaultManager {
                     ),
                 );
             }
-            if let Some(website) = options.website.as_deref() {
-                let uris = if website.is_empty() {
-                    json!([])
-                } else {
-                    json!([{
-                        "uri": key.encrypt_string(website).map_err(|e| format!("Encryption failed: {e:?}"))?,
-                        "match": null,
-                    }])
-                };
-                login.insert("uris".to_string(), uris);
+            if let Some(values) = &login_uris {
+                login.insert("uris".to_string(), encrypted_uris(&key, values)?);
             }
         }
         let updated = client
