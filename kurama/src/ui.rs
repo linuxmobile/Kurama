@@ -174,7 +174,7 @@ fn settings(s: &State, dark: bool) -> El {
                                 .gap(3.0)
                                 .child(text("Settings").font(WINDOW_TITLE).color(t.text))
                                 .child(
-                                    text("Preferences for the app, vault, and Kurama daemon.")
+                                    text("Manage appearance, vault behavior, security, and account preferences.")
                                         .font(META)
                                         .color(t.text_secondary),
                                 ),
@@ -191,7 +191,6 @@ fn settings(s: &State, dark: bool) -> El {
                         .shrink()
                         .min_h(0.0)
                         .child(settings_sidebar(dark, s.settings_section))
-                        .child(el().w(1.0).fill(t.separator))
                         .child(
                             col()
                                 .key("settings-body")
@@ -216,8 +215,7 @@ fn settings_sidebar(dark: bool, active: SettingsSection) -> El {
         .w(190.0)
         .h_full()
         .gap(4.0)
-        .padding(14.0)
-        .fill(t.bg);
+        .padding(14.0);
     for section in SettingsSection::ALL {
         let selected = section == active;
         let label = section.label();
@@ -255,17 +253,7 @@ fn settings_sidebar(dark: bool, active: SettingsSection) -> El {
                 ),
         );
     }
-    rail.child(el().grow(1.0)).child(
-        col()
-            .gap(4.0)
-            .px(12.0)
-            .child(text("Kurama").font(type_::LABEL).color(t.text))
-            .child(
-                text("Daemon-backed vault")
-                    .font(META)
-                    .color(t.text_secondary),
-            ),
-    )
+    rail
 }
 
 fn settings_general(s: &State, dark: bool) -> El {
@@ -306,7 +294,7 @@ fn settings_general(s: &State, dark: bool) -> El {
         .child(settings_card(
             "settings-appearance-card",
             "Appearance",
-            "Choose how Kurama looks on this device.",
+            "Choose how the app looks on this device.",
             dark,
             col().gap(10.0).child(themes),
         ))
@@ -443,7 +431,7 @@ fn settings_security(s: &State, dark: bool) -> El {
             "Enabled, but the agent is not running."
         }
     } else {
-        "Expose vault SSH keys to the Kurama agent."
+        "Expose vault SSH keys to the running agent."
     };
 
     let mut confirm = row()
@@ -600,7 +588,7 @@ fn settings_account(s: &State, dark: bool) -> El {
         ))
         .child(settings_note(
             "settings-config-hint",
-            "Connection, certificate, and keyring options remain managed by `kurama config`.",
+            "Connection, certificate, and keyring options are managed outside the app.",
             dark,
         ))
 }
