@@ -1,5 +1,7 @@
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeSet;
+use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use rune::{edit::TextEdit, Tx, Waker};
@@ -274,6 +276,7 @@ pub fn setup(state: &mut State, wake: Waker) {
 }
 
 pub fn poll(state: &mut State, seconds: f64, _tx: &mut Tx) -> bool {
+    let before = visible_fingerprint(state);
     state.event_timer += seconds;
     if state.event_timer >= 1.0 {
         state.event_timer = 0.0;
@@ -295,7 +298,50 @@ pub fn poll(state: &mut State, seconds: f64, _tx: &mut Tx) -> bool {
     for event in queued {
         apply(state, event);
     }
-    true
+    visible_fingerprint(state) != before
+}
+
+fn visible_fingerprint(state: &State) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    state.snapshot.status.hash(&mut hasher);
+    state.snapshot.email.hash(&mut hasher);
+    state.snapshot.server.hash(&mut hasher);
+    state.snapshot.last_sync.hash(&mut hasher);
+    state.snapshot.items_count.hash(&mut hasher);
+    state.query.text.hash(&mut hasher);
+    state.busy.hash(&mut hasher);
+    state.notice.hash(&mut hasher);
+    state.dark_override.hash(&mut hasher);
+    if state.snapshot.status != "unlocked" {
+        state.snapshot.quick_unlock_ready.hash(&mut hasher);
+        return hasher.finish();
+    }
+    state.category.hash(&mut hasher);
+    state.location.hash(&mut hasher);
+    state.folder.hash(&mut hasher);
+    state.selected.hash(&mut hasher);
+    for folder in &state.folders {
+        folder.hash(&mut hasher);
+    }
+    for index in state.visible_indices() {
+        index.hash(&mut hasher);
+        let row = &state.rows[index];
+        row.id.hash(&mut hasher);
+        row.name.hash(&mut hasher);
+        row.subtitle.hash(&mut hasher);
+        row.type_name.hash(&mut hasher);
+        row.favorite.hash(&mut hasher);
+        row.folder.hash(&mut hasher);
+        row.updated.hash(&mut hasher);
+    }
+    for approval in &state.approvals {
+        approval.id.hash(&mut hasher);
+        approval.title.hash(&mut hasher);
+        approval.action.hash(&mut hasher);
+        approval.key_name.hash(&mut hasher);
+        approval.client.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn apply(state: &mut State, event: Event) {
@@ -576,6 +622,49 @@ mod tests {
         apply(&mut state, Event::Snapshot(snapshot));
         assert_eq!(state.location, Location::Trash);
         assert!(state.rows.iter().all(|item| item.id != "vault-1"));
+    }
+
+    #[test]
+    fn poll_only_reports_visible_changes() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        state.busy = false;
+        state.notice = None;
+        let (request_tx, _requests) = mpsc::channel();
+        state.requests = Some(request_tx);
+        let (event_tx, event_rx) = mpsc::channel();
+        state.events = Some(event_rx);
+        let mut tx = Tx::default();
+
+        event_tx
+            .send(Event::Notices {
+                cursor: 7,
+                notices: Vec::new(),
+            })
+            .unwrap();
+        assert!(!poll(&mut state, 0.0, &mut tx));
+        assert_eq!(state.event_cursor, 7);
+
+        state.snapshot.quick_unlock_ready = true;
+        event_tx
+            .send(Event::Notices {
+                cursor: 8,
+                notices: Vec::new(),
+            })
+            .unwrap();
+        assert!(!poll(&mut state, 0.0, &mut tx));
+
+        event_tx
+            .send(Event::Notices {
+                cursor: 9,
+                notices: vec![backend::Notice {
+                    kind: "status".to_owned(),
+                    message: "Vault unlocked".to_owned(),
+                    approval_id: None,
+                }],
+            })
+            .unwrap();
+        assert!(poll(&mut state, 0.0, &mut tx));
     }
 
     #[test]
