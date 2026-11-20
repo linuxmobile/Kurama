@@ -40,6 +40,89 @@ static ITEM: Icon = Icon {
     body: r#"<rect x="3" y="3" width="10" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.25"/>"#,
 };
 
+static ACTION_NEW: Icon = Icon {
+    name: "kurama-action-new",
+    view: 24.0,
+    body: r#"<path d="M5 12h14M12 5v14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_SUN: Icon = Icon {
+    name: "kurama-action-sun",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>"#,
+};
+
+static ACTION_MOON: Icon = Icon {
+    name: "kurama-action-moon",
+    view: 24.0,
+    body: r#"<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_SENDS: Icon = Icon {
+    name: "kurama-action-sends",
+    view: 24.0,
+    body: r#"<path d="m22 2-7 20-4-9-9-4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M22 2 11 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_SETTINGS: Icon = Icon {
+    name: "kurama-action-settings",
+    view: 24.0,
+    body: r#"<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/>"#,
+};
+
+static ACTION_SSH: Icon = Icon {
+    name: "kurama-action-ssh",
+    view: 24.0,
+    body: r#"<circle cx="8" cy="15" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m10.8 12.2 8.2-8.2M17 3l4 4M15 5l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_SYNC: Icon = Icon {
+    name: "kurama-action-sync",
+    view: 24.0,
+    body: r#"<path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16M16 16h5v5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_GENERATE: Icon = Icon {
+    name: "kurama-action-generate",
+    view: 24.0,
+    body: r#"<path d="m12 3 1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2ZM19 3v4M21 5h-4M5 17v4M7 19H3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_HELP: Icon = Icon {
+    name: "kurama-action-help",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_LOCK: Icon = Icon {
+    name: "kurama-action-lock",
+    view: 24.0,
+    body: r#"<rect x="3" y="11" width="18" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7 11V7a5 5 0 0 1 10 0v4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>"#,
+};
+
+static ACTION_LOGOUT: Icon = Icon {
+    name: "kurama-action-logout",
+    view: 24.0,
+    body: r#"<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+pub fn action(name: &str) -> &'static Icon {
+    match name {
+        "new" => &ACTION_NEW,
+        "sun" => &ACTION_SUN,
+        "moon" => &ACTION_MOON,
+        "sends" => &ACTION_SENDS,
+        "settings" => &ACTION_SETTINGS,
+        "ssh" => &ACTION_SSH,
+        "sync" => &ACTION_SYNC,
+        "generate" => &ACTION_GENERATE,
+        "help" => &ACTION_HELP,
+        "lock" => &ACTION_LOCK,
+        "logout" => &ACTION_LOGOUT,
+        _ => &ITEM,
+    }
+}
+
 pub fn for_type(type_name: &str) -> &'static Icon {
     match type_name {
         "login" => &LOGIN,

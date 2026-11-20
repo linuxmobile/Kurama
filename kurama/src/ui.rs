@@ -1875,21 +1875,32 @@ fn top_bar(s: &State, dark: bool) -> El {
         .w_full()
         .h(64.0)
         .px(18.0)
-        .gap(16.0)
+        .gap(8.0)
         .center_y()
         .fill(t.card)
         .border(1.0, t.card_border)
         .child(brand)
         .child(search)
         .child(el().grow(1.0))
-        .child(action_tx("new-item", "New", dark, |state, tx| {
-            state.create = Some(crate::state::start_create());
-            state.form_error = None;
-            tx.focus("create-name", true);
-        }))
-        .child(action(
+        .child(icon_action_tx(
+            "new-item",
+            "new",
+            "New item",
+            dark,
+            |state, tx| {
+                state.create = Some(crate::state::start_create());
+                state.form_error = None;
+                tx.focus("create-name", true);
+            },
+        ))
+        .child(icon_action(
             "theme",
-            if dark { "Light" } else { "Dark" },
+            if dark { "sun" } else { "moon" },
+            if dark {
+                "Switch to light theme"
+            } else {
+                "Switch to dark theme"
+            },
             dark,
             move |s| {
                 let next = if dark {
@@ -1900,22 +1911,43 @@ fn top_bar(s: &State, dark: bool) -> El {
                 set_theme(s, next);
             },
         ))
-        .child(action("sends", "Sends", dark, open_sends))
-        .child(action("settings", "Settings", dark, open_settings))
-        .child(action("ssh-tools", "SSH keys", dark, open_ssh_tools))
-        .child(action(
+        .child(icon_action("sends", "sends", "Sends", dark, open_sends))
+        .child(icon_action(
+            "settings",
+            "settings",
+            "Settings",
+            dark,
+            open_settings,
+        ))
+        .child(icon_action(
+            "ssh-tools",
+            "ssh",
+            "SSH keys",
+            dark,
+            open_ssh_tools,
+        ))
+        .child(icon_action(
+            "sync",
             "sync",
             if s.syncing { "Syncing…" } else { "Sync" },
             dark,
             |s| dispatch(s, Request::Sync),
         ))
-        .child(action("generate", "Generate", dark, |s| {
-            open_generator(s, GeneratorTarget::None)
+        .child(icon_action(
+            "generate",
+            "generate",
+            "Generate password",
+            dark,
+            |s| open_generator(s, GeneratorTarget::None),
+        ))
+        .child(icon_action("?", "help", "Keyboard shortcuts", dark, |s| {
+            s.help = !s.help
         }))
-        .child(action("?", "?", dark, |s| s.help = !s.help))
-        .child(action("lock", "Lock", dark, |s| dispatch(s, Request::Lock)))
+        .child(icon_action("lock", "lock", "Lock vault", dark, |s| {
+            dispatch(s, Request::Lock)
+        }))
         .child(if s.snapshot.status == "unlocked" {
-            action("logout", "Log out", dark, logout)
+            icon_action("logout", "logout", "Log out", dark, logout)
         } else {
             el()
         })
@@ -3079,6 +3111,41 @@ fn placeholder(
         .child(action("placeholder-action", button_label, dark, move |s| {
             dispatch(s, request.clone())
         }))
+}
+
+fn icon_action(
+    key: &str,
+    icon_name: &str,
+    tooltip: &str,
+    dark: bool,
+    on_press: impl Fn(&mut State) + 'static,
+) -> El {
+    icon_action_tx(key, icon_name, tooltip, dark, move |s, _tx| on_press(s))
+}
+
+fn icon_action_tx(
+    key: &str,
+    icon_name: &str,
+    tooltip: &str,
+    dark: bool,
+    on_press: impl Fn(&mut State, &mut Tx) + 'static,
+) -> El {
+    let t = tok::theme(dark);
+    el().key(key)
+        .role("button")
+        .label(tooltip.to_owned())
+        .help(tooltip.to_owned())
+        .focusable(true)
+        .w(32.0)
+        .h(32.0)
+        .center()
+        .radius(8.0)
+        .fill(t.control_track)
+        .hover(t.hover)
+        .press(t.press)
+        .cursor(Cursor::Pointer)
+        .on_press_tx(on_press)
+        .child(icon(icons::action(icon_name), 18.0).color(t.text))
 }
 
 fn action(
