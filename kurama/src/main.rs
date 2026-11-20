@@ -132,6 +132,10 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
             state::close_generator(state);
             true
         }
+        Key::Escape if state.selected.is_some() => {
+            state::clear_selection(state);
+            true
+        }
         Key::Down => state::move_selection(state, 1, tx),
         Key::Up => state::move_selection(state, -1, tx),
         Key::Home => state::select_first(state, tx),
@@ -1546,6 +1550,23 @@ mod tests {
         press(&mut rt, Key::Text("j".to_owned()));
         assert_eq!(rt.state.query.text, "j");
         assert_eq!(rt.state.selected.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn escape_unselects_the_active_item() {
+        let mut rt = runtime(state::scene_populated);
+        rt.on_key = Some(on_key);
+        rt.frame(0.0);
+        assert_eq!(rt.state.selected.as_deref(), Some("1"));
+
+        rt.key(KeyEvent {
+            key: Key::Escape,
+            mods: Mods::default(),
+        });
+        rt.frame(0.0);
+        assert_eq!(rt.state.selected, None);
+        assert_eq!(rt.state.details, None);
+        assert!(rt.state.selected_item().is_none());
     }
 
     #[test]

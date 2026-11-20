@@ -308,6 +308,7 @@ pub struct State {
     pub folder_ids: BTreeMap<String, String>,
     pub selected: Option<String>,
     pub details: Option<ItemDetails>,
+    selection_cleared: bool,
     pub edit: Option<EditDraft>,
     pub create: Option<CreateDraft>,
     pub auth: Option<AuthDraft>,
@@ -361,6 +362,7 @@ impl Default for State {
             folder_ids: BTreeMap::new(),
             selected: None,
             details: None,
+            selection_cleared: false,
             edit: None,
             create: None,
             auth: None,
@@ -465,7 +467,11 @@ impl State {
 
     pub fn selected_item(&self) -> Option<&VaultRow> {
         let id = self.selected.as_ref()?;
-        self.rows.iter().find(|item| &item.id == id)
+        let index = self
+            .visible_indices()
+            .into_iter()
+            .find(|&index| self.rows[index].id == *id)?;
+        Some(&self.rows[index])
     }
 
     pub fn dark(&self, system_dark: bool) -> bool {
@@ -553,11 +559,21 @@ fn select_row(state: &mut State, index: usize, tx: &mut Tx) -> bool {
     true
 }
 
+pub fn clear_selection(state: &mut State) {
+    state.selected = None;
+    state.details = None;
+    state.pending_delete = None;
+    state.totp_timer = 0.0;
+    state.selection_cleared = true;
+    clear_reveal(state);
+}
+
 pub fn select_item(state: &mut State, id: String) {
     if state.selected.as_deref() == Some(id.as_str()) {
         return;
     }
     state.selected = Some(id);
+    state.selection_cleared = false;
     state.pending_delete = None;
     clear_reveal(state);
     request_details(state);
@@ -1443,9 +1459,7 @@ pub fn open_trash(state: &mut State) {
     state.folder = None;
     state.query.clear();
     state.rows.clear();
-    state.selected = None;
-    state.details = None;
-    clear_reveal(state);
+    clear_selection(state);
     state.bump_rows_version();
     dispatch(state, Request::Trash);
 }
@@ -1459,9 +1473,7 @@ fn leave_trash(state: &mut State) -> bool {
     state.query.clear();
     state.rows.clear();
     state.pending_delete = None;
-    state.selected = None;
-    state.details = None;
-    clear_reveal(state);
+    clear_selection(state);
     state.bump_rows_version();
     true
 }
@@ -1760,7 +1772,7 @@ fn apply_snapshot(state: &mut State, snapshot: Snapshot) {
     }
     state.notice = None;
     clear_reveal(state);
-    if state.selected.is_none() {
+    if state.selected.is_none() && !state.selection_cleared {
         state.selected = state.rows.first().map(|item| item.id.clone());
     }
     request_details(state);
@@ -1816,7 +1828,7 @@ fn apply(state: &mut State, event: Event) {
             state.rows = items;
             state.bump_rows_version();
             clear_reveal(state);
-            if state.selected.is_none() {
+            if state.selected.is_none() && !state.selection_cleared {
                 state.selected = state.rows.first().map(|item| item.id.clone());
             }
             request_details(state);
@@ -1828,7 +1840,7 @@ fn apply(state: &mut State, event: Event) {
             state.rows = items;
             state.bump_rows_version();
             clear_reveal(state);
-            if state.selected.is_none() {
+            if state.selected.is_none() && !state.selection_cleared {
                 state.selected = state.rows.first().map(|item| item.id.clone());
             }
             request_details(state);
@@ -2053,6 +2065,7 @@ fn apply(state: &mut State, event: Event) {
                 state.query.clear();
             }
             state.selected = if id.is_empty() { None } else { Some(id) };
+            state.selection_cleared = false;
             state.details = None;
             clear_reveal(state);
             state.notice = format!("Created {name}").into();
@@ -3618,6 +3631,51 @@ mod tests {
         assert_eq!(state.selected.as_deref(), Some("4"));
         assert!(select_first(&mut state, &mut tx));
         assert_eq!(state.selected.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn switching_category_hides_inactive_details() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        assert!(state.selected_item().is_some());
+
+        select_category(&mut state, Category::SshKeys);
+        assert_eq!(state.category, Category::SshKeys);
+        assert_eq!(state.selected.as_deref(), Some("1"));
+        assert!(state.selected_item().is_none());
+
+        apply(&mut state, Event::Items(fixtures()));
+        assert_eq!(state.selected.as_deref(), Some("1"));
+        assert!(state.selected_item().is_none());
+    }
+
+    #[test]
+    fn clearing_selection_hides_details_and_blocks_auto_select() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        assert!(state.details.is_some());
+
+        clear_selection(&mut state);
+        assert_eq!(state.selected, None);
+        assert!(state.selected_item().is_none());
+        assert_eq!(state.details, None);
+
+        apply(&mut state, Event::Items(fixtures()));
+        assert_eq!(state.selected, None);
+        assert_eq!(state.details, None);
+
+        select_item(&mut state, "1".to_owned());
+        apply(&mut state, Event::Items(fixtures()));
+        assert_eq!(state.selected.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn hidden_selection_has_no_active_item() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        state.query.replace_text("missing");
+        assert_eq!(state.selected.as_deref(), Some("1"));
+        assert!(state.selected_item().is_none());
     }
 
     #[test]
