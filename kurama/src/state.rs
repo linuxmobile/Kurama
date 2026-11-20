@@ -1,10 +1,11 @@
+use std::cell::RefCell;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use rune::{edit::TextEdit, Tx, Waker};
 
 use crate::backend::{self, Approval, Event, Request, Secret, Snapshot, VaultRow};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Category {
     All,
     Favorites,
@@ -62,6 +63,8 @@ pub struct State {
     pub notice: Option<String>,
     pub approvals: Vec<Approval>,
     pub dark_override: Option<bool>,
+    rows_version: u64,
+    visible_cache: RefCell<Option<VisibleCache>>,
     requests: Option<Sender<Request>>,
     events: Option<Receiver<Event>>,
     event_cursor: u64,
@@ -81,6 +84,8 @@ impl Default for State {
             notice: None,
             approvals: Vec::new(),
             dark_override: None,
+            rows_version: 0,
+            visible_cache: RefCell::new(None),
             requests: None,
             events: None,
             event_cursor: 0,
@@ -89,21 +94,54 @@ impl Default for State {
     }
 }
 
+#[derive(Clone)]
+struct VisibleCache {
+    version: u64,
+    query: String,
+    category: Category,
+    indices: Vec<usize>,
+}
+
 impl State {
-    pub fn visible(&self) -> Vec<&VaultRow> {
+    pub fn visible_indices(&self) -> Vec<usize> {
         let query = self.query.text.trim().to_lowercase();
-        self.rows
+        if let Some(cache) = self.visible_cache.borrow().as_ref() {
+            if cache.version == self.rows_version
+                && cache.query == query
+                && cache.category == self.category
+            {
+                return cache.indices.clone();
+            }
+        }
+
+        let indices: Vec<usize> = self
+            .rows
             .iter()
-            .filter(|item| self.category.matches(item))
-            .filter(|item| {
-                if query.is_empty() {
-                    return true;
-                }
-                item.name.to_lowercase().contains(&query)
+            .enumerate()
+            .filter(|(_, item)| self.category.matches(item))
+            .filter(|(_, item)| {
+                query.is_empty()
+                    || item.name.to_lowercase().contains(&query)
                     || item.subtitle.to_lowercase().contains(&query)
                     || item.folder.to_lowercase().contains(&query)
             })
-            .collect()
+            .map(|(index, _)| index)
+            .collect();
+        *self.visible_cache.borrow_mut() = Some(VisibleCache {
+            version: self.rows_version,
+            query,
+            category: self.category,
+            indices: indices.clone(),
+        });
+        indices
+    }
+
+    pub fn rows_version(&self) -> u64 {
+        self.rows_version
+    }
+
+    fn bump_rows_version(&mut self) {
+        self.rows_version = self.rows_version.wrapping_add(1);
     }
 
     pub fn selected_item(&self) -> Option<&VaultRow> {
@@ -188,6 +226,7 @@ fn apply(state: &mut State, event: Event) {
             let changed_vault =
                 (state.snapshot.status == "unlocked") != (snapshot.status == "unlocked");
             state.rows = snapshot.items.clone();
+            state.bump_rows_version();
             state.snapshot = snapshot;
             state.notice = None;
             if changed_vault {
@@ -201,6 +240,7 @@ fn apply(state: &mut State, event: Event) {
         }
         Event::Items(items) => {
             state.rows = items;
+            state.bump_rows_version();
             if state.selected.is_none() {
                 state.selected = state.rows.first().map(|item| item.id.clone());
             }
@@ -275,6 +315,7 @@ pub fn scene_populated(state: &mut State) {
         items_count: 4,
     };
     state.rows = fixtures();
+    state.bump_rows_version();
     state.snapshot.items = state.rows.clone();
     state.selected = state.rows.first().map(|item| item.id.clone());
     state.busy = false;
@@ -288,6 +329,26 @@ pub fn scene_locked(state: &mut State) {
         quick_unlock_ready: true,
         ..Snapshot::default()
     };
+    state.busy = false;
+}
+
+pub fn scene_stress(state: &mut State) {
+    scene_populated(state);
+    state.rows = (0..395)
+        .map(|index| VaultRow {
+            id: format!("stress-{index}"),
+            name: format!("Item {index}"),
+            subtitle: "user@example.com".to_owned(),
+            type_name: "login".to_owned(),
+            favorite: false,
+            folder: String::new(),
+            updated: "2026-01-02T03:04:05Z".to_owned(),
+        })
+        .collect();
+    state.snapshot.items = state.rows.clone();
+    state.snapshot.items_count = state.rows.len();
+    state.selected = state.rows.first().map(|item| item.id.clone());
+    state.bump_rows_version();
     state.busy = false;
 }
 
@@ -340,12 +401,12 @@ mod tests {
     fn filter_by_category_and_search_text() {
         let mut state = State::default();
         scene_populated(&mut state);
-        assert_eq!(state.visible().len(), 4);
+        assert_eq!(state.visible_indices().len(), 4);
         state.category = Category::Logins;
-        assert_eq!(state.visible().len(), 2);
+        assert_eq!(state.visible_indices().len(), 2);
         state.category = Category::All;
         state.query = TextEdit::new("github");
-        assert_eq!(state.visible().len(), 1);
+        assert_eq!(state.visible_indices().len(), 1);
     }
 
     #[test]

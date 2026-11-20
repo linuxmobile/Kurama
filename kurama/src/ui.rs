@@ -1,7 +1,7 @@
 use rune::tok::{self, type_};
-use rune::{col, el, row, text, text_input, Color, Cx, El, ScrollSpec, Tx};
+use rune::{col, el, row, text, text_input, Color, Cx, El, GrowthSpec, ScrollSpec, Tx};
 
-use crate::backend::Request;
+use crate::backend::{Request, VaultRow};
 use crate::state::{dispatch, submit_quick_unlock, submit_search, submit_unlock, Category, State};
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -192,61 +192,30 @@ fn sidebar(s: &State, dark: bool) -> El {
 
 fn item_list(s: &State, dark: bool) -> El {
     let t = tok::theme(dark);
-    let visible = s.visible();
-    let mut list = col().key("item-rows").padding(8.0).gap(2.0);
-    for item in &visible {
-        let id = item.id.clone();
-        let selected = s.selected.as_deref() == Some(id.as_str());
-        let star = if item.favorite { "★" } else { "" };
-        list = list.child(
-            el().key(format!("item-{}", item.id))
-                .h(56.0)
-                .px(12.0)
-                .radius(8.0)
-                .role("listitem")
-                .label(format!("{}, {}", item.name, item.subtitle))
-                .checked(selected)
-                .focusable(true)
-                .fill(if selected {
-                    selected_row(dark)
-                } else {
-                    Color::TRANSPARENT
-                })
-                .on_press(move |s: &mut State| s.selected = Some(id.clone()))
-                .child(
-                    col()
-                        .w_full()
-                        .gap(2.0)
-                        .child(
-                            row()
-                                .w_full()
-                                .gap(6.0)
-                                .center_y()
-                                .child(
-                                    text(item.name.clone())
-                                        .key("item-name")
-                                        .font(ROW_TITLE)
-                                        .color(t.text)
-                                        .grow(1.0)
-                                        .truncate(),
-                                )
-                                .child(text(star).font(ROW_TITLE).color(accent(dark))),
-                        )
-                        .child(
-                            text(if item.subtitle.is_empty() {
-                                item.type_name.as_str()
-                            } else {
-                                item.subtitle.as_str()
-                            })
-                            .font(ROW_SUBTITLE)
-                            .color(t.text_secondary)
-                            .truncate(),
-                        ),
-                ),
-        );
-    }
+    let visible_count = s.visible_indices().len();
+    let version = (s.rows_version(), s.query.text.clone(), s.category);
+    let list = col()
+        .key("item-rows")
+        .w_full()
+        .padding(8.0)
+        .gap(2.0)
+        .growth(GrowthSpec::default())
+        .virtual_rows(
+            visible_count,
+            58.0,
+            |s: &State, index: usize| {
+                let row = s.visible_indices()[index];
+                format!("item-{}", s.rows[row].id).into()
+            },
+            move |s: &State, index: usize| {
+                let row = s.visible_indices()[index];
+                let item = &s.rows[row];
+                item_row(item, s.selected.as_deref() == Some(item.id.as_str()), dark)
+            },
+        )
+        .virtual_rows_version(version);
 
-    let empty = if visible.is_empty() {
+    let empty = if visible_count == 0 {
         el().key("list-empty").padding(24.0).child(
             text("No items match this view.")
                 .font(ROW_SUBTITLE)
@@ -276,21 +245,76 @@ fn item_list(s: &State, dark: bool) -> El {
                         .grow(1.0),
                 )
                 .child(
-                    text(visible.len().to_string())
+                    text(visible_count.to_string())
                         .font(META)
                         .color(t.text_secondary),
                 ),
         )
         .child(el().h(1.0).w_full().fill(t.separator))
-        .child(if visible.is_empty() {
+        .child(if visible_count == 0 {
             empty
         } else {
-            list.scroll(ScrollSpec {
-                stick_bottom: false,
-            })
-            .shrink()
-            .min_h(0.0)
+            col()
+                .key("item-scroller")
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .shrink()
+                .min_h(0.0)
+                .child(list)
         })
+}
+
+fn item_row(item: &VaultRow, selected: bool, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let id = item.id.clone();
+    let star = if item.favorite { "★" } else { "" };
+
+    el().key(format!("item-{}", item.id))
+        .h(56.0)
+        .w_full()
+        .px(12.0)
+        .radius(8.0)
+        .role("listitem")
+        .label(format!("{}, {}", item.name, item.subtitle))
+        .checked(selected)
+        .focusable(true)
+        .fill(if selected {
+            selected_row(dark)
+        } else {
+            Color::TRANSPARENT
+        })
+        .on_press(move |s: &mut State| s.selected = Some(id.clone()))
+        .child(
+            col()
+                .w_full()
+                .gap(2.0)
+                .child(
+                    row()
+                        .w_full()
+                        .gap(6.0)
+                        .center_y()
+                        .child(
+                            text(item.name.clone())
+                                .key("item-name")
+                                .font(ROW_TITLE)
+                                .color(t.text)
+                                .grow(1.0)
+                                .truncate(),
+                        )
+                        .child(text(star).font(ROW_TITLE).color(accent(dark))),
+                )
+                .child(
+                    text(if item.subtitle.is_empty() {
+                        item.type_name.as_str()
+                    } else {
+                        item.subtitle.as_str()
+                    })
+                    .font(ROW_SUBTITLE)
+                    .color(t.text_secondary)
+                    .truncate(),
+                ),
+        )
 }
 
 fn details(s: &State, dark: bool) -> El {

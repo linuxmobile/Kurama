@@ -15,3 +15,30 @@ sctk-adwaita = { path = "rune/vendor/sctk-adwaita" }
 parley_engine = { path = "rune/vendor/parley_engine" }
 accesskit_windows = { path = "rune/vendor/accesskit_windows" }
 accesskit_macos = { path = "rune/vendor/accesskit_macos" }
+
+[profile.dev.package."kurama-host"]
+opt-level = 2
+
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.password-hash]
+opt-level = 3
+
+[profile.dev.package.pbkdf2]
+opt-level = 3
+
+[profile.dev.package.sha1]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.hmac]
+opt-level = 3
+
+[profile.dev.package.aes]
+opt-level = 3
+
+[profile.dev.package.cbc]
+opt-level = 3

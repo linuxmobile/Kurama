@@ -30,6 +30,8 @@ const HOST_COMMANDS: &[&str] = &[
 ];
 
 fn main() -> ExitCode {
+    rune::set_app_id("dev.kurama.Kurama");
+
     let mut args = std::env::args_os();
     args.next();
     if let Some(first) = args.next() {
@@ -43,6 +45,7 @@ fn main() -> ExitCode {
         min_size: Some((900.0, 580.0)),
         scenes: &[
             ("populated", state::scene_populated),
+            ("stress", state::scene_stress),
             ("locked", state::scene_locked),
             ("disconnected", state::scene_disconnected),
         ],
@@ -99,6 +102,14 @@ mod tests {
         assert!(rt.find("unlock-button").is_some());
         assert!(rt.find("quick-unlock-button").is_some());
         assert!(rt.find("item-1").is_none());
+    }
+
+    #[test]
+    fn large_vault_only_builds_visible_rows() {
+        let mut rt = runtime(state::scene_stress);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("item-stress-0").is_some());
+        assert!(rt.find("item-stress-394").is_none());
     }
 
     #[test]
