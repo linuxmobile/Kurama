@@ -73,6 +73,11 @@ pub enum Location {
     Trash,
 }
 
+pub struct CreateDraft {
+    pub name: TextEdit,
+    pub item_type: i64,
+}
+
 pub struct EditDraft {
     pub id: String,
     pub name: TextEdit,
@@ -90,6 +95,7 @@ pub struct State {
     pub selected: Option<String>,
     pub details: Option<ItemDetails>,
     pub edit: Option<EditDraft>,
+    pub create: Option<CreateDraft>,
     pub revealed: Option<String>,
     pub totp: Option<TotpMeta>,
     pub busy: bool,
@@ -120,6 +126,7 @@ impl Default for State {
             selected: None,
             details: None,
             edit: None,
+            create: None,
             revealed: None,
             totp: None,
             busy: true,
@@ -335,6 +342,42 @@ pub fn open_attachment(state: &mut State, attachment_id: String, filename: Strin
             preview,
         },
     );
+}
+
+pub fn start_create() -> CreateDraft {
+    CreateDraft {
+        name: TextEdit::new(""),
+        item_type: 1,
+    }
+}
+
+pub fn set_create_type(state: &mut State, item_type: i64) {
+    if let Some(draft) = state.create.as_mut() {
+        draft.item_type = item_type;
+    }
+}
+
+pub fn submit_create(state: &mut State) {
+    let Some(draft) = state.create.take() else {
+        return;
+    };
+    let name = draft.name.text.trim().to_owned();
+    if name.is_empty() {
+        state.notice = Some("Enter a name for the new item.".to_owned());
+        state.create = Some(draft);
+        return;
+    }
+    dispatch(
+        state,
+        Request::CreateItem {
+            name,
+            item_type: draft.item_type,
+        },
+    );
+}
+
+pub fn cancel_create(state: &mut State) {
+    state.create = None;
 }
 
 pub fn start_edit(state: &mut State) {
@@ -578,6 +621,11 @@ fn visible_fingerprint(state: &State) -> u64 {
         .as_ref()
         .map(|draft| draft.id.as_str())
         .hash(&mut hasher);
+    state
+        .create
+        .as_ref()
+        .map(|draft| draft.item_type)
+        .hash(&mut hasher);
     hasher.finish()
 }
 
@@ -596,6 +644,7 @@ fn apply(state: &mut State, event: Event) {
                 state.selected = None;
                 state.details = None;
                 state.edit = None;
+                state.create = None;
                 clear_reveal(state);
                 state.query.clear();
                 state.password.replace_text("");
@@ -716,6 +765,8 @@ fn apply(state: &mut State, event: Event) {
             if state.selected.as_deref() == Some(id.as_str()) {
                 state.selected = None;
                 state.details = None;
+                state.edit = None;
+                state.create = None;
                 clear_reveal(state);
             }
             state.bump_rows_version();
@@ -732,6 +783,17 @@ fn apply(state: &mut State, event: Event) {
                     Request::Refresh
                 },
             );
+        }
+        Event::ItemCreated { id, name } => {
+            if state.location == Location::Trash {
+                state.location = Location::Vault;
+                state.query.clear();
+            }
+            state.selected = if id.is_empty() { None } else { Some(id) };
+            state.details = None;
+            clear_reveal(state);
+            state.notice = format!("Created {name}").into();
+            send_quiet(state, Request::Refresh);
         }
         Event::ItemRenamed { id, name } => {
             for row in state.rows.iter_mut().chain(state.snapshot.items.iter_mut()) {
@@ -1041,6 +1103,57 @@ mod tests {
 
         apply(&mut state, Event::Notice("Copied Password".to_owned()));
         assert_eq!(state.notice.as_deref(), Some("Copied Password"));
+    }
+
+    #[test]
+    fn create_draft_submits_name_and_type() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+
+        state.create = Some(start_create());
+        set_create_type(&mut state, 2);
+        state
+            .create
+            .as_mut()
+            .unwrap()
+            .name
+            .replace_text("Recovery sheet");
+        submit_create(&mut state);
+        assert!(state.create.is_none());
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            Request::CreateItem { name, item_type } if name == "Recovery sheet" && item_type == 2
+        )));
+
+        apply(
+            &mut state,
+            Event::ItemCreated {
+                id: "new-1".to_owned(),
+                name: "Recovery sheet".to_owned(),
+            },
+        );
+        assert_eq!(state.selected.as_deref(), Some("new-1"));
+        assert_eq!(state.notice.as_deref(), Some("Created Recovery sheet"));
+        assert!(rx
+            .try_iter()
+            .any(|request| matches!(request, Request::Refresh)));
+    }
+
+    #[test]
+    fn empty_create_draft_is_kept_for_retry() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        state.create = Some(start_create());
+        submit_create(&mut state);
+        assert!(rx.try_iter().next().is_none());
+        assert!(state.create.is_some());
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Enter a name for the new item.")
+        );
     }
 
     #[test]

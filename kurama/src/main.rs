@@ -68,6 +68,10 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
             state::cancel_edit(state);
             true
         }
+        Key::Escape if state.create.is_some() => {
+            state::cancel_create(state);
+            true
+        }
         Key::Down => state::move_selection(state, 1, tx),
         Key::Up => state::move_selection(state, -1, tx),
         Key::Home => state::select_first(state, tx),
@@ -75,7 +79,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Text(text) => {
             let typing = matches!(
                 tx.focused(),
-                Some("search" | "unlock-password" | "edit-name")
+                Some("search" | "unlock-password" | "edit-name" | "create-name")
             );
             if typing {
                 return false;
@@ -83,6 +87,11 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
             match text.as_str() {
                 "/" => {
                     tx.focus("search", true);
+                    true
+                }
+                "n" => {
+                    state.create = Some(state::start_create());
+                    tx.focus("create-name", true);
                     true
                 }
                 "j" => state::move_selection(state, 1, tx),
@@ -267,6 +276,53 @@ mod tests {
                 filename,
                 preview,
             } if item_id == "1" && attachment_id == "att-1" && filename == "notes.txt" && !preview
+        )));
+    }
+
+    #[test]
+    fn create_form_opens_and_submits_a_secure_note() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.requests = Some(tx.clone());
+        });
+        rt.on_key = Some(on_key);
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("new-item").expect("new item button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        for key in [
+            "create-form",
+            "create-name",
+            "create-type-login",
+            "create-type-note",
+            "create-submit",
+            "create-cancel",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+
+        rt.state
+            .create
+            .as_mut()
+            .unwrap()
+            .name
+            .replace_text("Recovery sheet");
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("create-type-note").expect("note type button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("create-submit").expect("create button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.create.is_none());
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::CreateItem { name, item_type }
+                if name == "Recovery sheet" && item_type == 2
         )));
     }
 

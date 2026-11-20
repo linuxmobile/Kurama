@@ -7,10 +7,10 @@ use rune::{
 use crate::backend::{revealed_value, totp_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
-    cancel_edit, copy_field, delete_item, dispatch, move_selection, open_attachment, open_trash,
-    restore_item, select_category, select_folder, select_item, set_favorite, start_edit,
-    submit_edit, submit_quick_unlock, submit_search, submit_unlock, toggle_reveal, Category,
-    Location, State,
+    cancel_create, cancel_edit, copy_field, delete_item, dispatch, move_selection, open_attachment,
+    open_trash, restore_item, select_category, select_folder, select_item, set_create_type,
+    set_favorite, start_edit, submit_create, submit_edit, submit_quick_unlock, submit_search,
+    submit_unlock, toggle_reveal, Category, Location, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -22,7 +22,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let connected = !s.snapshot.status.is_empty();
     let unlocked = s.snapshot.status == "unlocked";
 
-    let content = if s.edit.is_some() {
+    let content = if s.create.is_some() {
+        create_form(s, dark)
+    } else if s.edit.is_some() {
         edit_form(s, dark)
     } else if !connected {
         placeholder(
@@ -47,6 +49,73 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(top_bar(s, dark))
         .child(content)
         .child(status_bar(s, dark))
+}
+
+fn create_form(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let Some(draft) = s.create.as_ref() else {
+        return el();
+    };
+    let types = [
+        ("login", "Login", 1),
+        ("note", "Secure Note", 2),
+        ("card", "Card", 3),
+        ("identity", "Identity", 4),
+        ("ssh-key", "SSH Key", 5),
+    ];
+    let mut choices = row().key("create-types").gap(8.0);
+    for (slug, label, value) in types {
+        let active = draft.item_type == value;
+        choices = choices.child(action(
+            &format!("create-type-{slug}"),
+            if active {
+                format!("• {label}")
+            } else {
+                label.to_owned()
+            },
+            dark,
+            move |state| set_create_type(state, value),
+        ));
+    }
+
+    col()
+        .key("create-form")
+        .w_full()
+        .grow(1.0)
+        .h_full()
+        .center()
+        .gap(14.0)
+        .fill(t.bg)
+        .child(text("New item").font(WINDOW_TITLE).color(t.text))
+        .child(
+            text_input(&draft.name, type_::BODY)
+                .key("create-name")
+                .label("Item name")
+                .placeholder("Item name", t.text_secondary)
+                .w(420.0)
+                .h(40.0)
+                .px(12.0)
+                .radius(8.0)
+                .fill(t.card)
+                .on_edit(|s: &mut State| &mut s.create.as_mut().unwrap().name)
+                .on_submit(|s: &mut State, _tx: &mut Tx| submit_create(s))
+                .on_input_key(
+                    |s: &mut State, event: &KeyEvent, _tx: &mut Tx| match &event.key {
+                        Key::Escape => {
+                            cancel_create(s);
+                            true
+                        }
+                        _ => false,
+                    },
+                ),
+        )
+        .child(choices)
+        .child(
+            row()
+                .gap(8.0)
+                .child(action("create-submit", "Create", dark, submit_create))
+                .child(action("create-cancel", "Cancel", dark, cancel_create)),
+        )
 }
 
 fn edit_form(s: &State, dark: bool) -> El {
@@ -137,6 +206,10 @@ fn top_bar(s: &State, dark: bool) -> El {
         .child(brand)
         .child(search)
         .child(el().grow(1.0))
+        .child(action_tx("new-item", "New", dark, |state, tx| {
+            state.create = Some(crate::state::start_create());
+            tx.focus("create-name", true);
+        }))
         .child(action(
             "theme",
             if dark { "Light" } else { "Dark" },
@@ -886,20 +959,26 @@ fn placeholder(
         }))
 }
 
-fn action(key: &str, label: &str, dark: bool, on_press: impl Fn(&mut State) + 'static) -> El {
+fn action(
+    key: &str,
+    label: impl Into<String>,
+    dark: bool,
+    on_press: impl Fn(&mut State) + 'static,
+) -> El {
     action_tx(key, label, dark, move |s, _tx| on_press(s))
 }
 
 fn action_tx(
     key: &str,
-    label: &str,
+    label: impl Into<String>,
     dark: bool,
     on_press: impl Fn(&mut State, &mut Tx) + 'static,
 ) -> El {
     let t = tok::theme(dark);
+    let label = label.into();
     el().key(key)
         .role("button")
-        .label(label)
+        .label(label.clone())
         .focusable(true)
         .h(32.0)
         .px(12.0)
@@ -910,5 +989,5 @@ fn action_tx(
         .press(t.press)
         .cursor(Cursor::Pointer)
         .on_press_tx(on_press)
-        .child(text(label.to_owned()).font(type_::LABEL).color(t.text))
+        .child(text(label).font(type_::LABEL).color(t.text))
 }

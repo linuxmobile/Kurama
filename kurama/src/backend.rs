@@ -124,6 +124,10 @@ pub enum Request {
         id: String,
         name: String,
     },
+    CreateItem {
+        name: String,
+        item_type: i64,
+    },
     Restore {
         id: String,
     },
@@ -227,6 +231,7 @@ pub enum Event {
     AttachmentOpened { filename: String, preview: bool },
     Deleted { id: String, permanent: bool },
     ItemRenamed { id: String, name: String },
+    ItemCreated { id: String, name: String },
     Restored { id: String },
     Notice(String),
     Totp(TotpMeta),
@@ -329,6 +334,25 @@ pub fn perform(request: Request) -> Event {
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
                 Event::ItemRenamed { id, name }
+            }
+            Ok(response) => Event::Error(text(&response, "error")),
+            Err(error) => Event::Error(error),
+        },
+        Request::CreateItem { name, item_type } => match call(json!({
+            "action": "create_item",
+            "options": {
+                "name": name.clone(),
+                "item_type": item_type
+            }
+        })) {
+            Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
+                let id = response
+                    .get("item")
+                    .and_then(|item| item.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                Event::ItemCreated { id, name }
             }
             Ok(response) => Event::Error(text(&response, "error")),
             Err(error) => Event::Error(error),
