@@ -1542,6 +1542,8 @@ mod tests {
         assert!(rt.find("unlock-password").is_some());
         assert!(rt.find("unlock-button").is_some());
         assert!(rt.find("quick-unlock-button").is_some());
+        assert!(rt.find("locked-bar").is_some());
+        assert!(rt.find("top-bar").is_none());
         assert!(rt.find("item-1").is_none());
     }
 

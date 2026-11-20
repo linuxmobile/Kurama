@@ -71,12 +71,17 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         vault(s, dark)
     };
 
+    let header = if unlocked {
+        top_bar(s, dark)
+    } else {
+        locked_bar(dark)
+    };
     col()
         .key("root")
         .w_full()
         .h_full()
         .fill(t.bg)
-        .child(top_bar(s, dark))
+        .child(header)
         .child(content)
         .child(status_bar(s, dark))
 }
@@ -1074,6 +1079,7 @@ fn create_form(s: &State, dark: bool) -> El {
         .child(custom_fields(&draft.fields, dark));
 
     let footer = row()
+        .gap(8.0)
         .child(action(
             "create-favorite",
             if draft.favorite {
@@ -1217,6 +1223,7 @@ fn edit_form(s: &State, dark: bool) -> El {
         });
 
     let footer = row()
+        .gap(8.0)
         .child(action(
             "edit-favorite",
             if draft.favorite {
@@ -1839,6 +1846,19 @@ fn send_form(s: &State, draft: &SendDraft, dark: bool) -> El {
         footer,
         s.form_error.as_deref(),
     )
+}
+
+fn locked_bar(dark: bool) -> El {
+    let t = tok::theme(dark);
+    row()
+        .key("locked-bar")
+        .w_full()
+        .h(64.0)
+        .px(18.0)
+        .center_y()
+        .fill(t.card)
+        .border(1.0, t.card_border)
+        .child(text("Kurama").key("brand").font(WINDOW_TITLE).color(t.text))
 }
 
 fn top_bar(s: &State, dark: bool) -> El {
