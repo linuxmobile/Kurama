@@ -123,10 +123,12 @@ pub enum Request {
     UpdateName {
         id: String,
         name: String,
+        favorite: bool,
     },
     CreateItem {
         name: String,
         item_type: i64,
+        favorite: bool,
     },
     Restore {
         id: String,
@@ -227,16 +229,40 @@ pub enum Event {
     Items(Vec<VaultRow>),
     Trash(Vec<VaultRow>),
     Details(ItemDetails),
-    Revealed { item_id: String, key: String },
-    AttachmentOpened { filename: String, preview: bool },
-    Deleted { id: String, permanent: bool },
-    ItemRenamed { id: String, name: String },
-    ItemCreated { id: String, name: String },
-    Restored { id: String },
+    Revealed {
+        item_id: String,
+        key: String,
+    },
+    AttachmentOpened {
+        filename: String,
+        preview: bool,
+    },
+    Deleted {
+        id: String,
+        permanent: bool,
+    },
+    ItemRenamed {
+        id: String,
+        name: String,
+        favorite: bool,
+    },
+    ItemCreated {
+        id: String,
+        name: String,
+    },
+    Restored {
+        id: String,
+    },
     Notice(String),
     Totp(TotpMeta),
-    FavoriteChanged { id: String, favorite: bool },
-    Notices { cursor: u64, notices: Vec<Notice> },
+    FavoriteChanged {
+        id: String,
+        favorite: bool,
+    },
+    Notices {
+        cursor: u64,
+        notices: Vec<Notice>,
+    },
     Approvals(Vec<Approval>),
     Error(String),
 }
@@ -327,22 +353,27 @@ pub fn perform(request: Request) -> Event {
                 Err(error) => Event::Error(error),
             }
         }
-        Request::UpdateName { id, name } => match call(json!({
+        Request::UpdateName { id, name, favorite } => match call(json!({
             "action": "update_item",
             "id": id.clone(),
-            "options": { "name": name.clone() }
+            "options": { "name": name.clone(), "favorite": favorite }
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
-                Event::ItemRenamed { id, name }
+                Event::ItemRenamed { id, name, favorite }
             }
             Ok(response) => Event::Error(text(&response, "error")),
             Err(error) => Event::Error(error),
         },
-        Request::CreateItem { name, item_type } => match call(json!({
+        Request::CreateItem {
+            name,
+            item_type,
+            favorite,
+        } => match call(json!({
             "action": "create_item",
             "options": {
                 "name": name.clone(),
-                "item_type": item_type
+                "item_type": item_type,
+                "favorite": favorite
             }
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {

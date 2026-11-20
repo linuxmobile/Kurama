@@ -10,7 +10,8 @@ use crate::state::{
     cancel_create, cancel_edit, copy_field, delete_item, dispatch, move_selection, open_attachment,
     open_trash, restore_item, select_category, select_folder, select_item, set_create_type,
     set_favorite, start_edit, submit_create, submit_edit, submit_quick_unlock, submit_search,
-    submit_unlock, toggle_reveal, Category, Location, State,
+    submit_unlock, toggle_create_favorite, toggle_edit_favorite, toggle_reveal, Category, Location,
+    State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -110,6 +111,16 @@ fn create_form(s: &State, dark: bool) -> El {
                 ),
         )
         .child(choices)
+        .child(action(
+            "create-favorite",
+            if draft.favorite {
+                "★ Favorite"
+            } else {
+                "☆ Favorite"
+            },
+            dark,
+            toggle_create_favorite,
+        ))
         .child(
             row()
                 .gap(8.0)
@@ -157,6 +168,16 @@ fn edit_form(s: &State, dark: bool) -> El {
         .child(
             row()
                 .gap(8.0)
+                .child(action(
+                    "edit-favorite",
+                    if draft.favorite {
+                        "★ Favorite"
+                    } else {
+                        "☆ Favorite"
+                    },
+                    dark,
+                    toggle_edit_favorite,
+                ))
                 .child(action("save-edit", "Save", dark, submit_edit))
                 .child(action("cancel-edit", "Cancel", dark, cancel_edit)),
         )

@@ -314,6 +314,10 @@ mod tests {
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("create-favorite").expect("favorite button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
         let (x, y) = rt.find("create-submit").expect("create button");
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
@@ -321,8 +325,8 @@ mod tests {
         assert!(rt.state.create.is_none());
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            crate::backend::Request::CreateItem { name, item_type }
-                if name == "Recovery sheet" && item_type == 2
+            crate::backend::Request::CreateItem { name, item_type, favorite }
+                if name == "Recovery sheet" && item_type == 2 && favorite
         )));
     }
 
@@ -350,6 +354,10 @@ mod tests {
             .name
             .replace_text("Work GitHub");
         rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("edit-favorite").expect("favorite button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
         let (x, y) = rt.find("save-edit").expect("save button");
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
@@ -357,7 +365,8 @@ mod tests {
         assert!(rt.state.edit.is_none());
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            crate::backend::Request::UpdateName { id, name } if id == "1" && name == "Work GitHub"
+            crate::backend::Request::UpdateName { id, name, favorite }
+                if id == "1" && name == "Work GitHub" && !favorite
         )));
 
         let (x, y) = rt.find("edit-item").expect("edit button");

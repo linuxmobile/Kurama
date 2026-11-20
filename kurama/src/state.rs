@@ -76,11 +76,13 @@ pub enum Location {
 pub struct CreateDraft {
     pub name: TextEdit,
     pub item_type: i64,
+    pub favorite: bool,
 }
 
 pub struct EditDraft {
     pub id: String,
     pub name: TextEdit,
+    pub favorite: bool,
 }
 
 pub struct State {
@@ -348,6 +350,13 @@ pub fn start_create() -> CreateDraft {
     CreateDraft {
         name: TextEdit::new(""),
         item_type: 1,
+        favorite: false,
+    }
+}
+
+pub fn toggle_create_favorite(state: &mut State) {
+    if let Some(draft) = state.create.as_mut() {
+        draft.favorite = !draft.favorite;
     }
 }
 
@@ -372,6 +381,7 @@ pub fn submit_create(state: &mut State) {
         Request::CreateItem {
             name,
             item_type: draft.item_type,
+            favorite: draft.favorite,
         },
     );
 }
@@ -387,7 +397,14 @@ pub fn start_edit(state: &mut State) {
     state.edit = Some(EditDraft {
         id: item.id.clone(),
         name: TextEdit::new(&item.name),
+        favorite: item.favorite,
     });
+}
+
+pub fn toggle_edit_favorite(state: &mut State) {
+    if let Some(draft) = state.edit.as_mut() {
+        draft.favorite = !draft.favorite;
+    }
 }
 
 pub fn submit_edit(state: &mut State) {
@@ -397,9 +414,17 @@ pub fn submit_edit(state: &mut State) {
     let name = draft.name.text.trim().to_owned();
     if name.is_empty() {
         state.notice = Some("Enter a name for this item.".to_owned());
+        state.edit = Some(draft);
         return;
     }
-    dispatch(state, Request::UpdateName { id: draft.id, name });
+    dispatch(
+        state,
+        Request::UpdateName {
+            id: draft.id,
+            name,
+            favorite: draft.favorite,
+        },
+    );
 }
 
 pub fn cancel_edit(state: &mut State) {
@@ -622,9 +647,19 @@ fn visible_fingerprint(state: &State) -> u64 {
         .map(|draft| draft.id.as_str())
         .hash(&mut hasher);
     state
+        .edit
+        .as_ref()
+        .map(|draft| draft.favorite)
+        .hash(&mut hasher);
+    state
         .create
         .as_ref()
         .map(|draft| draft.item_type)
+        .hash(&mut hasher);
+    state
+        .create
+        .as_ref()
+        .map(|draft| draft.favorite)
         .hash(&mut hasher);
     hasher.finish()
 }
@@ -795,10 +830,11 @@ fn apply(state: &mut State, event: Event) {
             state.notice = format!("Created {name}").into();
             send_quiet(state, Request::Refresh);
         }
-        Event::ItemRenamed { id, name } => {
+        Event::ItemRenamed { id, name, favorite } => {
             for row in state.rows.iter_mut().chain(state.snapshot.items.iter_mut()) {
                 if row.id == id {
                     row.name = name.clone();
+                    row.favorite = favorite;
                 }
             }
             state.notice = Some("Item renamed".to_owned());
@@ -1114,6 +1150,7 @@ mod tests {
 
         state.create = Some(start_create());
         set_create_type(&mut state, 2);
+        toggle_create_favorite(&mut state);
         state
             .create
             .as_mut()
@@ -1124,7 +1161,8 @@ mod tests {
         assert!(state.create.is_none());
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            Request::CreateItem { name, item_type } if name == "Recovery sheet" && item_type == 2
+            Request::CreateItem { name, item_type, favorite }
+                if name == "Recovery sheet" && item_type == 2 && favorite
         )));
 
         apply(
@@ -1165,6 +1203,7 @@ mod tests {
 
         start_edit(&mut state);
         assert_eq!(state.edit.as_ref().unwrap().id, "1");
+        toggle_edit_favorite(&mut state);
         state
             .edit
             .as_mut()
@@ -1175,7 +1214,8 @@ mod tests {
         assert!(state.edit.is_none());
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            Request::UpdateName { id, name } if id == "1" && name == "Renamed GitHub"
+            Request::UpdateName { id, name, favorite }
+                if id == "1" && name == "Renamed GitHub" && !favorite
         )));
 
         apply(
@@ -1183,9 +1223,11 @@ mod tests {
             Event::ItemRenamed {
                 id: "1".to_owned(),
                 name: "Renamed GitHub".to_owned(),
+                favorite: false,
             },
         );
         assert_eq!(state.rows[0].name, "Renamed GitHub");
+        assert!(!state.rows[0].favorite);
         assert_eq!(state.notice.as_deref(), Some("Item renamed"));
         assert!(rx
             .try_iter()
