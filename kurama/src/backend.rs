@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Mutex;
 
+use crate::theme::ThemePreference;
+use kurama_host::config::{Config, ConfigManager};
 use kurama_host::ssh::{generate_keypair, parse_private_key, GeneratedSshKey, SshAlgorithm};
 use serde_json::{json, Value};
 
@@ -103,6 +105,19 @@ pub struct Snapshot {
     pub items: Vec<VaultRow>,
     pub items_count: usize,
     pub quick_unlock_ready: bool,
+}
+
+/// Non-secret backend preferences shown in the settings screen.
+#[derive(Clone, Debug, Default)]
+pub struct Settings {
+    pub theme: ThemePreference,
+    pub auto_lock_minutes: i64,
+    pub clipboard_clear_seconds: i64,
+    pub server_url: String,
+    pub email: String,
+    pub quick_unlock: bool,
+    pub ssh_agent_enabled: bool,
+    pub ssh_agent_confirm: String,
 }
 
 /// Non-secret result of an account authentication request.
@@ -333,6 +348,8 @@ pub enum Request {
         password: Secret,
     },
     QuickUnlock,
+    Settings,
+    SetTheme(ThemePreference),
     Events {
         since: u64,
     },
@@ -568,6 +585,7 @@ pub enum Event {
         kind: String,
     },
     Error(String),
+    Settings(Settings),
     Synced(Snapshot),
     SyncFailed(String),
 }
@@ -969,6 +987,16 @@ pub fn perform(request: Request) -> Event {
             },
             Err(_) => Event::Error("Quick unlock failed".to_owned()),
         },
+        Request::Settings => Event::Settings(load_settings()),
+        Request::SetTheme(theme) => {
+            let manager = ConfigManager::default();
+            let mut config = manager.load();
+            config.theme = theme.as_config().to_owned();
+            match manager.save(&config) {
+                Ok(_) => Event::Settings(settings_from_config(&config)),
+                Err(error) => Event::Error(format!("Could not save theme: {error}")),
+            }
+        }
         Request::Events { since } => match call(json!({ "action": "events", "since": since })) {
             Ok(response) => {
                 let (cursor, notices) = notices(&response);
@@ -1149,6 +1177,23 @@ fn call(body: Value) -> Result<Value, String> {
         return Err(message.to_owned());
     }
     Ok(response)
+}
+
+fn load_settings() -> Settings {
+    settings_from_config(&ConfigManager::default().load())
+}
+
+fn settings_from_config(config: &Config) -> Settings {
+    Settings {
+        theme: ThemePreference::from_config(&config.theme),
+        auto_lock_minutes: config.auto_lock_minutes,
+        clipboard_clear_seconds: config.clipboard_clear_seconds,
+        server_url: config.server_url.clone(),
+        email: config.email.clone(),
+        quick_unlock: config.quick_unlock,
+        ssh_agent_enabled: config.ssh_agent_enabled,
+        ssh_agent_confirm: config.ssh_agent_confirm.clone(),
+    }
 }
 
 fn snapshot() -> Result<Snapshot, String> {

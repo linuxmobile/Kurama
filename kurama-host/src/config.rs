@@ -16,6 +16,7 @@ pub const DEFAULT_LOG_LEVEL: &str = "error";
 pub const DEFAULT_SHOW_WEBSITE_ICONS: bool = true;
 pub const DEFAULT_REMEMBER_LAST_SEARCH: bool = false;
 pub const DEFAULT_MAX_ATTACHMENT_SIZE_MB: u64 = 500;
+pub const DEFAULT_THEME: &str = "system";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
@@ -59,6 +60,13 @@ pub struct Config {
     /// check (system password / fingerprint) instead of the master password.
     #[serde(default)]
     pub quick_unlock: bool,
+    /// UI appearance: "system", "dark" or "light".
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    DEFAULT_THEME.to_string()
 }
 
 fn default_server_url() -> String {
@@ -119,6 +127,7 @@ impl Default for Config {
             ssh_agent_enabled: false,
             ssh_agent_confirm: default_ssh_agent_confirm(),
             quick_unlock: false,
+            theme: default_theme(),
         }
     }
 }
@@ -445,6 +454,7 @@ mod tests {
         assert_eq!(cfg.log_level, "error");
         assert!(!cfg.remember_last_search);
         assert_eq!(cfg.max_attachment_size_mb, 500);
+        assert_eq!(cfg.theme, DEFAULT_THEME);
     }
 
     #[test]

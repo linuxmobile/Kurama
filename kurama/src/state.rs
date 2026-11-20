@@ -8,9 +8,10 @@ use rune::{edit::TextEdit, Tx, Waker};
 
 use crate::backend::{
     self, clear_revealed, clear_totp, Approval, AuthOutcome, CardInput, CustomFieldInput, Event,
-    FieldValue, IdentityInput, ItemDetails, ItemField, Request, Secret, SendRow, Snapshot,
-    TotpMeta, VaultRow,
+    FieldValue, IdentityInput, ItemDetails, ItemField, Request, Secret, SendRow, Settings,
+    Snapshot, TotpMeta, VaultRow,
 };
+use crate::theme::ThemePreference;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Category {
@@ -270,7 +271,9 @@ pub struct State {
     pub form_error: Option<String>,
     pub approvals: Vec<Approval>,
     pub pending_delete: Option<String>,
-    pub dark_override: Option<bool>,
+    pub settings: Option<Settings>,
+    pub settings_open: bool,
+    pub theme: ThemePreference,
     pub help: bool,
     rows_version: u64,
     visible_cache: RefCell<Option<VisibleCache>>,
@@ -319,7 +322,9 @@ impl Default for State {
             form_error: None,
             approvals: Vec::new(),
             pending_delete: None,
-            dark_override: None,
+            settings: None,
+            settings_open: false,
+            theme: ThemePreference::default(),
             help: false,
             rows_version: 0,
             visible_cache: RefCell::new(None),
@@ -400,7 +405,7 @@ impl State {
     }
 
     pub fn dark(&self, system_dark: bool) -> bool {
-        self.dark_override.unwrap_or(system_dark)
+        self.theme.dark(system_dark)
     }
 }
 
@@ -1434,6 +1439,7 @@ pub fn setup(state: &mut State, wake: Waker) {
 
     let _ = request_tx.send(Request::Refresh);
     let _ = request_tx.send(Request::Folders);
+    let _ = request_tx.send(Request::Settings);
 }
 
 pub fn poll(state: &mut State, seconds: f64, _tx: &mut Tx) -> bool {
@@ -1496,7 +1502,9 @@ fn visible_fingerprint(state: &State) -> u64 {
     state.query.text.hash(&mut hasher);
     state.busy.hash(&mut hasher);
     state.notice.hash(&mut hasher);
-    state.dark_override.hash(&mut hasher);
+    state.theme.hash(&mut hasher);
+    state.settings_open.hash(&mut hasher);
+    state.settings.as_ref().map(|s| s.theme).hash(&mut hasher);
     state.help.hash(&mut hasher);
     if state.snapshot.status != "unlocked" {
         state.snapshot.quick_unlock_ready.hash(&mut hasher);
@@ -1713,6 +1721,10 @@ fn apply(state: &mut State, event: Event) {
             state.syncing = false;
             state.sync_error = Some(message.clone());
             state.notice = Some(format!("Sync failed: {message}"));
+        }
+        Event::Settings(settings) => {
+            state.theme = settings.theme;
+            state.settings = Some(settings);
         }
         Event::Auth(outcome) => apply_auth_outcome(state, outcome),
         Event::Generated {
@@ -2083,6 +2095,27 @@ fn empty_send_draft() -> SendDraft {
         expiration: TextEdit::new(""),
         password: TextEdit::new("").secure(),
     }
+}
+
+pub fn open_settings(state: &mut State) {
+    state.settings_open = true;
+    state.form_error = None;
+    dispatch(state, Request::Settings);
+}
+
+pub fn close_settings(state: &mut State) {
+    state.settings_open = false;
+}
+
+pub fn set_theme(state: &mut State, theme: ThemePreference) {
+    if state.theme == theme {
+        return;
+    }
+    state.theme = theme;
+    if let Some(settings) = state.settings.as_mut() {
+        settings.theme = theme;
+    }
+    dispatch(state, Request::SetTheme(theme));
 }
 
 pub fn open_sends(state: &mut State) {
@@ -2519,6 +2552,22 @@ pub fn scene_generator(state: &mut State) {
         .value
         .replace_text("Co4rect-Horse-Battery");
     state.generator.as_mut().unwrap().entropy = 78.4;
+}
+
+pub fn scene_settings(state: &mut State) {
+    scene_populated(state);
+    state.theme = ThemePreference::Dark;
+    state.settings = Some(Settings {
+        theme: ThemePreference::Dark,
+        auto_lock_minutes: 15,
+        clipboard_clear_seconds: 30,
+        server_url: state.snapshot.server.clone(),
+        email: state.snapshot.email.clone(),
+        quick_unlock: true,
+        ssh_agent_enabled: false,
+        ssh_agent_confirm: "first-use".to_owned(),
+    });
+    state.settings_open = true;
 }
 
 pub fn scene_sends(state: &mut State) {

@@ -11,14 +11,14 @@ use crate::state::{
     add_create_field, add_create_uri, add_edit_uri, adjust_generator_length,
     adjust_generator_words, answer_approval, apply_agent_settings, cancel_create,
     cancel_delete_send, cancel_edit, cancel_send, close_attachment, close_generator, close_sends,
-    close_ssh_tools, confirm_delete_send, copy_field, copy_generated, copy_send,
+    close_settings, close_ssh_tools, confirm_delete_send, copy_field, copy_generated, copy_send,
     cycle_create_field_type, cycle_create_folder, cycle_edit_folder, cycle_ssh_algorithm,
     delete_item, disable_send, dispatch, folder_label, generate_password, logout, move_selection,
-    new_send, open_attachment, open_generator, open_sends, open_ssh_tools, open_trash,
-    refresh_agent_status, remove_create_field, remove_create_uri, remove_edit_uri,
+    new_send, open_attachment, open_generator, open_sends, open_settings, open_ssh_tools,
+    open_trash, refresh_agent_status, remove_create_field, remove_create_uri, remove_edit_uri,
     request_delete_send, restore_item, save_ssh_tool_key, select_category, select_folder,
     select_item, select_send, send_two_factor_email, set_auth_mode, set_create_type, set_favorite,
-    set_generator_passphrase, set_ssh_tool_mode, start_edit, submit_auth, submit_create,
+    set_generator_passphrase, set_ssh_tool_mode, set_theme, start_edit, submit_auth, submit_create,
     submit_edit, submit_fido2, submit_quick_unlock, submit_search, submit_send, submit_ssh_export,
     submit_ssh_generate, submit_ssh_import, submit_unlock, toggle_create_favorite,
     toggle_create_field_value, toggle_edit_favorite, toggle_generator_option, toggle_reveal,
@@ -27,7 +27,8 @@ use crate::state::{
     SshDraft, SshToolMode, State,
 };
 use crate::theme::{
-    accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
+    accent, selected_row, ThemePreference, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE,
+    WINDOW_TITLE,
 };
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
@@ -63,6 +64,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         account(s, dark)
     } else if !unlocked {
         unlock(s, dark)
+    } else if s.settings_open {
+        settings(s, dark)
     } else {
         vault(s, dark)
     };
@@ -117,6 +120,126 @@ fn help(_s: &State, dark: bool) -> El {
         .child(action("help-close", "Close", dark, |state| {
             state.help = false;
         }))
+}
+
+fn settings(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let mut appearance = row()
+        .key("settings-appearance")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(
+            text("Appearance")
+                .font(SECTION_TITLE)
+                .color(t.text_secondary),
+        );
+    for theme in ThemePreference::ALL {
+        let selected = s.theme == theme;
+        appearance = appearance.child(action(
+            theme.key(),
+            format!("{} {}", if selected { "•" } else { " " }, theme.label()),
+            dark,
+            move |state| set_theme(state, theme),
+        ));
+    }
+
+    let (auto_lock, clipboard, account, quick_unlock, ssh_agent, approvals) = match &s.settings {
+        Some(settings) => (
+            if settings.auto_lock_minutes <= 0 {
+                "Disabled".to_owned()
+            } else {
+                format!("{} min", settings.auto_lock_minutes)
+            },
+            format!("{} s", settings.clipboard_clear_seconds),
+            if settings.email.is_empty() {
+                "Not signed in".to_owned()
+            } else {
+                settings.email.clone()
+            },
+            if settings.quick_unlock {
+                "Enabled".to_owned()
+            } else {
+                "Disabled".to_owned()
+            },
+            if settings.ssh_agent_enabled {
+                "Enabled".to_owned()
+            } else {
+                "Disabled".to_owned()
+            },
+            settings.ssh_agent_confirm.clone(),
+        ),
+        None => (
+            "Loading…".to_owned(),
+            "Loading…".to_owned(),
+            "Loading…".to_owned(),
+            "Loading…".to_owned(),
+            "Loading…".to_owned(),
+            "Loading…".to_owned(),
+        ),
+    };
+    let server = s
+        .settings
+        .as_ref()
+        .map(|settings| settings.server_url.clone())
+        .unwrap_or_else(|| "Loading…".to_owned());
+
+    let mut body = col().key("settings-body").w_full().gap(20.0);
+    body = body
+        .child(appearance)
+        .child(el().h(1.0).w_full().fill(t.separator))
+        .child(settings_section(
+            "settings-vault",
+            "Vault",
+            dark,
+            col()
+                .gap(12.0)
+                .child(field("Auto-lock", auto_lock.as_str(), dark))
+                .child(field("Clipboard clear", clipboard.as_str(), dark)),
+        ))
+        .child(el().h(1.0).w_full().fill(t.separator))
+        .child(settings_section(
+            "settings-account",
+            "Account and backend",
+            dark,
+            col()
+                .gap(12.0)
+                .child(field("Server", &server, dark))
+                .child(field("Account", &account, dark))
+                .child(field("Quick unlock", quick_unlock.as_str(), dark))
+                .child(field("SSH agent", ssh_agent.as_str(), dark))
+                .child(field("SSH approvals", approvals.as_str(), dark)),
+        ))
+        .child(
+            text("Connection, certificate, and keyring options are managed by `kurama config`.")
+                .key("settings-config-hint")
+                .font(META)
+                .color(t.text_secondary),
+        );
+
+    form_panel(
+        "settings",
+        "Settings",
+        dark,
+        el(),
+        body,
+        row().child(action("settings-close", "Close", dark, close_settings)),
+        None,
+    )
+}
+
+fn settings_section(key: &str, title: &str, dark: bool, body: El) -> El {
+    let t = tok::theme(dark);
+    col()
+        .key(key)
+        .w_full()
+        .gap(10.0)
+        .child(
+            text(title.to_owned())
+                .font(SECTION_TITLE)
+                .color(t.text_secondary),
+        )
+        .child(body)
 }
 
 fn field_label(content: impl Into<String>, dark: bool) -> El {
@@ -1683,10 +1806,16 @@ fn top_bar(s: &State, dark: bool) -> El {
             if dark { "Light" } else { "Dark" },
             dark,
             move |s| {
-                s.dark_override = Some(!dark);
+                let next = if dark {
+                    ThemePreference::Light
+                } else {
+                    ThemePreference::Dark
+                };
+                set_theme(s, next);
             },
         ))
         .child(action("sends", "Sends", dark, open_sends))
+        .child(action("settings", "Settings", dark, open_settings))
         .child(action("ssh-tools", "SSH keys", dark, open_ssh_tools))
         .child(action(
             "sync",

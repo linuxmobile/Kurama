@@ -60,6 +60,7 @@ fn main() -> ExitCode {
             ("create-fields", state::scene_create_fields),
             ("create-uris", state::scene_create_uris),
             ("generator", state::scene_generator),
+            ("settings", state::scene_settings),
             ("sends", state::scene_sends),
             ("send-form", state::scene_send_form),
             ("attachment-preview", state::scene_attachment_preview),
@@ -80,6 +81,10 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         return false;
     }
     match &event.key {
+        Key::Escape if state.settings_open => {
+            state::close_settings(state);
+            true
+        }
         Key::Escape if state.help => {
             state.help = false;
             true
@@ -218,7 +223,8 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{Approval, FieldValue, ItemField};
+    use crate::backend::{Approval, FieldValue, ItemField, Request};
+    use crate::theme::ThemePreference;
     use rune::{Env, Mods, Runtime};
 
     fn runtime(scene: impl FnOnce(&mut State)) -> Runtime<State> {
@@ -761,6 +767,54 @@ mod tests {
                 preview,
             } if item_id == "1" && attachment_id == "att-1" && filename == "notes.txt" && !preview
         )));
+    }
+
+    #[test]
+    fn settings_screen_shows_options_and_theme_choices() {
+        let mut rt = runtime(state::scene_settings);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("settings").is_some());
+        assert!(rt.find("settings-appearance").is_some());
+        assert!(rt.find("settings-theme-system").is_some());
+        assert!(rt.find("settings-theme-dark").is_some());
+        assert!(rt.find("settings-theme-light").is_some());
+        assert!(rt.find("settings-vault").is_some());
+        assert!(rt.find("settings-account").is_some());
+        assert!(rt.find("field-value-Server").is_some());
+        assert!(rt.find("settings-close").is_some());
+    }
+
+    #[test]
+    fn settings_theme_persists_and_escape_closes_settings() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.requests = Some(tx.clone());
+        });
+        rt.on_key = Some(on_key);
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("settings").expect("settings button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.settings_open);
+
+        let (x, y) = rt.find("settings-theme-light").expect("light theme button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.theme, ThemePreference::Light);
+        assert!(rx
+            .try_iter()
+            .any(|request| matches!(request, Request::SetTheme(ThemePreference::Light))));
+
+        rt.key(KeyEvent {
+            key: Key::Escape,
+            mods: Mods::default(),
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(!rt.state.settings_open);
+        assert!(rt.find("details").is_some());
     }
 
     #[test]
