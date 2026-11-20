@@ -2,7 +2,7 @@ use rune::tok::{self, type_};
 use rune::{col, el, row, text, text_input, Color, Cx, El, ScrollSpec, Tx};
 
 use crate::backend::Request;
-use crate::state::{dispatch, submit_search, Category, State};
+use crate::state::{dispatch, submit_quick_unlock, submit_search, submit_unlock, Category, State};
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
 };
@@ -23,14 +23,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             Request::Refresh,
         )
     } else if !unlocked {
-        placeholder(
-            s,
-            dark,
-            "Vault locked",
-            "Unlock with `kurama auth unlock` or Quick Unlock, then refresh.",
-            "Refresh",
-            Request::Refresh,
-        )
+        unlock(s, dark)
     } else {
         vault(s, dark)
     };
@@ -452,6 +445,67 @@ fn status_bar(s: &State, dark: bool) -> El {
                 .truncate(),
         )
         .child(text(server).font(META).color(t.text_secondary).truncate())
+}
+
+fn unlock(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let notice = s
+        .notice
+        .as_deref()
+        .unwrap_or("Enter your master password to unlock this vault.");
+
+    let password = text_input(&s.password, type_::BODY)
+        .key("unlock-password")
+        .label("Master password")
+        .placeholder("Master password", t.text_secondary)
+        .secure()
+        .single_line()
+        .color(t.text)
+        .w(320.0)
+        .h(36.0)
+        .padding(10.0)
+        .radius(8.0)
+        .fill(t.card)
+        .border(1.0, t.card_border)
+        .on_edit(|s: &mut State| &mut s.password)
+        .on_submit(submit_unlock);
+
+    let mut actions = row().key("unlock-actions").gap(8.0).child(action_tx(
+        "unlock-button",
+        "Unlock",
+        dark,
+        submit_unlock,
+    ));
+    if s.snapshot.quick_unlock_ready {
+        actions = actions.child(action(
+            "quick-unlock-button",
+            "Quick Unlock",
+            dark,
+            submit_quick_unlock,
+        ));
+    }
+
+    col()
+        .key("unlock")
+        .w_full()
+        .grow(1.0)
+        .center()
+        .gap(14.0)
+        .fill(t.bg)
+        .child(
+            text("Vault locked")
+                .key("placeholder-title")
+                .font(WINDOW_TITLE)
+                .color(t.text),
+        )
+        .child(password)
+        .child(actions)
+        .child(
+            text(notice.to_owned())
+                .key("unlock-notice")
+                .font(ROW_SUBTITLE)
+                .color(t.text_secondary),
+        )
 }
 
 fn placeholder(

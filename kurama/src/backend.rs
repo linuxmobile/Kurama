@@ -4,6 +4,8 @@
 //! The UI only ever sees the small, metadata-only structs below; vault secrets
 //! stay inside the daemon.
 
+use std::fmt;
+
 use serde_json::{json, Value};
 
 /// Non-secret information shown in the item list and detail pane.
@@ -27,6 +29,7 @@ pub struct Snapshot {
     pub last_sync: String,
     pub items: Vec<VaultRow>,
     pub items_count: usize,
+    pub quick_unlock_ready: bool,
 }
 
 /// Non-secret status or error notice from the backend event log.
@@ -53,8 +56,35 @@ pub enum Request {
     Search(String),
     Sync,
     Lock,
+    Unlock { password: Secret },
+    QuickUnlock,
     Events { since: u64 },
     Approvals,
+}
+
+#[derive(Clone)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret([redacted])")
+    }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
 }
 
 #[derive(Debug)]
@@ -94,6 +124,22 @@ pub fn perform(request: Request) -> Event {
                 Err(error) => Event::Error(error),
             },
             Err(error) => Event::Error(error),
+        },
+        Request::Unlock { password } => {
+            match call(json!({ "action": "unlock", "password": password.as_str() })) {
+                Ok(_) => match snapshot() {
+                    Ok(snapshot) => Event::Snapshot(snapshot),
+                    Err(error) => Event::Error(error),
+                },
+                Err(_) => Event::Error("Vault unlock failed".to_owned()),
+            }
+        }
+        Request::QuickUnlock => match call(json!({ "action": "quick_unlock" })) {
+            Ok(_) => match snapshot() {
+                Ok(snapshot) => Event::Snapshot(snapshot),
+                Err(error) => Event::Error(error),
+            },
+            Err(_) => Event::Error("Quick unlock failed".to_owned()),
         },
         Request::Events { since } => match call(json!({ "action": "events", "since": since })) {
             Ok(response) => {
@@ -137,6 +183,10 @@ fn snapshot() -> Result<Snapshot, String> {
     };
 
     let items_count = items.len();
+    let quick_unlock_ready = call(json!({ "action": "ping" }))
+        .ok()
+        .and_then(|response| response.get("quick_unlock").and_then(Value::as_bool))
+        .unwrap_or(false);
 
     Ok(Snapshot {
         status: state.to_owned(),
@@ -145,6 +195,7 @@ fn snapshot() -> Result<Snapshot, String> {
         last_sync: text(&status, "last_sync"),
         items,
         items_count,
+        quick_unlock_ready,
     })
 }
 
@@ -258,6 +309,14 @@ fn text(value: &Value, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_debug_is_redacted() {
+        let secret = Secret::new("hunter2".to_owned());
+        let debug = format!("{:?}", secret);
+        assert!(!debug.contains("hunter2"));
+        assert!(debug.contains("redacted"));
+    }
 
     #[test]
     fn rows_keep_metadata_but_drop_secret_fields() {

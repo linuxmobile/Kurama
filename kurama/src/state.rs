@@ -2,7 +2,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use rune::{edit::TextEdit, Tx, Waker};
 
-use crate::backend::{self, Approval, Event, Request, Snapshot, VaultRow};
+use crate::backend::{self, Approval, Event, Request, Secret, Snapshot, VaultRow};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
@@ -55,6 +55,7 @@ pub struct State {
     pub snapshot: Snapshot,
     pub rows: Vec<VaultRow>,
     pub query: TextEdit,
+    pub password: TextEdit,
     pub category: Category,
     pub selected: Option<String>,
     pub busy: bool,
@@ -73,6 +74,7 @@ impl Default for State {
             snapshot: Snapshot::default(),
             rows: Vec::new(),
             query: TextEdit::new(""),
+            password: TextEdit::new("").secure(),
             category: Category::All,
             selected: None,
             busy: true,
@@ -191,6 +193,7 @@ fn apply(state: &mut State, event: Event) {
             if changed_vault {
                 state.selected = None;
                 state.query.clear();
+                state.password.replace_text("");
             }
             if state.selected.is_none() {
                 state.selected = state.rows.first().map(|item| item.id.clone());
@@ -237,12 +240,37 @@ pub fn submit_search(state: &mut State, _tx: &mut Tx) {
     dispatch(state, Request::Search(query));
 }
 
+pub fn submit_unlock(state: &mut State, _tx: &mut Tx) {
+    queue_unlock(state);
+}
+
+fn queue_unlock(state: &mut State) {
+    let password = state.password.text.clone();
+    if password.is_empty() {
+        state.notice = Some("Enter your master password.".to_owned());
+        return;
+    }
+    state.password.replace_text("");
+    dispatch(
+        state,
+        Request::Unlock {
+            password: Secret::new(password),
+        },
+    );
+}
+
+pub fn submit_quick_unlock(state: &mut State) {
+    state.password.replace_text("");
+    dispatch(state, Request::QuickUnlock);
+}
+
 pub fn scene_populated(state: &mut State) {
     state.snapshot = Snapshot {
         status: "unlocked".to_owned(),
         email: "user@example.com".to_owned(),
         server: "https://vault.example.com".to_owned(),
         last_sync: "2026-01-02T03:04:05Z".to_owned(),
+        quick_unlock_ready: false,
         items: Vec::new(),
         items_count: 4,
     };
@@ -257,6 +285,7 @@ pub fn scene_locked(state: &mut State) {
         status: "locked".to_owned(),
         email: "user@example.com".to_owned(),
         server: "https://vault.example.com".to_owned(),
+        quick_unlock_ready: true,
         ..Snapshot::default()
     };
     state.busy = false;
@@ -327,6 +356,64 @@ mod tests {
             state.selected_item().map(|item| item.id.as_str()),
             Some("1")
         );
+    }
+
+    #[test]
+    fn unlock_submission_dispatches_a_redacted_secret_and_clears_the_field() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        state.password = TextEdit::new("hunter2").secure();
+
+        queue_unlock(&mut state);
+
+        assert!(state.password.text.is_empty());
+        let requests: Vec<_> = rx.try_iter().collect();
+        assert_eq!(requests.len(), 1);
+        match &requests[0] {
+            Request::Unlock { password } => {
+                assert_eq!(password.as_str(), "hunter2");
+                let debug = format!("{:?}", password);
+                assert!(!debug.contains("hunter2"));
+            }
+            other => panic!("unexpected request: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn quick_unlock_clears_the_password_field() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        state.password = TextEdit::new("hunter2").secure();
+
+        submit_quick_unlock(&mut state);
+
+        assert!(state.password.text.is_empty());
+        assert!(matches!(rx.try_iter().next(), Some(Request::QuickUnlock)));
+    }
+
+    #[test]
+    fn locking_clears_the_unlock_field() {
+        let mut state = State::default();
+        apply(
+            &mut state,
+            Event::Snapshot(Snapshot {
+                status: "unlocked".to_owned(),
+                ..Snapshot::default()
+            }),
+        );
+        state.password = TextEdit::new("hunter2").secure();
+
+        apply(
+            &mut state,
+            Event::Snapshot(Snapshot {
+                status: "locked".to_owned(),
+                ..Snapshot::default()
+            }),
+        );
+
+        assert!(state.password.text.is_empty());
     }
 
     #[test]

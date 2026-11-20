@@ -95,6 +95,9 @@ mod tests {
         let mut rt = runtime(state::scene_locked);
         rt.frame(1.0 / 60.0);
         assert!(rt.find("placeholder-title").is_some());
+        assert!(rt.find("unlock-password").is_some());
+        assert!(rt.find("unlock-button").is_some());
+        assert!(rt.find("quick-unlock-button").is_some());
         assert!(rt.find("item-1").is_none());
     }
 
