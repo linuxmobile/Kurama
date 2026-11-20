@@ -119,6 +119,14 @@ fn help(_s: &State, dark: bool) -> El {
         }))
 }
 
+fn field_label(content: impl Into<String>, dark: bool) -> El {
+    row().w_full().min_h(16.0).center_y().items_start().child(
+        text(content)
+            .font(SECTION_TITLE)
+            .color(tok::theme(dark).text_secondary),
+    )
+}
+
 fn labeled_input(
     value: &TextEdit,
     key: &str,
@@ -130,46 +138,44 @@ fn labeled_input(
 ) -> El {
     let t = tok::theme(dark);
     col()
-        .gap(6.0)
+        .gap(8.0)
+        .child(field_label(label, dark).key(format!("{key}-label")))
         .child(
-            text(label)
-                .key(format!("{key}-label"))
-                .font(SECTION_TITLE)
-                .color(t.text_secondary)
-                .h(18.0)
-                .center_y(),
-        )
-        .child(
-            text_input(value, type_::BODY)
-                .key(key)
-                .label(label)
-                .placeholder(placeholder, t.text_secondary)
+            el().key(format!("{key}-shell"))
                 .w_full()
                 .h(40.0)
                 .px(12.0)
                 .radius(8.0)
                 .fill(t.card)
                 .border(1.0, t.card_border)
-                .on_edit(on_edit)
-                .on_submit(move |s: &mut State, _tx: &mut Tx| submit(s))
-                .on_input_key(|s: &mut State, event: &KeyEvent, _tx: &mut Tx| {
-                    if matches!(event.key, Key::Escape) {
-                        if s.create.is_some() {
-                            cancel_create(s);
-                        } else if s.edit.is_some() {
-                            cancel_edit(s);
-                        } else if s.send_form.is_some() {
-                            cancel_send(s);
-                        } else if s.ssh_tools.is_some() {
-                            close_ssh_tools(s);
-                        } else {
-                            return false;
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                }),
+                .center_y()
+                .child(
+                    text_input(value, type_::BODY)
+                        .key(key)
+                        .label(label)
+                        .placeholder(placeholder, t.text_secondary)
+                        .grow(1.0)
+                        .on_edit(on_edit)
+                        .on_submit(move |s: &mut State, _tx: &mut Tx| submit(s))
+                        .on_input_key(|s: &mut State, event: &KeyEvent, _tx: &mut Tx| {
+                            if matches!(event.key, Key::Escape) {
+                                if s.create.is_some() {
+                                    cancel_create(s);
+                                } else if s.edit.is_some() {
+                                    cancel_edit(s);
+                                } else if s.send_form.is_some() {
+                                    cancel_send(s);
+                                } else if s.ssh_tools.is_some() {
+                                    close_ssh_tools(s);
+                                } else {
+                                    return false;
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        }),
+                ),
         )
 }
 
@@ -192,46 +198,41 @@ fn multiline_field(
     if style.revealed_secure {
         input = input.secure().revealed(true);
     }
-    col()
-        .gap(6.0)
-        .child(
-            text(style.label)
-                .font(SECTION_TITLE)
-                .color(t.text_secondary)
-                .h(18.0)
-                .center_y(),
-        )
-        .child(
-            input
-                .key(key)
-                .label(style.label)
-                .placeholder(style.placeholder, t.text_secondary)
-                .w_full()
-                .h(style.height)
-                .px(12.0)
-                .radius(8.0)
-                .fill(t.card)
-                .border(1.0, t.card_border)
-                .on_edit(on_edit)
-                .on_input_key(|s: &mut State, event: &KeyEvent, _tx: &mut Tx| {
-                    if matches!(event.key, Key::Escape) {
-                        if s.create.is_some() {
-                            cancel_create(s);
-                        } else if s.edit.is_some() {
-                            cancel_edit(s);
-                        } else if s.send_form.is_some() {
-                            cancel_send(s);
-                        } else if s.ssh_tools.is_some() {
-                            close_ssh_tools(s);
+    col().gap(8.0).child(field_label(style.label, dark)).child(
+        el().key(format!("{key}-shell"))
+            .w_full()
+            .h(style.height)
+            .px(12.0)
+            .radius(8.0)
+            .fill(t.card)
+            .border(1.0, t.card_border)
+            .child(
+                input
+                    .key(key)
+                    .label(style.label)
+                    .placeholder(style.placeholder, t.text_secondary)
+                    .grow(1.0)
+                    .on_edit(on_edit)
+                    .on_input_key(|s: &mut State, event: &KeyEvent, _tx: &mut Tx| {
+                        if matches!(event.key, Key::Escape) {
+                            if s.create.is_some() {
+                                cancel_create(s);
+                            } else if s.edit.is_some() {
+                                cancel_edit(s);
+                            } else if s.send_form.is_some() {
+                                cancel_send(s);
+                            } else if s.ssh_tools.is_some() {
+                                close_ssh_tools(s);
+                            } else {
+                                return false;
+                            }
+                            true
                         } else {
-                            return false;
+                            false
                         }
-                        true
-                    } else {
-                        false
-                    }
-                }),
-        )
+                    }),
+            ),
+    )
 }
 
 fn notes_input(

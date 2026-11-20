@@ -236,6 +236,33 @@ mod tests {
     }
 
     #[test]
+    fn field_labels_share_input_padding() {
+        let mut rt = runtime(state::scene_ssh_tools);
+        rt.frame(1.0 / 60.0);
+        let elements = rt.elements();
+        for (label, input) in [
+            ("ssh-tool-name-label", "ssh-tool-name"),
+            ("ssh-tool-comment-label", "ssh-tool-comment"),
+        ] {
+            let label_x = elements
+                .iter()
+                .find(|element| element.key.as_deref() == Some(label))
+                .unwrap_or_else(|| panic!("missing label: {label}"))
+                .rect[0];
+            let input_x = elements
+                .iter()
+                .find(|element| element.key.as_deref() == Some(input))
+                .unwrap_or_else(|| panic!("missing input: {input}"))
+                .rect[0];
+            let expected_input_x = label_x + 12.0;
+            assert!(
+                (expected_input_x - input_x).abs() < 0.01,
+                "{label} at {label_x}, {input} at {input_x}"
+            );
+        }
+    }
+
+    #[test]
     fn generator_scene_shows_password_and_result_controls() {
         let mut rt = runtime(state::scene_generator);
         rt.frame(1.0 / 60.0);
