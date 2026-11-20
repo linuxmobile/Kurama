@@ -1042,6 +1042,45 @@ pub fn is_system_or_screen_locked() -> bool {
     system_lock_signal() != LockSignal::None
 }
 
+fn auth_manager_for_request(state: &DaemonState, req: &Value) -> crate::auth::AuthManager {
+    let config = crate::config::ConfigManager::default().load();
+    let server_url = req
+        .get("server_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(config.server_url.as_str());
+    let identity_url = req
+        .get("identity_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(config.identity_url.as_deref());
+    crate::auth::AuthManager::with_config(
+        server_url,
+        identity_url,
+        Some(state.vault_mgr.storage_mgr.clone()),
+        Some(state.vault_mgr.keyring_mgr.clone()),
+        Some(crate::config::ConfigManager::default()),
+    )
+}
+
+fn auth_result_json(result: crate::auth::AuthResult) -> Value {
+    match serde_json::to_value(result) {
+        Ok(mut value) => {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("session");
+                object.remove("session_token");
+            }
+            value
+        }
+        Err(_) => json!({
+            "ok": false,
+            "error": "Authentication response could not be encoded"
+        }),
+    }
+}
+
 fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<()> {
     if let Err(e) = verify_peer_credentials(&stream) {
         crate::log_error!(
@@ -1181,6 +1220,94 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
                     json!({ "ok": false, "status": "locked", "error": e })
                 }
             }
+        }
+        "login_password" => {
+            let email = req
+                .get("email")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            let password = req
+                .get("password")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            if email.is_empty() || password.is_empty() {
+                json!({ "ok": false, "error": "Email and password are required" })
+            } else {
+                let code = req
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let new_device = req
+                    .get("new_device_otp")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let provider = req
+                    .get("two_factor_provider")
+                    .and_then(Value::as_i64)
+                    .and_then(|value| i32::try_from(value).ok());
+                auth_result_json(
+                    auth_manager_for_request(state.as_ref(), &req)
+                        .login_password(&email, &password, code, provider, new_device),
+                )
+            }
+        }
+        "login_apikey" => {
+            let client_id = req
+                .get("client_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            let client_secret = req
+                .get("client_secret")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            if client_id.is_empty() || client_secret.is_empty() {
+                json!({ "ok": false, "error": "Client ID and secret are required" })
+            } else {
+                auth_result_json(
+                    auth_manager_for_request(state.as_ref(), &req)
+                        .login_apikey(&client_id, &client_secret),
+                )
+            }
+        }
+        "send_two_factor_email" => {
+            let email = req
+                .get("email")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            let password = req
+                .get("password")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            if email.is_empty() || password.is_empty() {
+                json!({ "ok": false, "error": "Email and password are required" })
+            } else {
+                match auth_manager_for_request(state.as_ref(), &req)
+                    .send_two_factor_email(&email, &password)
+                {
+                    Ok(()) => json!({
+                        "ok": true,
+                        "message": "Two-factor verification code sent to your email."
+                    }),
+                    Err(error) => json!({ "ok": false, "error": error.to_string() }),
+                }
+            }
+        }
+        "logout" => {
+            let result = auth_manager_for_request(state.as_ref(), &req).logout();
+            state.lock();
+            state.record_event("status", json!({ "status": "unauthenticated" }));
+            auth_result_json(result)
         }
         // ADR-0025: system-authentication re-unlock from the retained key.
         "quick_unlock" => match state.perform_quick_unlock() {
@@ -1698,6 +1825,110 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn auth_result_json_drops_session_material() {
+        let response = auth_result_json(crate::auth::AuthResult {
+            ok: true,
+            status: Some("unlocked".to_owned()),
+            session: Some("secret-session".to_owned()),
+            session_token: Some("secret-token".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["status"], "unlocked");
+        assert!(response.get("session").is_none());
+        assert!(response.get("session_token").is_none());
+        assert!(!response.to_string().contains("secret-"));
+    }
+
+    #[test]
+    fn auth_ipc_validates_required_credentials() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(DaemonState::new(
+            StorageManager::new(dir.path().join("daemon_data.json")),
+            15,
+        ));
+        let send_req = |req: Value| -> Value {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let st = state.clone();
+            let handle = std::thread::spawn(move || {
+                let _ = handle_client(server, st);
+            });
+            client.write_all(format!("{}\n", req).as_bytes()).unwrap();
+            client.flush().unwrap();
+            let mut line = String::new();
+            BufReader::new(client).read_line(&mut line).unwrap();
+            handle.join().unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        let password = send_req(json!({ "action": "login_password", "email": "", "password": "" }));
+        assert_eq!(password["ok"], false);
+        assert_eq!(password["error"], "Email and password are required");
+
+        let api_key =
+            send_req(json!({ "action": "login_apikey", "client_id": "", "client_secret": "" }));
+        assert_eq!(api_key["ok"], false);
+        assert_eq!(api_key["error"], "Client ID and secret are required");
+
+        let email_code =
+            send_req(json!({ "action": "send_two_factor_email", "email": "", "password": "" }));
+        assert_eq!(email_code["ok"], false);
+    }
+
+    #[test]
+    fn auth_ipc_logout_locks_daemon_and_clears_storage() {
+        let _lock = crate::env_lock();
+        let dir = tempdir().unwrap();
+        let runtime = tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let old_config = std::env::var_os("KURAMA_CONFIG_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+        std::env::set_var("KURAMA_CONFIG_DIR", dir.path());
+
+        let storage_path = dir.path().join("daemon_data.json");
+        let state = DaemonState::new(StorageManager::new(storage_path.clone()), 15);
+        let state = Arc::new(state);
+        *state.vault_mgr.is_unlocked.write().unwrap() = true;
+        state
+            .vault_mgr
+            .storage_mgr
+            .save(&crate::storage::VaultStorage {
+                server_url: "https://vault.example.com".to_owned(),
+                user_email: "user@example.com".to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let st = state.clone();
+        let handle = std::thread::spawn(move || {
+            let _ = handle_client(server, st);
+        });
+        client.write_all(b"{\"action\":\"logout\"}\n").unwrap();
+        client.flush().unwrap();
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).unwrap();
+        handle.join().unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["status"], "unauthenticated");
+        assert!(!state.vault_mgr.is_unlocked());
+        let storage = state.vault_mgr.storage_mgr.load();
+        assert!(storage.server_url.is_empty());
+        assert!(storage.user_email.is_empty());
+
+        match old_runtime {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+        match old_config {
+            Some(value) => std::env::set_var("KURAMA_CONFIG_DIR", value),
+            None => std::env::remove_var("KURAMA_CONFIG_DIR"),
+        }
+    }
 
     #[test]
     fn test_daemon_state_lifecycle() {
