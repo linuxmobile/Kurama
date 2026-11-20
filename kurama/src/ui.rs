@@ -4,11 +4,11 @@ use rune::{
     ScrollSpec, Tx,
 };
 
-use crate::backend::{FieldValue, Request, VaultRow};
+use crate::backend::{revealed_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
     dispatch, move_selection, open_trash, select_category, select_folder, submit_quick_unlock,
-    submit_search, submit_unlock, Category, Location, State,
+    submit_search, submit_unlock, toggle_reveal, Category, Location, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -471,13 +471,29 @@ fn details(s: &State, dark: bool) -> El {
         .child(field("Type", type_label.as_ref(), dark));
     if let Some(details) = s.details.as_ref().filter(|details| details.id == item.id) {
         for detail in &details.fields {
-            let value = match &detail.value {
-                FieldValue::Text(value) => value.as_str(),
-                FieldValue::Masked => "••••••••",
+            let revealed = s.revealed.as_deref() == Some(detail.key.as_str());
+            let shown = match &detail.value {
+                FieldValue::Text(value) => value.clone(),
+                FieldValue::Masked if revealed => {
+                    revealed_value(&detail.key).unwrap_or_else(|| "••••••••".to_owned())
+                }
+                FieldValue::Masked => "••••••••".to_owned(),
             };
-            fields = fields.child(
-                field(&detail.label, value, dark).key(format!("detail-field-{}", detail.key)),
-            );
+            let value = field(&detail.label, &shown, dark)
+                .grow(1.0)
+                .key(format!("detail-field-{}", detail.key));
+            fields = fields.child(if matches!(detail.value, FieldValue::Masked) {
+                let key = detail.key.clone();
+                let label = if revealed { "Hide" } else { "Reveal" };
+                row().gap(10.0).center_y().child(value).child(action(
+                    &format!("reveal-{}", key),
+                    label,
+                    dark,
+                    move |state| toggle_reveal(state, key.clone()),
+                ))
+            } else {
+                value
+            });
         }
     } else if !item.subtitle.is_empty() {
         fields = fields.child(field("Username", &item.subtitle, dark));

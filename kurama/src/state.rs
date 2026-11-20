@@ -7,7 +7,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use rune::{edit::TextEdit, Tx, Waker};
 
 use crate::backend::{
-    self, Approval, Event, FieldValue, ItemDetails, ItemField, Request, Secret, Snapshot, VaultRow,
+    self, clear_revealed, Approval, Event, FieldValue, ItemDetails, ItemField, Request, Secret,
+    Snapshot, VaultRow,
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -74,6 +75,7 @@ pub struct State {
     pub folders: Vec<String>,
     pub selected: Option<String>,
     pub details: Option<ItemDetails>,
+    pub revealed: Option<String>,
     pub busy: bool,
     pub notice: Option<String>,
     pub approvals: Vec<Approval>,
@@ -99,6 +101,7 @@ impl Default for State {
             folders: Vec::new(),
             selected: None,
             details: None,
+            revealed: None,
             busy: true,
             notice: None,
             approvals: Vec::new(),
@@ -255,9 +258,27 @@ fn select_row(state: &mut State, index: usize, tx: &mut Tx) -> bool {
         return false;
     }
     state.selected = Some(id.clone());
+    clear_reveal(state);
     request_details(state);
     tx.scroll_into_view_in("item-scroller", format!("item-{id}"));
     true
+}
+
+pub fn toggle_reveal(state: &mut State, key: String) {
+    if state.revealed.as_deref() == Some(key.as_str()) {
+        clear_reveal(state);
+        return;
+    }
+    let Some(item_id) = state.selected.clone() else {
+        return;
+    };
+    clear_reveal(state);
+    send_quiet(state, Request::RevealField { item_id, key });
+}
+
+fn clear_reveal(state: &mut State) {
+    clear_revealed();
+    state.revealed = None;
 }
 
 fn request_details(state: &mut State) {
@@ -288,6 +309,7 @@ pub fn open_trash(state: &mut State) {
     state.rows.clear();
     state.selected = None;
     state.details = None;
+    clear_reveal(state);
     state.bump_rows_version();
     dispatch(state, Request::Trash);
 }
@@ -302,6 +324,7 @@ fn leave_trash(state: &mut State) -> bool {
     state.rows.clear();
     state.selected = None;
     state.details = None;
+    clear_reveal(state);
     state.bump_rows_version();
     true
 }
@@ -390,6 +413,7 @@ fn visible_fingerprint(state: &State) -> u64 {
     state.folder.hash(&mut hasher);
     state.selected.hash(&mut hasher);
     state.details.hash(&mut hasher);
+    state.revealed.hash(&mut hasher);
     for folder in &state.folders {
         folder.hash(&mut hasher);
     }
@@ -427,6 +451,8 @@ fn apply(state: &mut State, event: Event) {
                 state.location = Location::Vault;
                 state.folder = None;
                 state.selected = None;
+                state.details = None;
+                clear_reveal(state);
                 state.query.clear();
                 state.password.replace_text("");
             }
@@ -435,6 +461,7 @@ fn apply(state: &mut State, event: Event) {
                 state.bump_rows_version();
             }
             state.notice = None;
+            clear_reveal(state);
             if state.selected.is_none() {
                 state.selected = state.rows.first().map(|item| item.id.clone());
             }
@@ -446,6 +473,7 @@ fn apply(state: &mut State, event: Event) {
             }
             state.rows = items;
             state.bump_rows_version();
+            clear_reveal(state);
             if state.selected.is_none() {
                 state.selected = state.rows.first().map(|item| item.id.clone());
             }
@@ -457,6 +485,7 @@ fn apply(state: &mut State, event: Event) {
             }
             state.rows = items;
             state.bump_rows_version();
+            clear_reveal(state);
             if state.selected.is_none() {
                 state.selected = state.rows.first().map(|item| item.id.clone());
             }
@@ -465,6 +494,15 @@ fn apply(state: &mut State, event: Event) {
         Event::Details(details) => {
             if state.selected.as_deref() == Some(details.id.as_str()) {
                 state.details = Some(details);
+            }
+        }
+        Event::Revealed(key) => {
+            let known = state
+                .details
+                .as_ref()
+                .is_some_and(|details| details.fields.iter().any(|field| field.key == key));
+            if known {
+                state.revealed = Some(key);
             }
         }
         Event::Notices { cursor, notices } => {
@@ -665,6 +703,32 @@ fn fixtures() -> Vec<VaultRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reveal_uses_a_key_and_hide_clears_the_value() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+
+        toggle_reveal(&mut state, "password".to_owned());
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            Request::RevealField { item_id, key } if item_id == "1" && key == "password"
+        )));
+        backend::stash_revealed("password", "super-secret".to_owned());
+        apply(&mut state, Event::Revealed("password".to_owned()));
+        assert_eq!(state.revealed.as_deref(), Some("password"));
+        assert_eq!(
+            backend::revealed_value("password").as_deref(),
+            Some("super-secret")
+        );
+        assert!(!format!("{:?}", state.revealed).contains("super-secret"));
+
+        toggle_reveal(&mut state, "password".to_owned());
+        assert_eq!(state.revealed, None);
+        assert_eq!(backend::revealed_value("password"), None);
+    }
 
     #[test]
     fn selecting_an_item_requests_its_details() {

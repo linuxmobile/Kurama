@@ -1,10 +1,11 @@
 //! Bridge between Kurama and the `kurama-host` backend.
 //!
 //! All backend calls happen on a worker thread through the daemon IPC.
-//! The UI only ever sees the small, metadata-only structs below; vault secrets
-//! stay inside the daemon.
+//! State only holds metadata and field keys. A revealed value lives in a
+//! dedicated store so it never appears in `State` or its `Debug` output.
 
 use std::fmt;
+use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
@@ -77,6 +78,7 @@ pub enum Request {
     Refresh,
     Trash,
     Details { id: String },
+    RevealField { item_id: String, key: String },
     Search(String),
     Sync,
     Lock,
@@ -111,12 +113,33 @@ impl Drop for Secret {
     }
 }
 
+static REVEALED: Mutex<Option<(String, Secret)>> = Mutex::new(None);
+
+pub fn stash_revealed(key: &str, value: String) {
+    if let Ok(mut revealed) = REVEALED.lock() {
+        *revealed = Some((key.to_owned(), Secret::new(value)));
+    }
+}
+
+pub fn revealed_value(key: &str) -> Option<String> {
+    let revealed = REVEALED.lock().ok()?;
+    let (stored_key, value) = revealed.as_ref()?;
+    (stored_key == key).then(|| value.as_str().to_owned())
+}
+
+pub fn clear_revealed() {
+    if let Ok(mut revealed) = REVEALED.lock() {
+        *revealed = None;
+    }
+}
+
 #[derive(Debug)]
 pub enum Event {
     Snapshot(Snapshot),
     Items(Vec<VaultRow>),
     Trash(Vec<VaultRow>),
     Details(ItemDetails),
+    Revealed(String),
     Notices { cursor: u64, notices: Vec<Notice> },
     Approvals(Vec<Approval>),
     Error(String),
@@ -145,6 +168,13 @@ pub fn perform(request: Request) -> Event {
         }
         Request::Details { id } => match details(&id) {
             Ok(details) => Event::Details(details),
+            Err(error) => Event::Error(error),
+        },
+        Request::RevealField { item_id, key } => match revealed_field(&item_id, &key) {
+            Ok(value) => {
+                stash_revealed(&key, value);
+                Event::Revealed(key)
+            }
             Err(error) => Event::Error(error),
         },
         Request::Sync => match call(json!({ "action": "sync" })) {
@@ -446,6 +476,75 @@ fn first_text(value: &Value, keys: &[&str]) -> String {
         .unwrap_or_default()
 }
 
+fn revealed_field(item_id: &str, key: &str) -> Result<String, String> {
+    let response = call(json!({ "action": "get_item", "query": item_id }))?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(text(&response, "error"));
+    }
+    let item = response
+        .get("item")
+        .ok_or_else(|| "Item details are unavailable".to_owned())?;
+    value_for(item, key).ok_or_else(|| "Field is no longer available".to_owned())
+}
+
+fn value_for(item: &Value, key: &str) -> Option<String> {
+    let found = if let Some(index) = key.strip_prefix("uri-") {
+        let uris = item.get("login")?.get("uris")?.as_array()?;
+        first_text(uris.get(index.parse::<usize>().ok()?)?, &["uri"])
+    } else if let Some(index) = key.strip_prefix("custom-") {
+        let values = item.get("fields")?.as_array()?;
+        first_text(values.get(index.parse::<usize>().ok()?)?, &["value"])
+    } else {
+        let section = match key {
+            "username" | "password" | "totp" => item.get("login")?,
+            "cardholder" | "brand" | "number" | "expiry" | "code" => item.get("card")?,
+            "name" | "email" | "phone" => item.get("identity")?,
+            "key-type" | "fingerprint" | "public-key" | "private-key" | "passphrase" => {
+                item.get("ssh_key")?
+            }
+            "notes" => {
+                let notes = text(item, "notes");
+                return (!notes.is_empty()).then_some(notes);
+            }
+            _ => return None,
+        };
+        match key {
+            "username" | "password" | "totp" | "brand" | "number" | "code" | "email" | "phone"
+            | "passphrase" => first_text(section, &[key]),
+            "cardholder" => first_text(section, &["cardholderName", "cardholder_name"]),
+            "expiry" => join_parts(
+                &[
+                    first_text(section, &["expMonth", "exp_month"]),
+                    first_text(section, &["expYear", "exp_year"]),
+                ],
+                "/",
+            ),
+            "name" => join_parts(
+                &[
+                    first_text(section, &["firstName", "first_name"]),
+                    first_text(section, &["lastName", "last_name"]),
+                ],
+                " ",
+            ),
+            "key-type" => first_text(section, &["key_type", "keyType"]),
+            "fingerprint" => first_text(section, &["fingerprint", "keyFingerprint"]),
+            "public-key" => first_text(section, &["public_key", "publicKey"]),
+            "private-key" => first_text(section, &["private_key", "privateKey"]),
+            _ => return None,
+        }
+    };
+    (!found.is_empty()).then_some(found)
+}
+
+fn join_parts(parts: &[String], separator: &str) -> String {
+    parts
+        .iter()
+        .filter(|part| !part.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
 fn push_text(fields: &mut Vec<ItemField>, key: &str, label: &str, value: String) {
     if !value.is_empty() {
         fields.push(ItemField {
@@ -695,5 +794,44 @@ mod tests {
         let debug = format!("{:?}", fields);
         assert!(!debug.contains("secret-private-material"));
         assert!(!debug.contains("secret-passphrase-value"));
+    }
+
+    #[test]
+    fn value_for_reads_each_supported_field() {
+        let item = json!({
+            "notes": "private note",
+            "login": {
+                "password": "super-secret",
+                "uris": [{ "uri": "https://github.com" }]
+            },
+            "fields": [{ "name": "Recovery code", "value": "private-code" }]
+        });
+        assert_eq!(
+            value_for(&item, "password").as_deref(),
+            Some("super-secret")
+        );
+        assert_eq!(
+            value_for(&item, "uri-0").as_deref(),
+            Some("https://github.com")
+        );
+        assert_eq!(value_for(&item, "notes").as_deref(), Some("private note"));
+        assert_eq!(
+            value_for(&item, "custom-0").as_deref(),
+            Some("private-code")
+        );
+        assert_eq!(value_for(&item, "unknown"), None);
+    }
+
+    #[test]
+    fn revealed_values_are_keyed_and_clearable() {
+        clear_revealed();
+        stash_revealed("store-test-key", "super-secret".to_owned());
+        assert_eq!(
+            revealed_value("store-test-key").as_deref(),
+            Some("super-secret")
+        );
+        assert_eq!(revealed_value("notes"), None);
+        clear_revealed();
+        assert_eq!(revealed_value("store-test-key"), None);
     }
 }

@@ -75,7 +75,7 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::Approval;
+    use crate::backend::{Approval, FieldValue, ItemField};
     use rune::{Env, Mods, Runtime};
 
     fn runtime(scene: fn(&mut State)) -> Runtime<State> {
@@ -133,6 +133,32 @@ mod tests {
             .text
             .expect("masked field value");
         assert_eq!(masked, "••••••••");
+    }
+
+    #[test]
+    fn revealed_fields_show_values_and_a_hide_control() {
+        backend::clear_revealed();
+        backend::stash_revealed("ui-reveal-test", "shown-secret".to_owned());
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.revealed = Some("ui-reveal-test".to_owned());
+            state.details.as_mut().unwrap().fields.push(ItemField {
+                key: "ui-reveal-test".to_owned(),
+                label: "Test secret".to_owned(),
+                value: FieldValue::Masked,
+            });
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("reveal-ui-reveal-test").is_some());
+        let shown = rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("field-value-Test secret"))
+            .expect("revealed field text")
+            .text
+            .expect("revealed field value");
+        assert_eq!(shown, "shown-secret");
+        backend::clear_revealed();
     }
 
     #[test]
