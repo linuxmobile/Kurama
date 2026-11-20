@@ -13,7 +13,7 @@ use crate::state::{
     select_category, select_folder, select_item, set_create_type, set_favorite, start_edit,
     submit_create, submit_edit, submit_quick_unlock, submit_search, submit_unlock,
     toggle_create_favorite, toggle_edit_favorite, toggle_reveal, CardDraft, Category,
-    IdentityDraft, Location, State,
+    IdentityDraft, Location, SshDraft, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -144,29 +144,41 @@ fn labeled_input(
         )
 }
 
-fn notes_input(
+struct MultilineStyle<'a> {
+    label: &'a str,
+    placeholder: &'a str,
+    height: f32,
+    revealed_secure: bool,
+}
+
+fn multiline_field(
     value: &TextEdit,
     key: &str,
+    style: MultilineStyle<'_>,
     dark: bool,
     on_edit: impl for<'a> Fn(&'a mut State) -> &'a mut TextEdit + 'static,
 ) -> El {
     let t = tok::theme(dark);
+    let mut input = text_input(value, type_::BODY);
+    if style.revealed_secure {
+        input = input.secure().revealed(true);
+    }
     col()
         .gap(6.0)
         .child(
-            text("Secure note")
+            text(style.label)
                 .font(SECTION_TITLE)
                 .color(t.text_secondary)
                 .h(18.0)
                 .center_y(),
         )
         .child(
-            text_input(value, type_::BODY)
+            input
                 .key(key)
-                .label("Secure note")
-                .placeholder("Write your note", t.text_secondary)
+                .label(style.label)
+                .placeholder(style.placeholder, t.text_secondary)
                 .w_full()
-                .h(120.0)
+                .h(style.height)
                 .px(12.0)
                 .radius(8.0)
                 .fill(t.card)
@@ -185,6 +197,26 @@ fn notes_input(
                     }
                 }),
         )
+}
+
+fn notes_input(
+    value: &TextEdit,
+    key: &str,
+    dark: bool,
+    on_edit: impl for<'a> Fn(&'a mut State) -> &'a mut TextEdit + 'static,
+) -> El {
+    multiline_field(
+        value,
+        key,
+        MultilineStyle {
+            label: "Secure note",
+            placeholder: "Write your note",
+            height: 120.0,
+            revealed_secure: false,
+        },
+        dark,
+        on_edit,
+    )
 }
 
 fn card_fields(
@@ -390,6 +422,45 @@ fn identity_fields(
         )
 }
 
+fn ssh_fields(ssh: &SshDraft, dark: bool, submit: fn(&mut State)) -> El {
+    col()
+        .key("create-ssh-fields")
+        .gap(16.0)
+        .child(multiline_field(
+            &ssh.private_key,
+            "create-private-key",
+            MultilineStyle {
+                label: "Private key",
+                placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----",
+                height: 150.0,
+                revealed_secure: true,
+            },
+            dark,
+            |state| &mut state.create.as_mut().unwrap().ssh.private_key,
+        ))
+        .child(multiline_field(
+            &ssh.public_key,
+            "create-public-key",
+            MultilineStyle {
+                label: "Public key",
+                placeholder: "ssh-ed25519 AAAA...",
+                height: 90.0,
+                revealed_secure: false,
+            },
+            dark,
+            |state| &mut state.create.as_mut().unwrap().ssh.public_key,
+        ))
+        .child(form_field(
+            "create-fingerprint",
+            "Fingerprint",
+            "SHA256:...",
+            &ssh.fingerprint,
+            dark,
+            |state| &mut state.create.as_mut().unwrap().ssh.fingerprint,
+            submit,
+        ))
+}
+
 fn form_panel(key: &str, title: &str, dark: bool, header_extra: El, body: El, footer: El) -> El {
     let t = tok::theme(dark);
     col()
@@ -531,7 +602,12 @@ fn create_form(s: &State, dark: bool) -> El {
         } else {
             el()
         })
-        .child(if draft.item_type == 2 {
+        .child(if draft.item_type == 5 {
+            ssh_fields(&draft.ssh, dark, submit_create)
+        } else {
+            el()
+        })
+        .child(if draft.item_type == 2 || draft.item_type == 5 {
             notes_input(&draft.notes, "create-notes", dark, |state| {
                 &mut state.create.as_mut().unwrap().notes
             })
@@ -661,7 +737,14 @@ fn edit_form(s: &State, dark: bool) -> El {
         } else {
             el()
         })
-        .child(if draft.item_type == 2 {
+        .child(if draft.item_type == 5 {
+            text("Key material can only be set when importing.")
+                .font(ROW_SUBTITLE)
+                .color(t.text_secondary)
+        } else {
+            el()
+        })
+        .child(if draft.item_type == 2 || draft.item_type == 5 {
             notes_input(&draft.notes, "edit-notes", dark, |state| {
                 &mut state.edit.as_mut().unwrap().notes
             })

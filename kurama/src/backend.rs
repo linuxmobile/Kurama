@@ -222,6 +222,15 @@ pub enum Request {
         card: Option<CardInput>,
         identity: Option<IdentityInput>,
     },
+    CreateSshKey {
+        name: String,
+        private_key: Secret,
+        public_key: Option<String>,
+        fingerprint: Option<String>,
+        notes: Option<Secret>,
+        folder_id: Option<String>,
+        favorite: bool,
+    },
     Folders,
     Restore {
         id: String,
@@ -512,6 +521,42 @@ pub fn perform(request: Request) -> Event {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_owned();
+                Event::ItemCreated { id, name }
+            }
+            Ok(response) => Event::Error(text(&response, "error")),
+            Err(error) => Event::Error(error),
+        },
+        Request::CreateSshKey {
+            name,
+            private_key,
+            public_key,
+            fingerprint,
+            notes,
+            folder_id,
+            favorite,
+        } => match call(json!({
+            "action": "ssh_key_create",
+            "name": name.clone(),
+            "private_key": private_key.as_str(),
+            "public_key": public_key,
+            "fingerprint": fingerprint,
+            "notes": notes.as_ref().map(Secret::as_str),
+            "folder_id": folder_id
+        })) {
+            Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
+                let id = response
+                    .get("item")
+                    .and_then(|item| item.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                if favorite && !id.is_empty() {
+                    let _ = call(json!({
+                        "action": "update_item",
+                        "id": id.clone(),
+                        "options": { "favorite": true }
+                    }));
+                }
                 Event::ItemCreated { id, name }
             }
             Ok(response) => Event::Error(text(&response, "error")),
@@ -1132,6 +1177,23 @@ mod tests {
         assert!(!debug.contains("hunter2"));
         assert!(!debug.contains("private note"));
         assert!(!debug.contains("ada@example.com"));
+        assert!(debug.contains("redacted"));
+    }
+
+    #[test]
+    fn ssh_key_request_redacts_private_key() {
+        let request = Request::CreateSshKey {
+            name: "Deploy key".to_owned(),
+            private_key: Secret::new("PRIVATE KEY MATERIAL".to_owned()),
+            public_key: Some("ssh-ed25519 AAAA".to_owned()),
+            fingerprint: None,
+            notes: Some(Secret::new("ssh note".to_owned())),
+            folder_id: None,
+            favorite: false,
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("PRIVATE KEY MATERIAL"));
+        assert!(!debug.contains("ssh note"));
         assert!(debug.contains("redacted"));
     }
 

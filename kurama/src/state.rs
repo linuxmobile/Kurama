@@ -82,6 +82,12 @@ pub struct CardDraft {
     pub code: TextEdit,
 }
 
+pub struct SshDraft {
+    pub private_key: TextEdit,
+    pub public_key: TextEdit,
+    pub fingerprint: TextEdit,
+}
+
 pub struct IdentityDraft {
     pub first_name: TextEdit,
     pub last_name: TextEdit,
@@ -104,6 +110,7 @@ pub struct CreateDraft {
     pub notes: TextEdit,
     pub card: CardDraft,
     pub identity: IdentityDraft,
+    pub ssh: SshDraft,
 }
 
 pub struct EditDraft {
@@ -398,6 +405,7 @@ pub fn start_create() -> CreateDraft {
         notes: TextEdit::new(""),
         card: empty_card_draft(),
         identity: empty_identity_draft(),
+        ssh: empty_ssh_draft(),
     }
 }
 
@@ -458,6 +466,14 @@ fn empty_identity_draft() -> IdentityDraft {
         city: TextEdit::new(""),
         postal_code: TextEdit::new(""),
         country: TextEdit::new(""),
+    }
+}
+
+fn empty_ssh_draft() -> SshDraft {
+    SshDraft {
+        private_key: TextEdit::new("").secure(),
+        public_key: TextEdit::new(""),
+        fingerprint: TextEdit::new(""),
     }
 }
 
@@ -606,6 +622,27 @@ pub fn submit_create(state: &mut State) {
     if name.is_empty() {
         state.notice = Some("Enter a name for the new item.".to_owned());
         state.create = Some(draft);
+        return;
+    }
+    if draft.item_type == 5 && draft.ssh.private_key.text.trim().is_empty() {
+        state.notice = Some("Paste an SSH private key.".to_owned());
+        state.create = Some(draft);
+        return;
+    }
+    if draft.item_type == 5 {
+        let private_key = Secret::new(draft.ssh.private_key.text.clone());
+        dispatch(
+            state,
+            Request::CreateSshKey {
+                name,
+                private_key,
+                public_key: optional_text(&draft.ssh.public_key),
+                fingerprint: optional_text(&draft.ssh.fingerprint),
+                notes: optional_secret(&draft.notes).map(Secret::new),
+                folder_id: draft.folder_id,
+                favorite: draft.favorite,
+            },
+        );
         return;
     }
     dispatch(
@@ -1316,6 +1353,13 @@ pub fn scene_create_identity(state: &mut State) {
     scene_populated(state);
     let mut draft = start_create();
     draft.item_type = 4;
+    state.create = Some(draft);
+}
+
+pub fn scene_create_ssh(state: &mut State) {
+    scene_populated(state);
+    let mut draft = start_create();
+    draft.item_type = 5;
     state.create = Some(draft);
 }
 

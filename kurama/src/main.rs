@@ -52,6 +52,7 @@ fn main() -> ExitCode {
             ("trash", state::scene_trash),
             ("create-card", state::scene_create_card),
             ("create-identity", state::scene_create_identity),
+            ("create-ssh", state::scene_create_ssh),
         ],
         setup: Some(state::setup),
         poll: Some(state::poll),
@@ -115,6 +116,9 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                         | "edit-postal-code"
                         | "edit-city"
                         | "edit-country"
+                        | "create-private-key"
+                        | "create-public-key"
+                        | "create-fingerprint"
                 )
             ) || focused
                 .is_some_and(|key| key.starts_with("create-card") || key.starts_with("edit-card"));
@@ -575,6 +579,58 @@ mod tests {
                     && identity.last_name.as_ref().map(backend::Secret::as_str) == Some("Lovelace")
                     && identity.email.as_ref().map(backend::Secret::as_str) == Some("ada@example.com")
                     && identity.city.as_ref().map(backend::Secret::as_str) == Some("London")
+        )));
+    }
+
+    #[test]
+    fn create_form_submits_ssh_key() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("new-item").expect("new item button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("create-type-ssh-key").expect("ssh key type button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        for key in [
+            "create-ssh-fields",
+            "create-private-key",
+            "create-public-key",
+            "create-fingerprint",
+            "create-notes",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+        let draft = rt.state.create.as_mut().unwrap();
+        draft.name.replace_text("Deploy key");
+        draft.ssh.private_key.replace_text(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+        );
+        draft
+            .ssh
+            .public_key
+            .replace_text("ssh-ed25519 AAAA deploy@host");
+        draft.ssh.fingerprint.replace_text("SHA256:abc");
+        draft.notes.replace_text("Production deploy key");
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("create-submit").expect("create button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::CreateSshKey { name, private_key, public_key, fingerprint, notes, .. }
+                if name == "Deploy key"
+                    && private_key.as_str().contains("BEGIN OPENSSH PRIVATE KEY")
+                    && public_key.as_deref() == Some("ssh-ed25519 AAAA deploy@host")
+                    && fingerprint.as_deref() == Some("SHA256:abc")
+                    && notes.as_ref().map(backend::Secret::as_str) == Some("Production deploy key")
         )));
     }
 
