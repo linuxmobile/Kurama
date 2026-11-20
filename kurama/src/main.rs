@@ -184,6 +184,17 @@ mod tests {
     }
 
     #[test]
+    fn uri_field_opens_website() {
+        let mut rt = runtime(state::scene_populated);
+        rt.frame(0.0);
+        let (x, y) = rt.find("open-uri-0").expect("open website button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        assert_eq!(rt.take_url_requests(), ["https://github.com"]);
+    }
+
+    #[test]
     fn arrow_keys_move_item_selection() {
         let mut rt = runtime(state::scene_populated);
         rt.on_key = Some(on_key);

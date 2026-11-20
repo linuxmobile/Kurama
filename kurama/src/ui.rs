@@ -508,9 +508,25 @@ fn details(s: &State, dark: bool) -> El {
                     move |state| toggle_reveal(state, reveal_key.clone()),
                 ));
             }
+            let copy_key = key.clone();
             buttons = buttons.child(action(&format!("copy-{key}"), "Copy", dark, move |state| {
-                copy_field(state, &key, &label, sensitive)
+                copy_field(state, &copy_key, &label, sensitive)
             }));
+            if key.starts_with("uri-") {
+                if let FieldValue::Text(url) = &detail.value {
+                    let url = url.clone();
+                    buttons = buttons.child(action_tx(
+                        &format!("open-{key}"),
+                        "Open",
+                        dark,
+                        move |state, tx| {
+                            if let Err(error) = tx.open_url(&url) {
+                                state.notice = Some(format!("Cannot open website: {error}"));
+                            }
+                        },
+                    ));
+                }
+            }
             fields = fields.child(row().gap(10.0).center_y().child(value).child(buttons));
         }
     } else if !item.subtitle.is_empty() {
