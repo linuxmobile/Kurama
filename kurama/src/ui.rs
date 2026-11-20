@@ -107,8 +107,15 @@ fn labeled_input(
 ) -> El {
     let t = tok::theme(dark);
     col()
-        .gap(4.0)
-        .child(text(label).font(SECTION_TITLE).color(t.text_secondary))
+        .gap(6.0)
+        .child(
+            text(label)
+                .key(format!("{key}-label"))
+                .font(SECTION_TITLE)
+                .color(t.text_secondary)
+                .h(18.0)
+                .center_y(),
+        )
         .child(
             text_input(value, type_::BODY)
                 .key(key)
@@ -145,11 +152,13 @@ fn notes_input(
 ) -> El {
     let t = tok::theme(dark);
     col()
-        .gap(4.0)
+        .gap(6.0)
         .child(
             text("Secure note")
                 .font(SECTION_TITLE)
-                .color(t.text_secondary),
+                .color(t.text_secondary)
+                .h(18.0)
+                .center_y(),
         )
         .child(
             text_input(value, type_::BODY)
@@ -187,7 +196,7 @@ fn card_fields(
 ) -> El {
     col()
         .key(format!("{prefix}-card-fields"))
-        .gap(12.0)
+        .gap(16.0)
         .child(labeled_input(
             &card.cardholder_name,
             &format!("{prefix}-cardholder"),
@@ -208,7 +217,7 @@ fn card_fields(
         ))
         .child(
             row()
-                .gap(10.0)
+                .gap(14.0)
                 .child(
                     labeled_input(
                         &card.brand,
@@ -281,7 +290,7 @@ fn form_panel(key: &str, title: &str, dark: bool, header_extra: El, body: El, fo
                 .child(
                     col()
                         .key(format!("{key}-header"))
-                        .gap(10.0)
+                        .gap(12.0)
                         .padding(20.0)
                         .child(text(title).font(WINDOW_TITLE).color(t.text))
                         .child(header_extra),
@@ -294,16 +303,16 @@ fn form_panel(key: &str, title: &str, dark: bool, header_extra: El, body: El, fo
                         .shrink()
                         .min_h(0.0)
                         .padding(20.0)
-                        .gap(12.0),
+                        .gap(16.0),
                 )
                 .child(el().h(1.0).w_full().fill(t.separator))
                 .child(
                     row()
                         .key(format!("{key}-footer"))
                         .w_full()
-                        .gap(10.0)
+                        .gap(16.0)
                         .center_y()
-                        .padding(16.0)
+                        .padding(18.0)
                         .child(footer.grow(1.0)),
                 ),
         )
@@ -320,7 +329,7 @@ fn create_form(s: &State, dark: bool) -> El {
         ("identity", "Identity", 4),
         ("ssh-key", "SSH Key", 5),
     ];
-    let mut choices = row().key("create-types").gap(6.0);
+    let mut choices = row().key("create-types").gap(12.0);
     for (slug, label, value) in types {
         let active = draft.item_type == value;
         choices = choices.child(action(
@@ -348,7 +357,7 @@ fn create_form(s: &State, dark: bool) -> El {
         .child(if draft.item_type == 1 {
             col()
                 .key("create-login-fields")
-                .gap(12.0)
+                .gap(16.0)
                 .child(labeled_input(
                     &draft.username,
                     "create-username",
@@ -412,7 +421,7 @@ fn create_form(s: &State, dark: bool) -> El {
         .child(
             row()
                 .key("create-folder")
-                .gap(6.0)
+                .gap(10.0)
                 .center_y()
                 .child(action("create-folder-prev", "‹", dark, |state| {
                     cycle_create_folder(state, -1)
@@ -467,7 +476,7 @@ fn edit_form(s: &State, dark: bool) -> El {
         .child(if draft.login {
             col()
                 .key("edit-login-fields")
-                .gap(12.0)
+                .gap(16.0)
                 .child(labeled_input(
                     &draft.username,
                     "edit-username",
@@ -531,7 +540,7 @@ fn edit_form(s: &State, dark: bool) -> El {
         .child(
             row()
                 .key("edit-folder")
-                .gap(6.0)
+                .gap(10.0)
                 .center_y()
                 .child(action("edit-folder-prev", "‹", dark, |state| {
                     cycle_edit_folder(state, -1)
