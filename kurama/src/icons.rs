@@ -106,10 +106,22 @@ static ACTION_LOGOUT: Icon = Icon {
     body: r#"<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
 
+static ACTION_VAULT: Icon = Icon {
+    name: "kurama-action-vault",
+    view: 24.0,
+    body: r#"<path d="M12 2.5 4.5 5.5v6c0 4.8 3.1 8.5 7.5 10 4.4-1.5 7.5-5.2 7.5-10v-6Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M9 12.3l2 2 4-4.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_USER: Icon = Icon {
+    name: "kurama-action-user",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5 20c0-3.8 3.1-6.5 7-6.5s7 2.7 7 6.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>"#,
+};
+
 pub fn action(name: &str) -> &'static Icon {
     match name {
         "new" => &ACTION_NEW,
-        "sun" => &ACTION_SUN,
+        "sun" | "appearance" => &ACTION_SUN,
         "moon" => &ACTION_MOON,
         "sends" => &ACTION_SENDS,
         "settings" => &ACTION_SETTINGS,
@@ -119,6 +131,8 @@ pub fn action(name: &str) -> &'static Icon {
         "help" => &ACTION_HELP,
         "lock" => &ACTION_LOCK,
         "logout" => &ACTION_LOGOUT,
+        "vault" => &ACTION_VAULT,
+        "user" => &ACTION_USER,
         _ => &ITEM,
     }
 }

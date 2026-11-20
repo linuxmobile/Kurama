@@ -16,16 +16,17 @@ use crate::state::{
     delete_item, disable_send, dispatch, folder_label, generate_password, logout, move_selection,
     new_send, open_attachment, open_generator, open_sends, open_settings, open_ssh_tools,
     open_trash, refresh_agent_status, remove_create_field, remove_create_uri, remove_edit_uri,
-    request_delete_send, restore_item, save_ssh_tool_key, select_category, select_folder,
-    select_item, select_send, send_two_factor_email, set_auth_mode, set_create_type, set_favorite,
-    set_generator_passphrase, set_ssh_tool_mode, set_theme, start_edit, step_auto_lock,
-    step_clipboard_clear, submit_auth, submit_create, submit_edit, submit_fido2,
+    request_delete_send, restore_item, save_settings_paths, save_ssh_tool_key, select_category,
+    select_folder, select_item, select_send, select_settings_section, send_two_factor_email,
+    set_auth_mode, set_create_type, set_favorite, set_generator_passphrase, set_log_level,
+    set_ssh_confirm, set_ssh_tool_mode, set_theme, start_edit, step_attachment_size,
+    step_auto_lock, step_clipboard_clear, submit_auth, submit_create, submit_edit, submit_fido2,
     submit_quick_unlock, submit_search, submit_send, submit_ssh_export, submit_ssh_generate,
     submit_ssh_import, submit_unlock, toggle_create_favorite, toggle_create_field_value,
     toggle_edit_favorite, toggle_generator_option, toggle_reveal, toggle_send_hidden,
-    use_generated, AttachmentView, AuthMode, CardDraft, Category, CustomFieldDraft,
-    GeneratorOption, GeneratorTarget, IdentityDraft, Location, SendDraft, SshDraft, SshToolMode,
-    State,
+    toggle_setting, use_generated, AttachmentView, AuthMode, CardDraft, Category, CustomFieldDraft,
+    GeneratorOption, GeneratorTarget, IdentityDraft, Location, SendDraft, SettingsSection,
+    SshDraft, SshToolMode, State, ToggleSetting,
 };
 use crate::theme::{
     accent, selected_row, ThemePreference, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE,
@@ -135,125 +136,634 @@ fn help(_s: &State, dark: bool) -> El {
 
 fn settings(s: &State, dark: bool) -> El {
     let t = tok::theme(dark);
-    let mut appearance = row()
+    let detail = match s.settings_section {
+        SettingsSection::General => settings_general(s, dark),
+        SettingsSection::Vault => settings_vault(s, dark),
+        SettingsSection::Security => settings_security(s, dark),
+        SettingsSection::Account => settings_account(s, dark),
+    };
+    col()
+        .key("settings")
+        .w_full()
+        .grow(1.0)
+        .shrink()
+        .min_h(0.0)
+        .center()
+        .padding(24.0)
+        .fill(t.bg)
+        .child(
+            col()
+                .key("settings-window")
+                .w_full()
+                .max_w(980.0)
+                .h_full()
+                .max_h(680.0)
+                .radius(16.0)
+                .fill(t.card)
+                .border(1.0, t.card_border)
+                .child(
+                    row()
+                        .key("settings-header")
+                        .w_full()
+                        .gap(14.0)
+                        .center_y()
+                        .padding(20.0)
+                        .child(icon(icons::action("settings"), 24.0).color(accent(dark)))
+                        .child(
+                            col()
+                                .gap(3.0)
+                                .child(text("Settings").font(WINDOW_TITLE).color(t.text))
+                                .child(
+                                    text("Preferences for the app, vault, and Kurama daemon.")
+                                        .font(META)
+                                        .color(t.text_secondary),
+                                ),
+                        )
+                        .child(el().grow(1.0))
+                        .child(action("settings-close", "Close", dark, close_settings)),
+                )
+                .child(el().h(1.0).w_full().fill(t.separator))
+                .child(
+                    row()
+                        .key("settings-content")
+                        .w_full()
+                        .grow(1.0)
+                        .shrink()
+                        .min_h(0.0)
+                        .child(settings_sidebar(dark, s.settings_section))
+                        .child(el().w(1.0).fill(t.separator))
+                        .child(
+                            col()
+                                .key("settings-body")
+                                .grow(1.0)
+                                .shrink()
+                                .min_h(0.0)
+                                .scroll(ScrollSpec {
+                                    stick_bottom: false,
+                                })
+                                .padding(24.0)
+                                .gap(18.0)
+                                .child(detail),
+                        ),
+                ),
+        )
+}
+
+fn settings_sidebar(dark: bool, active: SettingsSection) -> El {
+    let t = tok::theme(dark);
+    let mut rail = col()
+        .key("settings-nav")
+        .w(190.0)
+        .h_full()
+        .gap(4.0)
+        .padding(14.0)
+        .fill(t.bg);
+    for section in SettingsSection::ALL {
+        let selected = section == active;
+        let label = section.label();
+        rail = rail.child(
+            el().key(format!("settings-tab-{label}").to_lowercase())
+                .role("button")
+                .label(label.to_owned())
+                .focusable(true)
+                .w_full()
+                .h(38.0)
+                .px(12.0)
+                .gap(10.0)
+                .center_y()
+                .radius(9.0)
+                .fill(if selected {
+                    selected_row(dark)
+                } else {
+                    t.control_track
+                })
+                .hover(t.hover)
+                .press(t.press)
+                .cursor(Cursor::Pointer)
+                .on_press(move |state| select_settings_section(state, section))
+                .child(
+                    icon(icons::action(section.icon()), 18.0).color(if selected {
+                        accent(dark)
+                    } else {
+                        t.text_secondary
+                    }),
+                )
+                .child(
+                    text(label.to_owned())
+                        .font(type_::LABEL)
+                        .color(if selected { t.text } else { t.text_secondary }),
+                ),
+        );
+    }
+    rail.child(el().grow(1.0)).child(
+        col()
+            .gap(4.0)
+            .px(12.0)
+            .child(text("Kurama").font(type_::LABEL).color(t.text))
+            .child(
+                text("Daemon-backed vault")
+                    .font(META)
+                    .color(t.text_secondary),
+            ),
+    )
+}
+
+fn settings_general(s: &State, dark: bool) -> El {
+    let cfg = s.settings.clone().unwrap_or_default();
+    let mut themes = row()
         .key("settings-appearance")
         .w_full()
         .gap(8.0)
-        .center_y()
-        .child(
-            text("Appearance")
-                .font(SECTION_TITLE)
-                .color(t.text_secondary),
-        );
+        .center_y();
     for theme in ThemePreference::ALL {
         let selected = s.theme == theme;
-        appearance = appearance.child(action(
+        themes = themes.child(segment_button(
             theme.key(),
-            format!("{} {}", if selected { "•" } else { " " }, theme.label()),
+            theme.label(),
+            selected,
             dark,
             move |state| set_theme(state, theme),
         ));
     }
 
-    let (auto_lock, clipboard, account, quick_unlock, ssh_agent, approvals) = match &s.settings {
-        Some(settings) => (
-            if settings.auto_lock_minutes <= 0 {
-                "Disabled".to_owned()
-            } else {
-                format!("{} min", settings.auto_lock_minutes)
-            },
-            format!("{} s", settings.clipboard_clear_seconds),
-            if settings.email.is_empty() {
-                "Not signed in".to_owned()
-            } else {
-                settings.email.clone()
-            },
-            if settings.quick_unlock {
-                "Enabled".to_owned()
-            } else {
-                "Disabled".to_owned()
-            },
-            if settings.ssh_agent_enabled {
-                "Enabled".to_owned()
-            } else {
-                "Disabled".to_owned()
-            },
-            settings.ssh_agent_confirm.clone(),
-        ),
-        None => (
-            "Loading…".to_owned(),
-            "Loading…".to_owned(),
-            "Loading…".to_owned(),
-            "Loading…".to_owned(),
-            "Loading…".to_owned(),
-            "Loading…".to_owned(),
-        ),
-    };
-    let server = s
-        .settings
-        .as_ref()
-        .map(|settings| settings.server_url.clone())
-        .unwrap_or_else(|| "Loading…".to_owned());
+    let mut levels = row().key("settings-log-level").w_full().gap(6.0).center_y();
+    for level in ["error", "warn", "info", "debug", "trace"] {
+        let mut label = level.to_owned();
+        if let Some(first) = label.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        levels = levels.child(segment_button(
+            &format!("settings-log-level-{level}"),
+            &label,
+            cfg.log_level == level,
+            dark,
+            move |state| set_log_level(state, level),
+        ));
+    }
 
-    let mut body = col().key("settings-body").w_full().gap(20.0);
-    body = body
-        .child(appearance)
-        .child(el().h(1.0).w_full().fill(t.separator))
-        .child(settings_section(
-            "settings-vault",
-            "Vault",
+    col()
+        .gap(18.0)
+        .child(settings_card(
+            "settings-appearance-card",
+            "Appearance",
+            "Choose how Kurama looks on this device.",
+            dark,
+            col().gap(10.0).child(themes),
+        ))
+        .child(settings_card(
+            "settings-interface",
+            "Interface",
+            "Control what the vault remembers and displays.",
             dark,
             col()
-                .gap(12.0)
+                .gap(8.0)
+                .child(settings_toggle(
+                    "settings-website-icons",
+                    "Website icons",
+                    "Show site icons for login items.",
+                    cfg.show_website_icons,
+                    dark,
+                    move |state, value| {
+                        toggle_setting(state, ToggleSetting::ShowWebsiteIcons, value)
+                    },
+                ))
+                .child(settings_toggle(
+                    "settings-remember-last-search",
+                    "Remember last search",
+                    "Restore the previous search when the app opens.",
+                    cfg.remember_last_search,
+                    dark,
+                    move |state, value| {
+                        toggle_setting(state, ToggleSetting::RememberLastSearch, value)
+                    },
+                ))
+                .child(settings_toggle(
+                    "settings-remember-email",
+                    "Remember email",
+                    "Prefill the last account email on the sign-in screen.",
+                    cfg.remember_email,
+                    dark,
+                    move |state, value| toggle_setting(state, ToggleSetting::RememberEmail, value),
+                ))
+                .child(settings_toggle(
+                    "settings-check-updates",
+                    "Check for updates",
+                    "Let the daemon check for new releases at startup.",
+                    cfg.check_updates,
+                    dark,
+                    move |state, value| toggle_setting(state, ToggleSetting::CheckUpdates, value),
+                )),
+        ))
+        .child(settings_card(
+            "settings-diagnostics",
+            "Diagnostics",
+            "Set how much the daemon writes to its log.",
+            dark,
+            col().gap(10.0).child(levels),
+        ))
+        .child(settings_note(
+            "settings-log-level-hint",
+            "Log level changes take effect for new daemon log records.",
+            dark,
+        ))
+}
+
+fn settings_vault(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let cfg = s.settings.clone().unwrap_or_default();
+    let auto_lock = if cfg.auto_lock_minutes <= 0 {
+        "Never".to_owned()
+    } else {
+        format!("{} min", cfg.auto_lock_minutes)
+    };
+    let clipboard = if cfg.clipboard_clear_seconds <= 0 {
+        "Never".to_owned()
+    } else {
+        format!("{} s", cfg.clipboard_clear_seconds)
+    };
+    col()
+        .gap(18.0)
+        .child(settings_card(
+            "settings-vault",
+            "Vault timing",
+            "Automatic lock and clipboard cleanup are enforced by the daemon.",
+            dark,
+            col()
+                .gap(8.0)
                 .child(settings_stepper(
                     "settings-auto-lock",
                     "Auto-lock",
-                    auto_lock.as_str(),
+                    "Lock the vault after this period of inactivity.",
+                    &auto_lock,
                     dark,
                     step_auto_lock,
                 ))
                 .child(settings_stepper(
                     "settings-clipboard",
                     "Clipboard clear",
-                    clipboard.as_str(),
+                    "Clear copied secrets after this delay.",
+                    &clipboard,
                     dark,
                     step_clipboard_clear,
+                ))
+                .child(settings_stepper(
+                    "settings-attachment-size",
+                    "Attachment limit",
+                    "Maximum attachment size accepted by the daemon.",
+                    &format!("{} MB", cfg.max_attachment_size_mb),
+                    dark,
+                    step_attachment_size,
                 )),
         ))
-        .child(el().h(1.0).w_full().fill(t.separator))
-        .child(settings_section(
-            "settings-account",
-            "Account and backend",
+        .child(settings_note(
+            "settings-vault-hint",
+            "A zero value disables the timer. Changes apply immediately without locking the vault.",
+            dark,
+        ))
+        .child(
+            text("Vault items are decrypted only in memory while the vault is unlocked.")
+                .font(META)
+                .color(t.text_secondary),
+        )
+}
+
+fn settings_security(s: &State, dark: bool) -> El {
+    let cfg = s.settings.clone().unwrap_or_default();
+    let quick_detail = if !cfg.quick_unlock {
+        "Store a retained key for fast unlocking after a restart."
+    } else if s.snapshot.quick_unlock_ready {
+        "Enabled and ready after the next lock."
+    } else {
+        "Enabled. Unlock once to prepare the retained key."
+    };
+    let agent_detail = if cfg.ssh_agent_enabled {
+        if s.agent_running {
+            "Enabled and running."
+        } else {
+            "Enabled, but the agent is not running."
+        }
+    } else {
+        "Expose vault SSH keys to the Kurama agent."
+    };
+
+    let mut confirm = row()
+        .key("settings-ssh-confirm")
+        .w_full()
+        .gap(8.0)
+        .center_y();
+    for (mode, label) in [
+        ("never", "Never"),
+        ("first-use", "First use"),
+        ("always", "Always"),
+    ] {
+        confirm = confirm.child(segment_button(
+            &format!("settings-ssh-confirm-{mode}"),
+            label,
+            cfg.ssh_agent_confirm == mode,
+            dark,
+            move |state| set_ssh_confirm(state, mode),
+        ));
+    }
+
+    col()
+        .gap(18.0)
+        .child(settings_card(
+            "settings-security",
+            "Session security",
+            "Control how you return to an unlocked vault.",
+            dark,
+            col()
+                .gap(8.0)
+                .child(settings_toggle(
+                    "settings-quick-unlock",
+                    "Quick unlock",
+                    quick_detail,
+                    cfg.quick_unlock,
+                    dark,
+                    move |state, value| toggle_setting(state, ToggleSetting::QuickUnlock, value),
+                ))
+                .child(settings_toggle(
+                    "settings-ssh-agent",
+                    "SSH agent",
+                    agent_detail,
+                    cfg.ssh_agent_enabled,
+                    dark,
+                    move |state, value| toggle_setting(state, ToggleSetting::SshAgentEnabled, value),
+                )),
+        ))
+        .child(settings_card(
+            "settings-ssh-approvals",
+            "SSH approvals",
+            "Choose when the agent asks for confirmation before using a key.",
             dark,
             col()
                 .gap(12.0)
-                .child(field("Server", &server, dark))
-                .child(field("Account", &account, dark))
-                .child(field("Quick unlock", quick_unlock.as_str(), dark))
-                .child(field("SSH agent", ssh_agent.as_str(), dark))
-                .child(field("SSH approvals", approvals.as_str(), dark)),
+                .child(confirm)
+                .child(
+                    row()
+                        .w_full()
+                        .gap(8.0)
+                        .child(action(
+                            "settings-ssh-tools",
+                            "SSH tools",
+                            dark,
+                            open_ssh_tools,
+                        ))
+                        .child(action(
+                            "settings-agent-refresh",
+                            "Refresh status",
+                            dark,
+                            refresh_agent_status,
+                        )),
+                ),
         ))
-        .child(
-            text("Connection, certificate, and keyring options are managed by `kurama config`.")
-                .key("settings-config-hint")
-                .font(META)
-                .color(t.text_secondary),
-        );
+        .child(settings_note(
+            "settings-quick-unlock-hint",
+            "Turning quick unlock off removes the retained key; the master password is never stored.",
+            dark,
+        ))
+}
 
-    form_panel(
-        "settings",
-        "Settings",
-        dark,
-        el(),
-        body,
-        row().child(action("settings-close", "Close", dark, close_settings)),
-        None,
-    )
+fn settings_account(s: &State, dark: bool) -> El {
+    let cfg = s.settings.clone().unwrap_or_default();
+    col()
+        .gap(18.0)
+        .child(settings_card(
+            "settings-account",
+            "Account",
+            "The active account and server reported by the daemon.",
+            dark,
+            col()
+                .gap(8.0)
+                .child(settings_info(
+                    "settings-server",
+                    "Server",
+                    if cfg.server_url.is_empty() {
+                        "Unknown"
+                    } else {
+                        &cfg.server_url
+                    },
+                    dark,
+                ))
+                .child(settings_info(
+                    "settings-email",
+                    "Account",
+                    if cfg.email.is_empty() {
+                        "Not signed in"
+                    } else {
+                        &cfg.email
+                    },
+                    dark,
+                ))
+                .child(settings_info(
+                    "settings-status",
+                    "Vault status",
+                    if s.snapshot.status.is_empty() {
+                        "Disconnected"
+                    } else {
+                        &s.snapshot.status
+                    },
+                    dark,
+                )),
+        ))
+        .child(settings_card(
+            "settings-paths",
+            "Paths",
+            "Optional locations used for attachments and a self-hosted identity service.",
+            dark,
+            col()
+                .gap(14.0)
+                .child(labeled_input(
+                    &s.settings_draft.download_dir,
+                    "settings-download-dir",
+                    "Download folder",
+                    "~/Downloads",
+                    dark,
+                    |state| &mut state.settings_draft.download_dir,
+                    save_settings_paths,
+                ))
+                .child(labeled_input(
+                    &s.settings_draft.identity_url,
+                    "settings-identity-url",
+                    "Identity URL",
+                    "https://identity.example.com",
+                    dark,
+                    |state| &mut state.settings_draft.identity_url,
+                    save_settings_paths,
+                ))
+                .child(row().child(action(
+                    "settings-save-paths",
+                    "Save changes",
+                    dark,
+                    save_settings_paths,
+                ))),
+        ))
+        .child(settings_note(
+            "settings-config-hint",
+            "Connection, certificate, and keyring options remain managed by `kurama config`.",
+            dark,
+        ))
+}
+
+fn settings_card(key: &str, title: &str, description: &str, dark: bool, body: El) -> El {
+    let t = tok::theme(dark);
+    col()
+        .key(key)
+        .w_full()
+        .gap(14.0)
+        .padding(18.0)
+        .radius(12.0)
+        .fill(t.bg)
+        .border(1.0, t.card_border)
+        .child(
+            col()
+                .gap(4.0)
+                .child(text(title.to_owned()).font(type_::TITLE).color(t.text))
+                .child(
+                    text(description.to_owned())
+                        .font(META)
+                        .color(t.text_secondary),
+                ),
+        )
+        .child(body)
+}
+
+fn settings_info(key: &str, label: &str, value: &str, dark: bool) -> El {
+    let t = tok::theme(dark);
+    row()
+        .key(key)
+        .w_full()
+        .min_h(40.0)
+        .center_y()
+        .justify_between()
+        .gap(16.0)
+        .padding(10.0)
+        .radius(8.0)
+        .fill(t.control_track)
+        .child(
+            text(label.to_owned())
+                .font(SECTION_TITLE)
+                .color(t.text_secondary),
+        )
+        .child(
+            text(value.to_owned())
+                .key(format!("{key}-value"))
+                .font(ROW_SUBTITLE)
+                .color(t.text)
+                .selectable(true),
+        )
+}
+
+fn settings_note(key: &str, message: &str, dark: bool) -> El {
+    let t = tok::theme(dark);
+    row()
+        .key(key)
+        .w_full()
+        .gap(12.0)
+        .center_y()
+        .padding(12.0)
+        .radius(10.0)
+        .fill(t.control_track)
+        .border(1.0, t.card_border)
+        .child(el().w(3.0).h(28.0).radius(2.0).fill(accent(dark)))
+        .child(text(message.to_owned()).font(META).color(t.text_secondary))
+}
+
+fn settings_toggle(
+    key: &str,
+    label: &str,
+    description: &str,
+    value: bool,
+    dark: bool,
+    on_change: impl Fn(&mut State, bool) + 'static,
+) -> El {
+    let t = tok::theme(dark);
+    row()
+        .key(key)
+        .role("toggle")
+        .label(label.to_owned())
+        .w_full()
+        .min_h(58.0)
+        .center_y()
+        .justify_between()
+        .gap(16.0)
+        .padding(10.0)
+        .radius(10.0)
+        .fill(t.control_track)
+        .hover(t.hover)
+        .press(t.press)
+        .cursor(Cursor::Pointer)
+        .on_press(move |state| on_change(state, !value))
+        .child(
+            col()
+                .gap(4.0)
+                .child(text(label.to_owned()).font(ROW_TITLE).color(t.text))
+                .child(
+                    text(description.to_owned())
+                        .font(META)
+                        .color(t.text_secondary),
+                ),
+        )
+        .child(
+            el().key(format!("{key}-switch"))
+                .size(42.0, 24.0)
+                .radius(12.0)
+                .fill(if value { accent(dark) } else { t.control_off })
+                .center_y()
+                .justify_between()
+                .px(3.0)
+                .child(el().size(18.0, 18.0).radius(9.0).fill(t.knob)),
+        )
+}
+
+fn segment_button(
+    key: &str,
+    label: &str,
+    selected: bool,
+    dark: bool,
+    on_press: impl Fn(&mut State) + 'static,
+) -> El {
+    let t = tok::theme(dark);
+    el().key(key.to_owned())
+        .role("button")
+        .label(label.to_owned())
+        .focusable(true)
+        .h(30.0)
+        .px(14.0)
+        .center()
+        .radius(8.0)
+        .fill(if selected {
+            selected_row(dark)
+        } else {
+            t.control_track
+        })
+        .border(
+            1.0,
+            if selected {
+                accent(dark).alpha(0.5)
+            } else {
+                t.card_border
+            },
+        )
+        .hover(t.hover)
+        .press(t.press)
+        .cursor(Cursor::Pointer)
+        .on_press(on_press)
+        .child(
+            text(label.to_owned())
+                .font(type_::LABEL)
+                .color(if selected {
+                    accent(dark)
+                } else {
+                    t.text_secondary
+                }),
+        )
 }
 
 fn settings_stepper(
     key: &str,
     label: &str,
+    description: &str,
     value: &str,
     dark: bool,
     step: fn(&mut State, isize),
@@ -262,36 +772,53 @@ fn settings_stepper(
     row()
         .key(key)
         .w_full()
-        .gap(8.0)
+        .min_h(60.0)
         .center_y()
+        .justify_between()
+        .gap(16.0)
+        .padding(10.0)
+        .radius(10.0)
+        .fill(t.control_track)
         .child(
-            text(label.to_uppercase())
-                .font(SECTION_TITLE)
-                .color(t.text_secondary),
+            col()
+                .gap(4.0)
+                .child(text(label.to_owned()).font(ROW_TITLE).color(t.text))
+                .child(
+                    text(description.to_owned())
+                        .font(META)
+                        .color(t.text_secondary),
+                ),
         )
-        .child(el().grow(1.0))
-        .child(step_button(
-            &format!("{key}-down"),
-            "−",
-            &format!("Decrease {label}"),
-            dark,
-            step,
-            -1,
-        ))
         .child(
-            text(value.to_owned())
-                .key(format!("{key}-value"))
-                .font(ROW_SUBTITLE)
-                .color(t.text),
+            row()
+                .key(format!("{key}-control"))
+                .gap(8.0)
+                .center_y()
+                .child(step_button(
+                    &format!("{key}-down"),
+                    "−",
+                    &format!("Decrease {label}"),
+                    dark,
+                    step,
+                    -1,
+                ))
+                .child(
+                    text(value.to_owned())
+                        .key(format!("{key}-value"))
+                        .w(60.0)
+                        .center()
+                        .font(ROW_TITLE)
+                        .color(t.text),
+                )
+                .child(step_button(
+                    &format!("{key}-up"),
+                    "+",
+                    &format!("Increase {label}"),
+                    dark,
+                    step,
+                    1,
+                )),
         )
-        .child(step_button(
-            &format!("{key}-up"),
-            "+",
-            &format!("Increase {label}"),
-            dark,
-            step,
-            1,
-        ))
 }
 
 fn step_button(
@@ -311,26 +838,13 @@ fn step_button(
         .h(28.0)
         .center()
         .radius(8.0)
-        .fill(t.control_track)
+        .fill(t.card)
+        .border(1.0, t.card_border)
         .hover(t.hover)
         .press(t.press)
         .cursor(Cursor::Pointer)
         .on_press(move |state| step(state, delta))
         .child(text(label.to_owned()).font(type_::LABEL).color(t.text))
-}
-
-fn settings_section(key: &str, title: &str, dark: bool, body: El) -> El {
-    let t = tok::theme(dark);
-    col()
-        .key(key)
-        .w_full()
-        .gap(10.0)
-        .child(
-            text(title.to_owned())
-                .font(SECTION_TITLE)
-                .color(t.text_secondary),
-        )
-        .child(body)
 }
 
 fn field_label(content: impl Into<String>, dark: bool) -> El {

@@ -8,13 +8,70 @@ use rune::{edit::TextEdit, Tx, Waker};
 
 use crate::backend::{
     self, clear_revealed, clear_totp, Approval, AuthOutcome, CardInput, CustomFieldInput, Event,
-    FieldValue, IdentityInput, ItemDetails, ItemField, Request, Secret, SendRow, Settings,
+    FieldValue, IdentityInput, ItemDetails, ItemField, Request, Secret, SendRow, Setting, Settings,
     Snapshot, TotpMeta, VaultRow,
 };
 use crate::theme::ThemePreference;
 
 pub const AUTO_LOCK_CHOICES: [i64; 7] = [0, 1, 5, 10, 15, 30, 60];
 pub const CLIPBOARD_CHOICES: [i64; 6] = [0, 10, 20, 30, 60, 120];
+pub const ATTACHMENT_CHOICES: [u64; 5] = [50, 100, 250, 500, 1000];
+
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
+pub enum SettingsSection {
+    #[default]
+    General,
+    Vault,
+    Security,
+    Account,
+}
+
+impl SettingsSection {
+    pub const ALL: [Self; 4] = [Self::General, Self::Vault, Self::Security, Self::Account];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Vault => "Vault",
+            Self::Security => "Security",
+            Self::Account => "Account",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::General => "appearance",
+            Self::Vault => "vault",
+            Self::Security => "lock",
+            Self::Account => "user",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum ToggleSetting {
+    RememberEmail,
+    CheckUpdates,
+    ShowWebsiteIcons,
+    RememberLastSearch,
+    QuickUnlock,
+    SshAgentEnabled,
+}
+
+#[derive(Clone, Default)]
+pub struct SettingsDraft {
+    pub download_dir: TextEdit,
+    pub identity_url: TextEdit,
+}
+
+impl SettingsDraft {
+    pub fn new(download_dir: &str, identity_url: &str) -> Self {
+        Self {
+            download_dir: TextEdit::new(download_dir),
+            identity_url: TextEdit::new(identity_url),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Category {
@@ -276,6 +333,8 @@ pub struct State {
     pub pending_delete: Option<String>,
     pub settings: Option<Settings>,
     pub settings_open: bool,
+    pub settings_section: SettingsSection,
+    pub settings_draft: SettingsDraft,
     pub theme: ThemePreference,
     pub help: bool,
     rows_version: u64,
@@ -327,6 +386,8 @@ impl Default for State {
             pending_delete: None,
             settings: None,
             settings_open: false,
+            settings_section: SettingsSection::default(),
+            settings_draft: SettingsDraft::default(),
             theme: ThemePreference::default(),
             help: false,
             rows_version: 0,
@@ -1507,7 +1568,10 @@ fn visible_fingerprint(state: &State) -> u64 {
     state.notice.hash(&mut hasher);
     state.theme.hash(&mut hasher);
     state.settings_open.hash(&mut hasher);
-    state.settings.as_ref().map(|s| s.theme).hash(&mut hasher);
+    state.settings_section.hash(&mut hasher);
+    state.settings_draft.download_dir.text.hash(&mut hasher);
+    state.settings_draft.identity_url.text.hash(&mut hasher);
+    state.settings.hash(&mut hasher);
     state.help.hash(&mut hasher);
     if state.snapshot.status != "unlocked" {
         state.snapshot.quick_unlock_ready.hash(&mut hasher);
@@ -1727,6 +1791,10 @@ fn apply(state: &mut State, event: Event) {
         }
         Event::Settings(settings) => {
             state.theme = settings.theme;
+            if state.settings.is_none() {
+                state.settings_draft =
+                    SettingsDraft::new(&settings.download_dir, &settings.identity_url);
+            }
             state.settings = Some(settings);
         }
         Event::Auth(outcome) => apply_auth_outcome(state, outcome),
@@ -2101,6 +2169,9 @@ fn empty_send_draft() -> SendDraft {
 }
 
 pub fn open_settings(state: &mut State) {
+    if state.settings.is_none() {
+        state.settings_draft = SettingsDraft::default();
+    }
     state.settings_open = true;
     state.form_error = None;
     dispatch(state, Request::Settings);
@@ -2108,6 +2179,10 @@ pub fn open_settings(state: &mut State) {
 
 pub fn close_settings(state: &mut State) {
     state.settings_open = false;
+}
+
+pub fn select_settings_section(state: &mut State, section: SettingsSection) {
+    state.settings_section = section;
 }
 
 pub fn set_theme(state: &mut State, theme: ThemePreference) {
@@ -2152,6 +2227,126 @@ pub fn step_clipboard_clear(state: &mut State, delta: isize) {
     }
     settings.clipboard_clear_seconds = seconds;
     dispatch(state, Request::SetClipboardClear(seconds));
+}
+
+fn dispatch_setting(state: &mut State, setting: Setting, update: impl FnOnce(&mut Settings)) {
+    if let Some(settings) = state.settings.as_mut() {
+        update(settings);
+    }
+    dispatch(state, Request::SetSetting(setting));
+}
+
+pub fn toggle_setting(state: &mut State, setting: ToggleSetting, value: bool) {
+    match setting {
+        ToggleSetting::RememberEmail => {
+            dispatch_setting(state, Setting::RememberEmail(value), |settings| {
+                settings.remember_email = value
+            })
+        }
+        ToggleSetting::CheckUpdates => {
+            dispatch_setting(state, Setting::CheckUpdates(value), |settings| {
+                settings.check_updates = value
+            })
+        }
+        ToggleSetting::ShowWebsiteIcons => {
+            dispatch_setting(state, Setting::ShowWebsiteIcons(value), |settings| {
+                settings.show_website_icons = value
+            })
+        }
+        ToggleSetting::RememberLastSearch => {
+            dispatch_setting(state, Setting::RememberLastSearch(value), |settings| {
+                settings.remember_last_search = value
+            })
+        }
+        ToggleSetting::QuickUnlock => {
+            dispatch_setting(state, Setting::QuickUnlock(value), |settings| {
+                settings.quick_unlock = value
+            });
+            dispatch(state, Request::Refresh);
+        }
+        ToggleSetting::SshAgentEnabled => {
+            dispatch_setting(state, Setting::SshAgentEnabled(value), |settings| {
+                settings.ssh_agent_enabled = value
+            });
+            dispatch(state, Request::AgentStatus);
+        }
+    }
+}
+
+pub fn set_log_level(state: &mut State, level: &str) {
+    let Some(settings) = state.settings.as_ref() else {
+        return;
+    };
+    if settings.log_level == level {
+        return;
+    }
+    let request = Setting::LogLevel(level.to_owned());
+    let level = level.to_owned();
+    dispatch_setting(state, request, |settings| settings.log_level = level);
+}
+
+pub fn step_attachment_size(state: &mut State, delta: isize) {
+    let Some(settings) = state.settings.as_ref() else {
+        return;
+    };
+    let index = ATTACHMENT_CHOICES
+        .iter()
+        .position(|size| *size >= settings.max_attachment_size_mb)
+        .unwrap_or(ATTACHMENT_CHOICES.len() - 1) as isize;
+    let index = (index + delta).clamp(0, ATTACHMENT_CHOICES.len() as isize - 1) as usize;
+    let size = ATTACHMENT_CHOICES[index];
+    if size == settings.max_attachment_size_mb {
+        return;
+    }
+    dispatch_setting(state, Setting::MaxAttachmentSizeMb(size), |settings| {
+        settings.max_attachment_size_mb = size
+    });
+}
+
+pub fn set_ssh_confirm(state: &mut State, mode: &str) {
+    let Some(settings) = state.settings.as_ref() else {
+        return;
+    };
+    if settings.ssh_agent_confirm == mode {
+        return;
+    }
+    let request = Setting::SshAgentConfirm(mode.to_owned());
+    let mode = mode.to_owned();
+    dispatch_setting(state, request, |settings| settings.ssh_agent_confirm = mode);
+    dispatch(state, Request::AgentStatus);
+}
+
+pub fn save_settings_paths(state: &mut State) {
+    let download_dir = state.settings_draft.download_dir.text.trim().to_owned();
+    let identity_url = state.settings_draft.identity_url.text.trim().to_owned();
+    if let Some(settings) = state.settings.as_ref() {
+        if settings.download_dir == download_dir && settings.identity_url == identity_url {
+            return;
+        }
+        let save_download = settings.download_dir != download_dir;
+        let save_identity = settings.identity_url != identity_url;
+        if save_download {
+            dispatch(
+                state,
+                Request::SetSetting(Setting::DownloadDir(download_dir)),
+            );
+        }
+        if save_identity {
+            dispatch(
+                state,
+                Request::SetSetting(Setting::IdentityUrl(identity_url)),
+            );
+        }
+        return;
+    }
+    dispatch(
+        state,
+        Request::SetSetting(Setting::DownloadDir(download_dir)),
+    );
+    dispatch(
+        state,
+        Request::SetSetting(Setting::IdentityUrl(identity_url)),
+    );
 }
 
 pub fn open_sends(state: &mut State) {
@@ -2598,11 +2793,20 @@ pub fn scene_settings(state: &mut State) {
         auto_lock_minutes: 15,
         clipboard_clear_seconds: 30,
         server_url: state.snapshot.server.clone(),
+        identity_url: String::new(),
         email: state.snapshot.email.clone(),
+        download_dir: "~/Downloads".to_owned(),
+        remember_email: true,
+        check_updates: true,
+        log_level: "error".to_owned(),
+        show_website_icons: true,
+        remember_last_search: false,
+        max_attachment_size_mb: 500,
         quick_unlock: true,
         ssh_agent_enabled: false,
         ssh_agent_confirm: "first-use".to_owned(),
     });
+    state.settings_draft = SettingsDraft::new("~/Downloads", "");
     state.settings_open = true;
 }
 
@@ -2793,6 +2997,63 @@ mod tests {
         assert_eq!(stepped_value(0, -1, &AUTO_LOCK_CHOICES), 0);
         assert_eq!(stepped_value(60, 1, &AUTO_LOCK_CHOICES), 60);
         assert_eq!(stepped_value(25, -1, &CLIPBOARD_CHOICES), 20);
+    }
+
+    #[test]
+    fn settings_preferences_queue_typed_requests() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut state = State::default();
+        scene_settings(&mut state);
+        state.requests = Some(tx);
+
+        toggle_setting(&mut state, ToggleSetting::ShowWebsiteIcons, false);
+        toggle_setting(&mut state, ToggleSetting::QuickUnlock, false);
+        set_log_level(&mut state, "debug");
+        step_attachment_size(&mut state, 1);
+        set_ssh_confirm(&mut state, "always");
+        state
+            .settings_draft
+            .download_dir
+            .replace_text("~/VaultDownloads");
+        save_settings_paths(&mut state);
+
+        let settings = state.settings.as_ref().expect("settings");
+        assert!(!settings.show_website_icons);
+        assert!(!settings.quick_unlock);
+        assert_eq!(settings.log_level, "debug");
+        assert_eq!(settings.max_attachment_size_mb, 1000);
+        assert_eq!(settings.ssh_agent_confirm, "always");
+
+        let requests: Vec<_> = rx.try_iter().collect();
+        assert!(requests.iter().any(|request| matches!(
+            request,
+            Request::SetSetting(Setting::ShowWebsiteIcons(false))
+        )));
+        assert!(requests
+            .iter()
+            .any(|request| matches!(request, Request::SetSetting(Setting::QuickUnlock(false)))));
+        assert!(requests.iter().any(|request| matches!(
+            request,
+            Request::SetSetting(Setting::LogLevel(level)) if level == "debug"
+        )));
+        assert!(requests.iter().any(|request| matches!(
+            request,
+            Request::SetSetting(Setting::MaxAttachmentSizeMb(1000))
+        )));
+        assert!(requests.iter().any(|request| matches!(
+            request,
+            Request::SetSetting(Setting::SshAgentConfirm(mode)) if mode == "always"
+        )));
+        assert!(requests.iter().any(|request| matches!(
+            request,
+            Request::SetSetting(Setting::DownloadDir(path)) if path == "~/VaultDownloads"
+        )));
+        assert!(requests
+            .iter()
+            .any(|request| matches!(request, Request::Refresh)));
+        assert!(requests
+            .iter()
+            .any(|request| matches!(request, Request::AgentStatus)));
     }
 
     #[test]

@@ -885,16 +885,40 @@ mod tests {
         let mut rt = runtime(state::scene_settings);
         rt.frame(1.0 / 60.0);
         assert!(rt.find("settings").is_some());
+        assert!(rt.find("settings-tab-general").is_some());
         assert!(rt.find("settings-appearance").is_some());
         assert!(rt.find("settings-theme-system").is_some());
         assert!(rt.find("settings-theme-dark").is_some());
         assert!(rt.find("settings-theme-light").is_some());
+        assert!(rt.find("settings-website-icons").is_some());
+        assert!(rt.find("settings-close").is_some());
+
+        let (x, y) = rt.find("settings-tab-vault").expect("vault tab");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
         assert!(rt.find("settings-vault").is_some());
         assert!(rt.find("settings-auto-lock-value").is_some());
         assert!(rt.find("settings-clipboard-value").is_some());
+        assert!(rt.find("settings-attachment-size-value").is_some());
+
+        let (x, y) = rt.find("settings-tab-security").expect("security tab");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("settings-quick-unlock").is_some());
+        assert!(rt.find("settings-ssh-agent").is_some());
+        assert!(rt.find("settings-ssh-confirm-first-use").is_some());
+
+        let (x, y) = rt.find("settings-tab-account").expect("account tab");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
         assert!(rt.find("settings-account").is_some());
-        assert!(rt.find("field-value-Server").is_some());
-        assert!(rt.find("settings-close").is_some());
+        assert!(rt.find("settings-server-value").is_some());
+        assert!(rt.find("settings-email-value").is_some());
+        assert!(rt.find("settings-download-dir").is_some());
+        assert!(rt.find("settings-identity-url").is_some());
     }
 
     #[test]
@@ -904,6 +928,10 @@ mod tests {
             state::scene_settings(state);
             state.requests = Some(tx.clone());
         });
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("settings-tab-vault").expect("vault tab");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
 
         let (x, y) = rt.find("settings-auto-lock-up").expect("auto-lock up");

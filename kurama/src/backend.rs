@@ -108,13 +108,21 @@ pub struct Snapshot {
 }
 
 /// Non-secret backend preferences shown in the settings screen.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Hash)]
 pub struct Settings {
     pub theme: ThemePreference,
     pub auto_lock_minutes: i64,
     pub clipboard_clear_seconds: i64,
     pub server_url: String,
+    pub identity_url: String,
     pub email: String,
+    pub download_dir: String,
+    pub remember_email: bool,
+    pub check_updates: bool,
+    pub log_level: String,
+    pub show_website_icons: bool,
+    pub remember_last_search: bool,
+    pub max_attachment_size_mb: u64,
     pub quick_unlock: bool,
     pub ssh_agent_enabled: bool,
     pub ssh_agent_confirm: String,
@@ -235,6 +243,21 @@ impl fmt::Debug for IdentityInput {
 }
 
 #[derive(Clone, Debug)]
+pub enum Setting {
+    RememberEmail(bool),
+    CheckUpdates(bool),
+    ShowWebsiteIcons(bool),
+    RememberLastSearch(bool),
+    LogLevel(String),
+    MaxAttachmentSizeMb(u64),
+    DownloadDir(String),
+    IdentityUrl(String),
+    QuickUnlock(bool),
+    SshAgentEnabled(bool),
+    SshAgentConfirm(String),
+}
+
+#[derive(Clone, Debug)]
 pub enum Request {
     Refresh,
     Trash,
@@ -352,6 +375,7 @@ pub enum Request {
     SetTheme(ThemePreference),
     SetAutoLock(i64),
     SetClipboardClear(i64),
+    SetSetting(Setting),
     Events {
         since: u64,
     },
@@ -1010,6 +1034,7 @@ pub fn perform(request: Request) -> Event {
             config.clipboard_clear_seconds = seconds;
             save_settings(&config)
         }
+        Request::SetSetting(setting) => save_setting(setting),
         Request::Events { since } => match call(json!({ "action": "events", "since": since })) {
             Ok(response) => {
                 let (cursor, notices) = notices(&response);
@@ -1203,6 +1228,69 @@ fn save_settings(config: &Config) -> Event {
     }
 }
 
+fn save_setting(setting: Setting) -> Event {
+    let mut config = ConfigManager::default().load();
+    let mut daemon_request = None;
+    match setting {
+        Setting::RememberEmail(value) => config.remember_email = value,
+        Setting::CheckUpdates(value) => config.check_updates = value,
+        Setting::ShowWebsiteIcons(value) => config.show_website_icons = value,
+        Setting::RememberLastSearch(value) => config.remember_last_search = value,
+        Setting::LogLevel(value) => {
+            let level = value.trim().to_ascii_lowercase();
+            if !["error", "warn", "info", "debug", "trace"].contains(&level.as_str()) {
+                return Event::Error("Unsupported log level".to_owned());
+            }
+            config.log_level = level;
+        }
+        Setting::MaxAttachmentSizeMb(value) => {
+            if value == 0 {
+                return Event::Error("Attachment size must be greater than zero".to_owned());
+            }
+            config.max_attachment_size_mb = value;
+        }
+        Setting::DownloadDir(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Event::Error("Download directory cannot be empty".to_owned());
+            }
+            config.download_dir = value.to_owned();
+        }
+        Setting::IdentityUrl(value) => {
+            let value = value.trim();
+            if let Err(error) = ConfigManager::validate_url_scheme_security(value, "identity URL") {
+                return Event::Error(error.to_string());
+            }
+            config.identity_url = (!value.is_empty()).then(|| value.to_owned());
+        }
+        Setting::QuickUnlock(value) => {
+            config.quick_unlock = value;
+            daemon_request = Some(json!({ "action": "set_quick_unlock", "enabled": value }));
+        }
+        Setting::SshAgentEnabled(value) => {
+            config.ssh_agent_enabled = value;
+            daemon_request = Some(json!({ "action": "ssh_agent_apply" }));
+        }
+        Setting::SshAgentConfirm(value) => {
+            if !["never", "first-use", "always"].contains(&value.as_str()) {
+                return Event::Error("Unsupported SSH confirmation mode".to_owned());
+            }
+            config.ssh_agent_confirm = value;
+            daemon_request = Some(json!({ "action": "ssh_agent_apply" }));
+        }
+    }
+    let event = save_settings(&config);
+    if !matches!(event, Event::Settings(_)) {
+        return event;
+    }
+    if let Some(request) = daemon_request {
+        if let Err(error) = call(request) {
+            return Event::Error(format!("Could not apply setting: {error}"));
+        }
+    }
+    event
+}
+
 fn clipboard_timeout() -> i64 {
     clamp_timeout(ConfigManager::default().load().clipboard_clear_seconds)
 }
@@ -1217,7 +1305,15 @@ fn settings_from_config(config: &Config) -> Settings {
         auto_lock_minutes: config.auto_lock_minutes,
         clipboard_clear_seconds: config.clipboard_clear_seconds,
         server_url: config.server_url.clone(),
+        identity_url: config.identity_url.clone().unwrap_or_default(),
         email: config.email.clone(),
+        download_dir: config.download_dir.clone(),
+        remember_email: config.remember_email,
+        check_updates: config.check_updates,
+        log_level: config.log_level.clone(),
+        show_website_icons: config.show_website_icons,
+        remember_last_search: config.remember_last_search,
+        max_attachment_size_mb: config.max_attachment_size_mb,
         quick_unlock: config.quick_unlock,
         ssh_agent_enabled: config.ssh_agent_enabled,
         ssh_agent_confirm: config.ssh_agent_confirm.clone(),
