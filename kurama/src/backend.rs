@@ -570,6 +570,8 @@ fn item_fields(item: &Value) -> Vec<ItemField> {
             }
         }
     }
+    push_text(&mut fields, "created", "Created", text(item, "created_at"));
+    push_text(&mut fields, "updated", "Modified", text(item, "updated_at"));
     fields
 }
 
@@ -858,6 +860,8 @@ mod tests {
         let item = json!({
             "id": "item-1",
             "type_name": "login",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-02T03:04:05Z",
             "notes": "private note",
             "login": {
                 "username": "dev@example.com",
@@ -877,6 +881,16 @@ mod tests {
             key: "uri-0".to_owned(),
             label: "Website".to_owned(),
             value: FieldValue::Text("https://github.com".to_owned()),
+        }));
+        assert!(fields.contains(&ItemField {
+            key: "created".to_owned(),
+            label: "Created".to_owned(),
+            value: FieldValue::Text("2026-01-01T00:00:00Z".to_owned()),
+        }));
+        assert!(fields.contains(&ItemField {
+            key: "updated".to_owned(),
+            label: "Modified".to_owned(),
+            value: FieldValue::Text("2026-01-02T03:04:05Z".to_owned()),
         }));
         for key in ["password", "totp", "notes", "custom-0"] {
             let found = fields.iter().find(|field| field.key == key).unwrap();

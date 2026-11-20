@@ -533,17 +533,21 @@ fn details(s: &State, dark: bool) -> El {
     } else if !item.subtitle.is_empty() {
         fields = fields.child(field("Username", &item.subtitle, dark));
     }
-    fields = fields
-        .child(field(
-            "Folder",
-            if item.folder.is_empty() {
-                "—"
-            } else {
-                &item.folder
-            },
-            dark,
-        ))
-        .child(field(
+    fields = fields.child(field(
+        "Folder",
+        if item.folder.is_empty() {
+            "—"
+        } else {
+            &item.folder
+        },
+        dark,
+    ));
+    if !s
+        .details
+        .as_ref()
+        .is_some_and(|details| details.id == item.id)
+    {
+        fields = fields.child(field(
             "Updated",
             if item.updated.is_empty() {
                 "—"
@@ -552,6 +556,7 @@ fn details(s: &State, dark: bool) -> El {
             },
             dark,
         ));
+    }
 
     col()
         .key("details")

@@ -122,6 +122,8 @@ mod tests {
             "detail-field-uri-0",
             "detail-field-password",
             "detail-field-totp",
+            "detail-field-created",
+            "detail-field-updated",
             "copy-password",
             "copy-uri-0",
             "copy-user",

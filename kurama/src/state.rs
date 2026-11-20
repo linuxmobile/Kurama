@@ -687,6 +687,16 @@ pub fn scene_populated(state: &mut State) {
                 label: "TOTP".to_owned(),
                 value: FieldValue::Masked,
             },
+            ItemField {
+                key: "created".to_owned(),
+                label: "Created".to_owned(),
+                value: FieldValue::Text("2026-01-01T00:00:00Z".to_owned()),
+            },
+            ItemField {
+                key: "updated".to_owned(),
+                label: "Modified".to_owned(),
+                value: FieldValue::Text("2026-01-02T03:04:05Z".to_owned()),
+            },
         ],
     });
     state.totp = Some(TotpMeta {
