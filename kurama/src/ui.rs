@@ -12,8 +12,8 @@ use crate::state::{
     dispatch, folder_label, move_selection, open_attachment, open_trash, restore_item,
     select_category, select_folder, select_item, set_create_type, set_favorite, start_edit,
     submit_create, submit_edit, submit_quick_unlock, submit_search, submit_unlock,
-    toggle_create_favorite, toggle_edit_favorite, toggle_reveal, CardDraft, Category, Location,
-    State,
+    toggle_create_favorite, toggle_edit_favorite, toggle_reveal, CardDraft, Category,
+    IdentityDraft, Location, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -269,6 +269,127 @@ fn card_fields(
         )
 }
 
+fn form_field(
+    key: impl AsRef<str>,
+    label: &str,
+    placeholder: &str,
+    value: &TextEdit,
+    dark: bool,
+    on_edit: impl for<'a> Fn(&'a mut State) -> &'a mut TextEdit + 'static,
+    submit: fn(&mut State),
+) -> El {
+    labeled_input(
+        value,
+        key.as_ref(),
+        label,
+        placeholder,
+        dark,
+        on_edit,
+        submit,
+    )
+    .grow(1.0)
+}
+
+fn identity_fields(
+    identity: &IdentityDraft,
+    prefix: &str,
+    dark: bool,
+    draft: for<'a> fn(&'a mut State) -> &'a mut IdentityDraft,
+    submit: fn(&mut State),
+) -> El {
+    col()
+        .key(format!("{prefix}-identity-fields"))
+        .gap(16.0)
+        .child(
+            row()
+                .gap(12.0)
+                .child(form_field(
+                    format!("{prefix}-first-name"),
+                    "First name",
+                    "First name",
+                    &identity.first_name,
+                    dark,
+                    move |state| &mut draft(state).first_name,
+                    submit,
+                ))
+                .child(form_field(
+                    format!("{prefix}-last-name"),
+                    "Last name",
+                    "Last name",
+                    &identity.last_name,
+                    dark,
+                    move |state| &mut draft(state).last_name,
+                    submit,
+                )),
+        )
+        .child(
+            row()
+                .gap(12.0)
+                .child(form_field(
+                    format!("{prefix}-email"),
+                    "Email",
+                    "name@example.com",
+                    &identity.email,
+                    dark,
+                    move |state| &mut draft(state).email,
+                    submit,
+                ))
+                .child(form_field(
+                    format!("{prefix}-phone"),
+                    "Phone",
+                    "Phone number",
+                    &identity.phone,
+                    dark,
+                    move |state| &mut draft(state).phone,
+                    submit,
+                )),
+        )
+        .child(
+            row()
+                .gap(12.0)
+                .child(form_field(
+                    format!("{prefix}-address1"),
+                    "Address",
+                    "Street address",
+                    &identity.address1,
+                    dark,
+                    move |state| &mut draft(state).address1,
+                    submit,
+                ))
+                .child(form_field(
+                    format!("{prefix}-postal-code"),
+                    "Postal code",
+                    "Postal code",
+                    &identity.postal_code,
+                    dark,
+                    move |state| &mut draft(state).postal_code,
+                    submit,
+                )),
+        )
+        .child(
+            row()
+                .gap(12.0)
+                .child(form_field(
+                    format!("{prefix}-city"),
+                    "City",
+                    "City",
+                    &identity.city,
+                    dark,
+                    move |state| &mut draft(state).city,
+                    submit,
+                ))
+                .child(form_field(
+                    format!("{prefix}-country"),
+                    "Country",
+                    "Country",
+                    &identity.country,
+                    dark,
+                    move |state| &mut draft(state).country,
+                    submit,
+                )),
+        )
+}
+
 fn form_panel(key: &str, title: &str, dark: bool, header_extra: El, body: El, footer: El) -> El {
     let t = tok::theme(dark);
     col()
@@ -399,6 +520,17 @@ fn create_form(s: &State, dark: bool) -> El {
         } else {
             el()
         })
+        .child(if draft.item_type == 4 {
+            identity_fields(
+                &draft.identity,
+                "create",
+                dark,
+                |state| &mut state.create.as_mut().unwrap().identity,
+                submit_create,
+            )
+        } else {
+            el()
+        })
         .child(if draft.item_type == 2 {
             notes_input(&draft.notes, "create-notes", dark, |state| {
                 &mut state.create.as_mut().unwrap().notes
@@ -513,6 +645,17 @@ fn edit_form(s: &State, dark: bool) -> El {
                 "edit",
                 dark,
                 |state| &mut state.edit.as_mut().unwrap().card,
+                submit_edit,
+            )
+        } else {
+            el()
+        })
+        .child(if draft.item_type == 4 {
+            identity_fields(
+                &draft.identity,
+                "edit",
+                dark,
+                |state| &mut state.edit.as_mut().unwrap().identity,
                 submit_edit,
             )
         } else {

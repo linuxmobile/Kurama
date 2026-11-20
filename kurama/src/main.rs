@@ -51,6 +51,7 @@ fn main() -> ExitCode {
             ("disconnected", state::scene_disconnected),
             ("trash", state::scene_trash),
             ("create-card", state::scene_create_card),
+            ("create-identity", state::scene_create_identity),
         ],
         setup: Some(state::setup),
         poll: Some(state::poll),
@@ -98,6 +99,22 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
                         | "create-website"
                         | "create-notes"
                         | "edit-notes"
+                        | "create-first-name"
+                        | "create-last-name"
+                        | "create-email"
+                        | "create-phone"
+                        | "create-address1"
+                        | "create-postal-code"
+                        | "create-city"
+                        | "create-country"
+                        | "edit-first-name"
+                        | "edit-last-name"
+                        | "edit-email"
+                        | "edit-phone"
+                        | "edit-address1"
+                        | "edit-postal-code"
+                        | "edit-city"
+                        | "edit-country"
                 )
             ) || focused
                 .is_some_and(|key| key.starts_with("create-card") || key.starts_with("edit-card"));
@@ -501,6 +518,63 @@ mod tests {
                 if card.number.as_ref().map(backend::Secret::as_str) == Some("4242424242424242")
                     && card.code.as_ref().map(backend::Secret::as_str) == Some("123")
                     && card.exp_year.as_ref().map(backend::Secret::as_str) == Some("2030")
+        )));
+    }
+
+    #[test]
+    fn create_form_submits_identity_details() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("new-item").expect("new item button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt
+            .find("create-type-identity")
+            .expect("identity type button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        for key in [
+            "create-identity-fields",
+            "create-first-name",
+            "create-last-name",
+            "create-email",
+            "create-phone",
+            "create-address1",
+            "create-postal-code",
+            "create-city",
+            "create-country",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+        let draft = rt.state.create.as_mut().unwrap();
+        draft.name.replace_text("Personal ID");
+        draft.identity.first_name.replace_text("Ada");
+        draft.identity.last_name.replace_text("Lovelace");
+        draft.identity.email.replace_text("ada@example.com");
+        draft.identity.phone.replace_text("+44 20 7946 0958");
+        draft.identity.address1.replace_text("12 Analytical Way");
+        draft.identity.postal_code.replace_text("SW1A 1AA");
+        draft.identity.city.replace_text("London");
+        draft.identity.country.replace_text("UK");
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("create-submit").expect("create button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::CreateItem { item_type, identity: Some(identity), .. }
+                if item_type == 4
+                    && identity.first_name.as_ref().map(backend::Secret::as_str) == Some("Ada")
+                    && identity.last_name.as_ref().map(backend::Secret::as_str) == Some("Lovelace")
+                    && identity.email.as_ref().map(backend::Secret::as_str) == Some("ada@example.com")
+                    && identity.city.as_ref().map(backend::Secret::as_str) == Some("London")
         )));
     }
 

@@ -131,6 +131,43 @@ impl fmt::Debug for CardInput {
     }
 }
 
+#[derive(Clone)]
+pub struct IdentityInput {
+    pub first_name: Option<Secret>,
+    pub last_name: Option<Secret>,
+    pub email: Option<Secret>,
+    pub phone: Option<Secret>,
+    pub address1: Option<Secret>,
+    pub city: Option<Secret>,
+    pub postal_code: Option<Secret>,
+    pub country: Option<Secret>,
+}
+
+impl IdentityInput {
+    fn value(&self) -> Option<Value> {
+        let value = json!({
+            "first_name": self.first_name.as_ref().map(Secret::as_str),
+            "last_name": self.last_name.as_ref().map(Secret::as_str),
+            "email": self.email.as_ref().map(Secret::as_str),
+            "phone": self.phone.as_ref().map(Secret::as_str),
+            "address1": self.address1.as_ref().map(Secret::as_str),
+            "city": self.city.as_ref().map(Secret::as_str),
+            "postal_code": self.postal_code.as_ref().map(Secret::as_str),
+            "country": self.country.as_ref().map(Secret::as_str),
+        });
+        let used = value
+            .as_object()
+            .is_some_and(|fields| fields.values().any(|field| !field.is_null()));
+        used.then_some(value)
+    }
+}
+
+impl fmt::Debug for IdentityInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("IdentityInput([redacted])")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Request {
     Refresh,
@@ -171,6 +208,7 @@ pub enum Request {
         website: Option<String>,
         notes: Option<Secret>,
         card: Option<CardInput>,
+        identity: Option<IdentityInput>,
     },
     CreateItem {
         name: String,
@@ -182,6 +220,7 @@ pub enum Request {
         website: Option<String>,
         notes: Option<Secret>,
         card: Option<CardInput>,
+        identity: Option<IdentityInput>,
     },
     Folders,
     Restore {
@@ -418,6 +457,7 @@ pub fn perform(request: Request) -> Event {
             website,
             notes,
             card,
+            identity,
         } => match call(json!({
             "action": "update_item",
             "id": id.clone(),
@@ -429,7 +469,8 @@ pub fn perform(request: Request) -> Event {
                 "password": password.as_ref().map(Secret::as_str),
                 "website": website,
                 "notes": notes.as_ref().map(Secret::as_str),
-                "card": card.as_ref().and_then(CardInput::value)
+                "card": card.as_ref().and_then(CardInput::value),
+                "identity": identity.as_ref().and_then(IdentityInput::value)
             }
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
@@ -448,6 +489,7 @@ pub fn perform(request: Request) -> Event {
             website,
             notes,
             card,
+            identity,
         } => match call(json!({
             "action": "create_item",
             "options": {
@@ -459,7 +501,8 @@ pub fn perform(request: Request) -> Event {
                 "password": password.as_ref().map(Secret::as_str),
                 "website": website,
                 "notes": notes.as_ref().map(Secret::as_str),
-                "card": card.as_ref().and_then(CardInput::value)
+                "card": card.as_ref().and_then(CardInput::value),
+                "identity": identity.as_ref().and_then(IdentityInput::value)
             }
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
@@ -1074,10 +1117,21 @@ mod tests {
             website: None,
             notes: Some(Secret::new("private note".to_owned())),
             card: None,
+            identity: Some(IdentityInput {
+                first_name: Some(Secret::new("Ada".to_owned())),
+                last_name: None,
+                email: Some(Secret::new("ada@example.com".to_owned())),
+                phone: None,
+                address1: None,
+                city: None,
+                postal_code: None,
+                country: None,
+            }),
         };
         let debug = format!("{request:?}");
         assert!(!debug.contains("hunter2"));
         assert!(!debug.contains("private note"));
+        assert!(!debug.contains("ada@example.com"));
         assert!(debug.contains("redacted"));
     }
 

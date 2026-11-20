@@ -7,8 +7,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use rune::{edit::TextEdit, Tx, Waker};
 
 use crate::backend::{
-    self, clear_revealed, clear_totp, Approval, CardInput, Event, FieldValue, ItemDetails,
-    ItemField, Request, Secret, Snapshot, TotpMeta, VaultRow,
+    self, clear_revealed, clear_totp, Approval, CardInput, Event, FieldValue, IdentityInput,
+    ItemDetails, ItemField, Request, Secret, Snapshot, TotpMeta, VaultRow,
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -82,6 +82,17 @@ pub struct CardDraft {
     pub code: TextEdit,
 }
 
+pub struct IdentityDraft {
+    pub first_name: TextEdit,
+    pub last_name: TextEdit,
+    pub email: TextEdit,
+    pub phone: TextEdit,
+    pub address1: TextEdit,
+    pub city: TextEdit,
+    pub postal_code: TextEdit,
+    pub country: TextEdit,
+}
+
 pub struct CreateDraft {
     pub name: TextEdit,
     pub item_type: i64,
@@ -92,6 +103,7 @@ pub struct CreateDraft {
     pub website: TextEdit,
     pub notes: TextEdit,
     pub card: CardDraft,
+    pub identity: IdentityDraft,
 }
 
 pub struct EditDraft {
@@ -106,6 +118,7 @@ pub struct EditDraft {
     pub website: TextEdit,
     pub notes: TextEdit,
     pub card: CardDraft,
+    pub identity: IdentityDraft,
 }
 
 pub struct State {
@@ -384,6 +397,7 @@ pub fn start_create() -> CreateDraft {
         website: TextEdit::new(""),
         notes: TextEdit::new(""),
         card: empty_card_draft(),
+        identity: empty_identity_draft(),
     }
 }
 
@@ -432,6 +446,88 @@ fn card_input(draft: &CardDraft) -> Option<CardInput> {
         exp_year,
         code,
     })
+}
+
+fn empty_identity_draft() -> IdentityDraft {
+    IdentityDraft {
+        first_name: TextEdit::new(""),
+        last_name: TextEdit::new(""),
+        email: TextEdit::new(""),
+        phone: TextEdit::new(""),
+        address1: TextEdit::new(""),
+        city: TextEdit::new(""),
+        postal_code: TextEdit::new(""),
+        country: TextEdit::new(""),
+    }
+}
+
+fn identity_input(draft: &IdentityDraft) -> Option<IdentityInput> {
+    let first_name = optional_secret(&draft.first_name).map(Secret::new);
+    let last_name = optional_secret(&draft.last_name).map(Secret::new);
+    let email = optional_secret(&draft.email).map(Secret::new);
+    let phone = optional_secret(&draft.phone).map(Secret::new);
+    let address1 = optional_secret(&draft.address1).map(Secret::new);
+    let city = optional_secret(&draft.city).map(Secret::new);
+    let postal_code = optional_secret(&draft.postal_code).map(Secret::new);
+    let country = optional_secret(&draft.country).map(Secret::new);
+    let used = [
+        &first_name,
+        &last_name,
+        &email,
+        &phone,
+        &address1,
+        &city,
+        &postal_code,
+        &country,
+    ]
+    .iter()
+    .any(|field| field.is_some());
+    used.then_some(IdentityInput {
+        first_name,
+        last_name,
+        email,
+        phone,
+        address1,
+        city,
+        postal_code,
+        country,
+    })
+}
+
+fn detail_text(state: &State, key: &str) -> String {
+    state
+        .details
+        .as_ref()
+        .and_then(|details| details.fields.iter().find(|field| field.key == key))
+        .and_then(|field| match &field.value {
+            FieldValue::Text(value) => Some(value.clone()),
+            FieldValue::Masked => None,
+        })
+        .unwrap_or_default()
+}
+
+fn split_name(value: &str) -> (&str, &str) {
+    value.split_once(' ').unwrap_or((value, ""))
+}
+
+fn prefilled_identity_draft(state: &State, fallback: &str) -> IdentityDraft {
+    let full_name = detail_text(state, "name");
+    let source = if full_name.is_empty() {
+        fallback
+    } else {
+        &full_name
+    };
+    let (first, last) = split_name(source);
+    IdentityDraft {
+        first_name: TextEdit::new(first),
+        last_name: TextEdit::new(last),
+        email: TextEdit::new(detail_text(state, "email")),
+        phone: TextEdit::new(detail_text(state, "phone")),
+        address1: TextEdit::new(""),
+        city: TextEdit::new(""),
+        postal_code: TextEdit::new(""),
+        country: TextEdit::new(""),
+    }
 }
 
 fn item_type_id(type_name: &str) -> i64 {
@@ -523,7 +619,12 @@ pub fn submit_create(state: &mut State) {
             password: optional_secret(&draft.password).map(Secret::new),
             website: optional_text(&draft.website),
             notes: optional_secret(&draft.notes).map(Secret::new),
-            card: card_input(&draft.card),
+            card: (draft.item_type == 3)
+                .then(|| card_input(&draft.card))
+                .flatten(),
+            identity: (draft.item_type == 4)
+                .then(|| identity_input(&draft.identity))
+                .flatten(),
         },
     );
 }
@@ -548,6 +649,11 @@ pub fn start_edit(state: &mut State) {
         website: TextEdit::new(""),
         notes: TextEdit::new(""),
         card: empty_card_draft(),
+        identity: if item.type_name == "identity" {
+            prefilled_identity_draft(state, &item.subtitle)
+        } else {
+            empty_identity_draft()
+        },
     });
 }
 
@@ -588,7 +694,12 @@ pub fn submit_edit(state: &mut State) {
             password: optional_secret(&draft.password).map(Secret::new),
             website: optional_text(&draft.website),
             notes: optional_secret(&draft.notes).map(Secret::new),
-            card: card_input(&draft.card),
+            card: (draft.item_type == 3)
+                .then(|| card_input(&draft.card))
+                .flatten(),
+            identity: (draft.item_type == 4)
+                .then(|| identity_input(&draft.identity))
+                .flatten(),
         },
     );
 }
@@ -1198,6 +1309,13 @@ pub fn scene_create_card(state: &mut State) {
     scene_populated(state);
     let mut draft = start_create();
     draft.item_type = 3;
+    state.create = Some(draft);
+}
+
+pub fn scene_create_identity(state: &mut State) {
+    scene_populated(state);
+    let mut draft = start_create();
+    draft.item_type = 4;
     state.create = Some(draft);
 }
 
