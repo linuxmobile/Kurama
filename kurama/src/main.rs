@@ -122,6 +122,9 @@ mod tests {
             "detail-field-uri-0",
             "detail-field-password",
             "detail-field-totp",
+            "copy-password",
+            "copy-uri-0",
+            "copy-user",
         ] {
             assert!(rt.find(key).is_some(), "missing key: {key}");
         }
@@ -137,6 +140,9 @@ mod tests {
 
     #[test]
     fn revealed_fields_show_values_and_a_hide_control() {
+        let _guard = backend::REVEAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         backend::clear_revealed();
         backend::stash_revealed("ui-reveal-test", "shown-secret".to_owned());
         let mut rt = runtime(|state| {

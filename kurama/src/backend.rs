@@ -77,14 +77,29 @@ pub struct Approval {
 pub enum Request {
     Refresh,
     Trash,
-    Details { id: String },
-    RevealField { item_id: String, key: String },
+    Details {
+        id: String,
+    },
+    RevealField {
+        item_id: String,
+        key: String,
+    },
+    CopyField {
+        item_id: String,
+        key: String,
+        label: String,
+        sensitive: bool,
+    },
     Search(String),
     Sync,
     Lock,
-    Unlock { password: Secret },
+    Unlock {
+        password: Secret,
+    },
     QuickUnlock,
-    Events { since: u64 },
+    Events {
+        since: u64,
+    },
     Approvals,
 }
 
@@ -115,6 +130,9 @@ impl Drop for Secret {
 
 static REVEALED: Mutex<Option<(String, Secret)>> = Mutex::new(None);
 
+#[cfg(test)]
+pub static REVEAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn stash_revealed(key: &str, value: String) {
     if let Ok(mut revealed) = REVEALED.lock() {
         *revealed = Some((key.to_owned(), Secret::new(value)));
@@ -139,7 +157,8 @@ pub enum Event {
     Items(Vec<VaultRow>),
     Trash(Vec<VaultRow>),
     Details(ItemDetails),
-    Revealed(String),
+    Revealed { item_id: String, key: String },
+    Notice(String),
     Notices { cursor: u64, notices: Vec<Notice> },
     Approvals(Vec<Approval>),
     Error(String),
@@ -173,7 +192,27 @@ pub fn perform(request: Request) -> Event {
         Request::RevealField { item_id, key } => match revealed_field(&item_id, &key) {
             Ok(value) => {
                 stash_revealed(&key, value);
-                Event::Revealed(key)
+                Event::Revealed { item_id, key }
+            }
+            Err(error) => Event::Error(error),
+        },
+        Request::CopyField {
+            item_id,
+            key,
+            label,
+            sensitive,
+        } => match revealed_field(&item_id, &key) {
+            Ok(value) => {
+                let copy = json!({
+                    "action": "copy",
+                    "text": value,
+                    "sensitive": sensitive,
+                    "timeout": 30
+                });
+                match call(copy) {
+                    Ok(_) => Event::Notice(format!("Copied {label}")),
+                    Err(error) => Event::Error(error),
+                }
             }
             Err(error) => Event::Error(error),
         },
@@ -824,6 +863,9 @@ mod tests {
 
     #[test]
     fn revealed_values_are_keyed_and_clearable() {
+        let _guard = REVEAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         clear_revealed();
         stash_revealed("store-test-key", "super-secret".to_owned());
         assert_eq!(

@@ -277,8 +277,24 @@ pub fn toggle_reveal(state: &mut State, key: String) {
 }
 
 fn clear_reveal(state: &mut State) {
-    clear_revealed();
-    state.revealed = None;
+    if state.revealed.take().is_some() {
+        clear_revealed();
+    }
+}
+
+pub fn copy_field(state: &State, key: &str, label: &str, sensitive: bool) {
+    let Some(item_id) = state.selected.clone() else {
+        return;
+    };
+    send_quiet(
+        state,
+        Request::CopyField {
+            item_id,
+            key: key.to_owned(),
+            label: label.to_owned(),
+            sensitive,
+        },
+    );
 }
 
 fn request_details(state: &mut State) {
@@ -496,11 +512,12 @@ fn apply(state: &mut State, event: Event) {
                 state.details = Some(details);
             }
         }
-        Event::Revealed(key) => {
-            let known = state
-                .details
-                .as_ref()
-                .is_some_and(|details| details.fields.iter().any(|field| field.key == key));
+        Event::Revealed { item_id, key } => {
+            let known = state.selected.as_deref() == Some(item_id.as_str())
+                && state
+                    .details
+                    .as_ref()
+                    .is_some_and(|details| details.fields.iter().any(|field| field.key == key));
             if known {
                 state.revealed = Some(key);
             }
@@ -531,6 +548,7 @@ fn apply(state: &mut State, event: Event) {
                 state.notice = Some("SSH approval requested".to_owned());
             }
         }
+        Event::Notice(message) => state.notice = Some(message),
         Event::Error(message) => state.notice = Some(message),
     }
 }
@@ -705,7 +723,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn copy_field_queues_a_redacted_request_and_shows_notice() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+
+        copy_field(&state, "password", "Password", true);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            Request::CopyField { item_id, key, label, sensitive }
+                if item_id == "1" && key == "password" && label == "Password" && sensitive
+        )));
+
+        apply(&mut state, Event::Notice("Copied Password".to_owned()));
+        assert_eq!(state.notice.as_deref(), Some("Copied Password"));
+    }
+
+    #[test]
     fn reveal_uses_a_key_and_hide_clears_the_value() {
+        let _guard = backend::REVEAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut state = State::default();
         scene_populated(&mut state);
         let (tx, rx) = mpsc::channel();
@@ -717,7 +756,13 @@ mod tests {
             Request::RevealField { item_id, key } if item_id == "1" && key == "password"
         )));
         backend::stash_revealed("password", "super-secret".to_owned());
-        apply(&mut state, Event::Revealed("password".to_owned()));
+        apply(
+            &mut state,
+            Event::Revealed {
+                item_id: "1".to_owned(),
+                key: "password".to_owned(),
+            },
+        );
         assert_eq!(state.revealed.as_deref(), Some("password"));
         assert_eq!(
             backend::revealed_value("password").as_deref(),

@@ -7,8 +7,8 @@ use rune::{
 use crate::backend::{revealed_value, FieldValue, Request, VaultRow};
 use crate::icons;
 use crate::state::{
-    dispatch, move_selection, open_trash, select_category, select_folder, submit_quick_unlock,
-    submit_search, submit_unlock, toggle_reveal, Category, Location, State,
+    copy_field, dispatch, move_selection, open_trash, select_category, select_folder,
+    submit_quick_unlock, submit_search, submit_unlock, toggle_reveal, Category, Location, State,
 };
 use crate::theme::{
     accent, selected_row, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE, WINDOW_TITLE,
@@ -472,6 +472,7 @@ fn details(s: &State, dark: bool) -> El {
     if let Some(details) = s.details.as_ref().filter(|details| details.id == item.id) {
         for detail in &details.fields {
             let revealed = s.revealed.as_deref() == Some(detail.key.as_str());
+            let sensitive = matches!(detail.value, FieldValue::Masked);
             let shown = match &detail.value {
                 FieldValue::Text(value) => value.clone(),
                 FieldValue::Masked if revealed => {
@@ -482,18 +483,23 @@ fn details(s: &State, dark: bool) -> El {
             let value = field(&detail.label, &shown, dark)
                 .grow(1.0)
                 .key(format!("detail-field-{}", detail.key));
-            fields = fields.child(if matches!(detail.value, FieldValue::Masked) {
-                let key = detail.key.clone();
-                let label = if revealed { "Hide" } else { "Reveal" };
-                row().gap(10.0).center_y().child(value).child(action(
-                    &format!("reveal-{}", key),
-                    label,
+            let key = detail.key.clone();
+            let label = detail.label.clone();
+            let mut buttons = row().gap(6.0);
+            if sensitive {
+                let reveal_key = key.clone();
+                let text = if revealed { "Hide" } else { "Reveal" };
+                buttons = buttons.child(action(
+                    &format!("reveal-{reveal_key}"),
+                    text,
                     dark,
-                    move |state| toggle_reveal(state, key.clone()),
-                ))
-            } else {
-                value
-            });
+                    move |state| toggle_reveal(state, reveal_key.clone()),
+                ));
+            }
+            buttons = buttons.child(action(&format!("copy-{key}"), "Copy", dark, move |state| {
+                copy_field(state, &key, &label, sensitive)
+            }));
+            fields = fields.child(row().gap(10.0).center_y().child(value).child(buttons));
         }
     } else if !item.subtitle.is_empty() {
         fields = fields.child(field("Username", &item.subtitle, dark));
@@ -552,8 +558,8 @@ fn details(s: &State, dark: bool) -> El {
                 .child(if username.is_empty() {
                     el()
                 } else {
-                    action_tx("copy-user", "Copy username", dark, move |_s, tx| {
-                        tx.copy(username.clone())
+                    action("copy-user", "Copy username", dark, move |state| {
+                        copy_field(state, "username", "username", false)
                     })
                 }),
         )
