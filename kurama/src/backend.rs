@@ -128,17 +128,23 @@ pub enum Request {
         id: String,
         permanent: bool,
     },
-    UpdateName {
+    UpdateItem {
         id: String,
         name: String,
         favorite: bool,
         folder_id: Option<String>,
+        username: Option<String>,
+        password: Option<Secret>,
+        website: Option<String>,
     },
     CreateItem {
         name: String,
         item_type: i64,
         favorite: bool,
         folder_id: Option<String>,
+        username: Option<String>,
+        password: Option<Secret>,
+        website: Option<String>,
     },
     Folders,
     Restore {
@@ -365,15 +371,25 @@ pub fn perform(request: Request) -> Event {
                 Err(error) => Event::Error(error),
             }
         }
-        Request::UpdateName {
+        Request::UpdateItem {
             id,
             name,
             favorite,
             folder_id,
+            username,
+            password,
+            website,
         } => match call(json!({
             "action": "update_item",
             "id": id.clone(),
-            "options": { "name": name.clone(), "favorite": favorite, "folder_id": folder_id }
+            "options": {
+                "name": name.clone(),
+                "favorite": favorite,
+                "folder_id": folder_id,
+                "username": username,
+                "password": password.as_ref().map(Secret::as_str),
+                "website": website
+            }
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
                 Event::ItemRenamed { id, name, favorite }
@@ -386,13 +402,19 @@ pub fn perform(request: Request) -> Event {
             item_type,
             favorite,
             folder_id,
+            username,
+            password,
+            website,
         } => match call(json!({
             "action": "create_item",
             "options": {
                 "name": name.clone(),
                 "item_type": item_type,
                 "favorite": favorite,
-                "folder_id": folder_id
+                "folder_id": folder_id,
+                "username": username,
+                "password": password.as_ref().map(Secret::as_str),
+                "website": website
             }
         })) {
             Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
@@ -991,6 +1013,22 @@ mod tests {
     fn secret_debug_is_redacted() {
         let secret = Secret::new("hunter2".to_owned());
         let debug = format!("{:?}", secret);
+        assert!(!debug.contains("hunter2"));
+        assert!(debug.contains("redacted"));
+    }
+
+    #[test]
+    fn form_requests_redact_passwords() {
+        let request = Request::CreateItem {
+            name: "Example".to_owned(),
+            item_type: 1,
+            favorite: false,
+            folder_id: None,
+            username: None,
+            password: Some(Secret::new("hunter2".to_owned())),
+            website: None,
+        };
+        let debug = format!("{request:?}");
         assert!(!debug.contains("hunter2"));
         assert!(debug.contains("redacted"));
     }

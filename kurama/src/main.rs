@@ -83,7 +83,18 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Text(text) => {
             let typing = matches!(
                 tx.focused(),
-                Some("search" | "unlock-password" | "edit-name" | "create-name")
+                Some(
+                    "search"
+                        | "unlock-password"
+                        | "edit-name"
+                        | "edit-username"
+                        | "edit-password"
+                        | "edit-website"
+                        | "create-name"
+                        | "create-username"
+                        | "create-password"
+                        | "create-website"
+                )
             );
             if typing {
                 return false;
@@ -392,6 +403,83 @@ mod tests {
     }
 
     #[test]
+    fn create_form_submits_login_credentials() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("new-item").expect("new item button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        for key in [
+            "create-login-fields",
+            "create-username",
+            "create-password",
+            "create-website",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+        let draft = rt.state.create.as_mut().unwrap();
+        draft.name.replace_text("Store");
+        draft.username.replace_text("member@example.com");
+        draft.password.replace_text("s3cret");
+        draft.website.replace_text("https://store.example.com");
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("create-submit").expect("create button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::CreateItem { username, password, website, .. }
+                if username.as_deref() == Some("member@example.com")
+                    && password.as_ref().map(backend::Secret::as_str) == Some("s3cret")
+                    && website.as_deref() == Some("https://store.example.com")
+        )));
+    }
+
+    #[test]
+    fn edit_form_updates_login_credentials() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_populated(state);
+            state.requests = Some(tx);
+        });
+        rt.frame(0.0);
+        let (x, y) = rt.find("edit-item").expect("edit button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        for key in [
+            "edit-login-fields",
+            "edit-username",
+            "edit-password",
+            "edit-website",
+        ] {
+            assert!(rt.find(key).is_some(), "missing key: {key}");
+        }
+        let draft = rt.state.edit.as_mut().unwrap();
+        draft.password.replace_text("new-secret");
+        draft.website.replace_text("https://new.example.com");
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("save-edit").expect("save button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rx.try_iter().any(|request| matches!(
+            request,
+            crate::backend::Request::UpdateItem { id, username, password, website, .. }
+                if id == "1"
+                    && username.as_deref() == Some("dev@example.com")
+                    && password.as_ref().map(backend::Secret::as_str) == Some("new-secret")
+                    && website.as_deref() == Some("https://new.example.com")
+        )));
+    }
+
+    #[test]
     fn edit_form_opens_saves_and_cancels() {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut rt = runtime(|state| {
@@ -426,7 +514,7 @@ mod tests {
         assert!(rt.state.edit.is_none());
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            crate::backend::Request::UpdateName { id, name, favorite, .. }
+            crate::backend::Request::UpdateItem { id, name, favorite, .. }
                 if id == "1" && name == "Work GitHub" && !favorite
         )));
 

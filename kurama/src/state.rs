@@ -78,6 +78,9 @@ pub struct CreateDraft {
     pub item_type: i64,
     pub favorite: bool,
     pub folder_id: Option<String>,
+    pub username: TextEdit,
+    pub password: TextEdit,
+    pub website: TextEdit,
 }
 
 pub struct EditDraft {
@@ -85,6 +88,10 @@ pub struct EditDraft {
     pub name: TextEdit,
     pub favorite: bool,
     pub folder_id: Option<String>,
+    pub login: bool,
+    pub username: TextEdit,
+    pub password: TextEdit,
+    pub website: TextEdit,
 }
 
 pub struct State {
@@ -358,7 +365,19 @@ pub fn start_create() -> CreateDraft {
         item_type: 1,
         favorite: false,
         folder_id: None,
+        username: TextEdit::new(""),
+        password: TextEdit::new("").secure(),
+        website: TextEdit::new(""),
     }
+}
+
+fn optional_text(field: &TextEdit) -> Option<String> {
+    let value = field.text.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn optional_secret(field: &TextEdit) -> Option<String> {
+    (!field.text.is_empty()).then(|| field.text.clone())
 }
 
 pub fn toggle_create_favorite(state: &mut State) {
@@ -435,6 +454,9 @@ pub fn submit_create(state: &mut State) {
             item_type: draft.item_type,
             favorite: draft.favorite,
             folder_id: draft.folder_id,
+            username: optional_text(&draft.username),
+            password: optional_secret(&draft.password).map(Secret::new),
+            website: optional_text(&draft.website),
         },
     );
 }
@@ -452,6 +474,10 @@ pub fn start_edit(state: &mut State) {
         name: TextEdit::new(&item.name),
         favorite: item.favorite,
         folder_id: (!item.folder_id.is_empty()).then(|| item.folder_id.clone()),
+        login: item.type_name == "login",
+        username: TextEdit::new(&item.subtitle),
+        password: TextEdit::new("").secure(),
+        website: TextEdit::new(""),
     });
 }
 
@@ -483,11 +509,14 @@ pub fn submit_edit(state: &mut State) {
     }
     dispatch(
         state,
-        Request::UpdateName {
+        Request::UpdateItem {
             id: draft.id,
             name,
             favorite: draft.favorite,
             folder_id: draft.folder_id,
+            username: optional_text(&draft.username),
+            password: optional_secret(&draft.password).map(Secret::new),
+            website: optional_text(&draft.website),
         },
     );
 }
@@ -737,6 +766,11 @@ fn visible_fingerprint(state: &State) -> u64 {
         .create
         .as_ref()
         .and_then(|draft| draft.folder_id.as_deref())
+        .hash(&mut hasher);
+    state
+        .edit
+        .as_ref()
+        .map(|draft| draft.login)
         .hash(&mut hasher);
     hasher.finish()
 }
@@ -1325,7 +1359,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_draft_submits_only_the_item_name() {
+    fn edit_draft_submits_metadata_and_prefilled_username() {
         let mut state = State::default();
         scene_populated(&mut state);
         let (tx, rx) = mpsc::channel();
@@ -1344,8 +1378,13 @@ mod tests {
         assert!(state.edit.is_none());
         assert!(rx.try_iter().any(|request| matches!(
             request,
-            Request::UpdateName { id, name, favorite, .. }
-                if id == "1" && name == "Renamed GitHub" && !favorite
+            Request::UpdateItem { id, name, favorite, username, password, website, .. }
+                if id == "1"
+                    && name == "Renamed GitHub"
+                    && !favorite
+                    && username.as_deref() == Some("dev@example.com")
+                    && password.is_none()
+                    && website.is_none()
         )));
 
         apply(

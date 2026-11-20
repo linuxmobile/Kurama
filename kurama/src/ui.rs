@@ -1,3 +1,4 @@
+use rune::edit::TextEdit;
 use rune::tok::{self, type_};
 use rune::{
     col, el, icon, row, text, text_input, Color, Cursor, Cx, El, GrowthSpec, Key, KeyEvent,
@@ -94,6 +95,47 @@ fn help(_s: &State, dark: bool) -> El {
         }))
 }
 
+fn labeled_input(
+    value: &TextEdit,
+    key: &str,
+    label: &str,
+    placeholder: &str,
+    dark: bool,
+    on_edit: impl for<'a> Fn(&'a mut State) -> &'a mut TextEdit + 'static,
+    submit: fn(&mut State),
+) -> El {
+    let t = tok::theme(dark);
+    col()
+        .gap(4.0)
+        .child(text(label).font(SECTION_TITLE).color(t.text_secondary))
+        .child(
+            text_input(value, type_::BODY)
+                .key(key)
+                .label(label)
+                .placeholder(placeholder, t.text_secondary)
+                .w(420.0)
+                .h(40.0)
+                .px(12.0)
+                .radius(8.0)
+                .fill(t.card)
+                .border(1.0, t.card_border)
+                .on_edit(on_edit)
+                .on_submit(move |s: &mut State, _tx: &mut Tx| submit(s))
+                .on_input_key(|s: &mut State, event: &KeyEvent, _tx: &mut Tx| {
+                    if matches!(event.key, Key::Escape) {
+                        if s.create.is_some() {
+                            cancel_create(s);
+                        } else {
+                            cancel_edit(s);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }),
+        )
+}
+
 fn create_form(s: &State, dark: bool) -> El {
     let t = tok::theme(dark);
     let Some(draft) = s.create.as_ref() else {
@@ -152,6 +194,40 @@ fn create_form(s: &State, dark: bool) -> El {
                     },
                 ),
         )
+        .child(if draft.item_type == 1 {
+            col()
+                .key("create-login-fields")
+                .gap(10.0)
+                .child(labeled_input(
+                    &draft.username,
+                    "create-username",
+                    "Username",
+                    "Username",
+                    dark,
+                    |state| &mut state.create.as_mut().unwrap().username,
+                    submit_create,
+                ))
+                .child(labeled_input(
+                    &draft.password,
+                    "create-password",
+                    "Password",
+                    "Password",
+                    dark,
+                    |state| &mut state.create.as_mut().unwrap().password,
+                    submit_create,
+                ))
+                .child(labeled_input(
+                    &draft.website,
+                    "create-website",
+                    "Website",
+                    "https://example.com",
+                    dark,
+                    |state| &mut state.create.as_mut().unwrap().website,
+                    submit_create,
+                ))
+        } else {
+            el()
+        })
         .child(choices)
         .child(action(
             "create-favorite",
@@ -205,7 +281,41 @@ fn edit_form(s: &State, dark: bool) -> El {
         .center()
         .gap(14.0)
         .fill(t.bg)
-        .child(text("Rename item").font(WINDOW_TITLE).color(t.text))
+        .child(text("Edit item").font(WINDOW_TITLE).color(t.text))
+        .child(if draft.login {
+            col()
+                .key("edit-login-fields")
+                .gap(10.0)
+                .child(labeled_input(
+                    &draft.username,
+                    "edit-username",
+                    "Username",
+                    "Username",
+                    dark,
+                    |state| &mut state.edit.as_mut().unwrap().username,
+                    submit_edit,
+                ))
+                .child(labeled_input(
+                    &draft.password,
+                    "edit-password",
+                    "Password",
+                    "Leave blank to keep",
+                    dark,
+                    |state| &mut state.edit.as_mut().unwrap().password,
+                    submit_edit,
+                ))
+                .child(labeled_input(
+                    &draft.website,
+                    "edit-website",
+                    "Website",
+                    "Leave blank to keep",
+                    dark,
+                    |state| &mut state.edit.as_mut().unwrap().website,
+                    submit_edit,
+                ))
+        } else {
+            el()
+        })
         .child(
             text_input(&draft.name, type_::BODY)
                 .key("edit-name")
