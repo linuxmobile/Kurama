@@ -350,6 +350,8 @@ pub enum Request {
     QuickUnlock,
     Settings,
     SetTheme(ThemePreference),
+    SetAutoLock(i64),
+    SetClipboardClear(i64),
     Events {
         since: u64,
     },
@@ -639,7 +641,7 @@ pub fn perform(request: Request) -> Event {
                         "action": "copy",
                         "text": value,
                         "sensitive": sensitive,
-                        "timeout": 30
+                        "timeout": clipboard_timeout(),
                     });
                     match call(copy) {
                         Ok(_) => Event::Notice(format!("Copied {label}")),
@@ -989,13 +991,24 @@ pub fn perform(request: Request) -> Event {
         },
         Request::Settings => Event::Settings(load_settings()),
         Request::SetTheme(theme) => {
-            let manager = ConfigManager::default();
-            let mut config = manager.load();
+            let mut config = ConfigManager::default().load();
             config.theme = theme.as_config().to_owned();
-            match manager.save(&config) {
-                Ok(_) => Event::Settings(settings_from_config(&config)),
-                Err(error) => Event::Error(format!("Could not save theme: {error}")),
-            }
+            save_settings(&config)
+        }
+        Request::SetAutoLock(minutes) => {
+            let mut config = ConfigManager::default().load();
+            config.auto_lock_minutes = minutes;
+            let event = save_settings(&config);
+            let _ = call(json!({
+                "action": "set_auto_lock",
+                "auto_lock_minutes": minutes.max(0),
+            }));
+            event
+        }
+        Request::SetClipboardClear(seconds) => {
+            let mut config = ConfigManager::default().load();
+            config.clipboard_clear_seconds = seconds;
+            save_settings(&config)
         }
         Request::Events { since } => match call(json!({ "action": "events", "since": since })) {
             Ok(response) => {
@@ -1181,6 +1194,21 @@ fn call(body: Value) -> Result<Value, String> {
 
 fn load_settings() -> Settings {
     settings_from_config(&ConfigManager::default().load())
+}
+
+fn save_settings(config: &Config) -> Event {
+    match ConfigManager::default().save(config) {
+        Ok(_) => Event::Settings(settings_from_config(config)),
+        Err(error) => Event::Error(format!("Could not save settings: {error}")),
+    }
+}
+
+fn clipboard_timeout() -> i64 {
+    clamp_timeout(ConfigManager::default().load().clipboard_clear_seconds)
+}
+
+fn clamp_timeout(seconds: i64) -> i64 {
+    seconds.clamp(0, 3600)
 }
 
 fn settings_from_config(config: &Config) -> Settings {
@@ -1756,6 +1784,13 @@ fn text(value: &Value, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_timeout_uses_configured_seconds() {
+        assert_eq!(clamp_timeout(45), 45);
+        assert_eq!(clamp_timeout(-1), 0);
+        assert_eq!(clamp_timeout(9999), 3600);
+    }
 
     #[test]
     fn secret_debug_is_redacted() {

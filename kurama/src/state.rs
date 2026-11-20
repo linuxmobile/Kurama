@@ -13,6 +13,9 @@ use crate::backend::{
 };
 use crate::theme::ThemePreference;
 
+pub const AUTO_LOCK_CHOICES: [i64; 7] = [0, 1, 5, 10, 15, 30, 60];
+pub const CLIPBOARD_CHOICES: [i64; 6] = [0, 10, 20, 30, 60, 120];
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Category {
     All,
@@ -2118,6 +2121,39 @@ pub fn set_theme(state: &mut State, theme: ThemePreference) {
     dispatch(state, Request::SetTheme(theme));
 }
 
+fn stepped_value(current: i64, delta: isize, choices: &[i64]) -> i64 {
+    let index = choices
+        .iter()
+        .position(|value| *value >= current)
+        .unwrap_or(choices.len() - 1) as isize;
+    let index = (index + delta).clamp(0, choices.len() as isize - 1) as usize;
+    choices[index]
+}
+
+pub fn step_auto_lock(state: &mut State, delta: isize) {
+    let Some(settings) = state.settings.as_mut() else {
+        return;
+    };
+    let minutes = stepped_value(settings.auto_lock_minutes, delta, &AUTO_LOCK_CHOICES);
+    if minutes == settings.auto_lock_minutes {
+        return;
+    }
+    settings.auto_lock_minutes = minutes;
+    dispatch(state, Request::SetAutoLock(minutes));
+}
+
+pub fn step_clipboard_clear(state: &mut State, delta: isize) {
+    let Some(settings) = state.settings.as_mut() else {
+        return;
+    };
+    let seconds = stepped_value(settings.clipboard_clear_seconds, delta, &CLIPBOARD_CHOICES);
+    if seconds == settings.clipboard_clear_seconds {
+        return;
+    }
+    settings.clipboard_clear_seconds = seconds;
+    dispatch(state, Request::SetClipboardClear(seconds));
+}
+
 pub fn open_sends(state: &mut State) {
     state.sends_open = true;
     state.send_error = None;
@@ -2749,6 +2785,15 @@ fn fixtures() -> Vec<VaultRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setting_steppers_walk_choices_and_clamp() {
+        assert_eq!(stepped_value(15, 1, &AUTO_LOCK_CHOICES), 30);
+        assert_eq!(stepped_value(15, -1, &AUTO_LOCK_CHOICES), 10);
+        assert_eq!(stepped_value(0, -1, &AUTO_LOCK_CHOICES), 0);
+        assert_eq!(stepped_value(60, 1, &AUTO_LOCK_CHOICES), 60);
+        assert_eq!(stepped_value(25, -1, &CLIPBOARD_CHOICES), 20);
+    }
 
     #[test]
     fn auth_challenges_switch_the_active_form() {

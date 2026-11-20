@@ -18,13 +18,14 @@ use crate::state::{
     open_trash, refresh_agent_status, remove_create_field, remove_create_uri, remove_edit_uri,
     request_delete_send, restore_item, save_ssh_tool_key, select_category, select_folder,
     select_item, select_send, send_two_factor_email, set_auth_mode, set_create_type, set_favorite,
-    set_generator_passphrase, set_ssh_tool_mode, set_theme, start_edit, submit_auth, submit_create,
-    submit_edit, submit_fido2, submit_quick_unlock, submit_search, submit_send, submit_ssh_export,
-    submit_ssh_generate, submit_ssh_import, submit_unlock, toggle_create_favorite,
-    toggle_create_field_value, toggle_edit_favorite, toggle_generator_option, toggle_reveal,
-    toggle_send_hidden, use_generated, AttachmentView, AuthMode, CardDraft, Category,
-    CustomFieldDraft, GeneratorOption, GeneratorTarget, IdentityDraft, Location, SendDraft,
-    SshDraft, SshToolMode, State,
+    set_generator_passphrase, set_ssh_tool_mode, set_theme, start_edit, step_auto_lock,
+    step_clipboard_clear, submit_auth, submit_create, submit_edit, submit_fido2,
+    submit_quick_unlock, submit_search, submit_send, submit_ssh_export, submit_ssh_generate,
+    submit_ssh_import, submit_unlock, toggle_create_favorite, toggle_create_field_value,
+    toggle_edit_favorite, toggle_generator_option, toggle_reveal, toggle_send_hidden,
+    use_generated, AttachmentView, AuthMode, CardDraft, Category, CustomFieldDraft,
+    GeneratorOption, GeneratorTarget, IdentityDraft, Location, SendDraft, SshDraft, SshToolMode,
+    State,
 };
 use crate::theme::{
     accent, selected_row, ThemePreference, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE,
@@ -194,8 +195,20 @@ fn settings(s: &State, dark: bool) -> El {
             dark,
             col()
                 .gap(12.0)
-                .child(field("Auto-lock", auto_lock.as_str(), dark))
-                .child(field("Clipboard clear", clipboard.as_str(), dark)),
+                .child(settings_stepper(
+                    "settings-auto-lock",
+                    "Auto-lock",
+                    auto_lock.as_str(),
+                    dark,
+                    step_auto_lock,
+                ))
+                .child(settings_stepper(
+                    "settings-clipboard",
+                    "Clipboard clear",
+                    clipboard.as_str(),
+                    dark,
+                    step_clipboard_clear,
+                )),
         ))
         .child(el().h(1.0).w_full().fill(t.separator))
         .child(settings_section(
@@ -226,6 +239,74 @@ fn settings(s: &State, dark: bool) -> El {
         row().child(action("settings-close", "Close", dark, close_settings)),
         None,
     )
+}
+
+fn settings_stepper(
+    key: &str,
+    label: &str,
+    value: &str,
+    dark: bool,
+    step: fn(&mut State, isize),
+) -> El {
+    let t = tok::theme(dark);
+    row()
+        .key(key)
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(
+            text(label.to_uppercase())
+                .font(SECTION_TITLE)
+                .color(t.text_secondary),
+        )
+        .child(el().grow(1.0))
+        .child(step_button(
+            &format!("{key}-down"),
+            "−",
+            &format!("Decrease {label}"),
+            dark,
+            step,
+            -1,
+        ))
+        .child(
+            text(value.to_owned())
+                .key(format!("{key}-value"))
+                .font(ROW_SUBTITLE)
+                .color(t.text),
+        )
+        .child(step_button(
+            &format!("{key}-up"),
+            "+",
+            &format!("Increase {label}"),
+            dark,
+            step,
+            1,
+        ))
+}
+
+fn step_button(
+    key: &str,
+    label: &str,
+    accessible: &str,
+    dark: bool,
+    step: fn(&mut State, isize),
+    delta: isize,
+) -> El {
+    let t = tok::theme(dark);
+    el().key(key)
+        .role("button")
+        .label(accessible.to_owned())
+        .focusable(true)
+        .w(28.0)
+        .h(28.0)
+        .center()
+        .radius(8.0)
+        .fill(t.control_track)
+        .hover(t.hover)
+        .press(t.press)
+        .cursor(Cursor::Pointer)
+        .on_press(move |state| step(state, delta))
+        .child(text(label.to_owned()).font(type_::LABEL).color(t.text))
 }
 
 fn settings_section(key: &str, title: &str, dark: bool, body: El) -> El {

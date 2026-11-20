@@ -779,9 +779,40 @@ mod tests {
         assert!(rt.find("settings-theme-dark").is_some());
         assert!(rt.find("settings-theme-light").is_some());
         assert!(rt.find("settings-vault").is_some());
+        assert!(rt.find("settings-auto-lock-value").is_some());
+        assert!(rt.find("settings-clipboard-value").is_some());
         assert!(rt.find("settings-account").is_some());
         assert!(rt.find("field-value-Server").is_some());
         assert!(rt.find("settings-close").is_some());
+    }
+
+    #[test]
+    fn settings_steppers_update_auto_lock_and_clipboard() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rt = runtime(|state| {
+            state::scene_settings(state);
+            state.requests = Some(tx.clone());
+        });
+        rt.frame(1.0 / 60.0);
+
+        let (x, y) = rt.find("settings-auto-lock-up").expect("auto-lock up");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        let (x, y) = rt.find("settings-clipboard-down").expect("clipboard down");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+
+        let settings = rt.state.settings.as_ref().expect("settings");
+        assert_eq!(settings.auto_lock_minutes, 30);
+        assert_eq!(settings.clipboard_clear_seconds, 20);
+        let requests: Vec<_> = rx.try_iter().collect();
+        assert!(requests
+            .iter()
+            .any(|request| matches!(request, Request::SetAutoLock(30))));
+        assert!(requests
+            .iter()
+            .any(|request| matches!(request, Request::SetClipboardClear(20))));
     }
 
     #[test]
