@@ -2,7 +2,7 @@
 
 Kurama is a native desktop vault application built with [Rune](https://github.com/anomalyco/rune). It uses the `kurama-host` backend — Bitwarden/Vaultwarden API client, encryption, local cache, daemon and SSH agent — in place of the original Omarchy QML overlay.
 
-This is an early foundation: the app shell, theme tokens, category rail, item list, detail pane and status bar are in place, and item data is read from the backend daemon on a worker thread. Authentication prompts, item editing and the extended feature panels are still to come.
+The UI now covers authentication and unlock, vault browsing and editing, favorites and folders, TOTP, password generation, Sends, attachments, SSH tools, settings and keyboard shortcuts. Item data is read from the backend daemon on a worker thread, and only non-secret metadata is kept in UI state.
 
 ## Credits
 
@@ -21,14 +21,14 @@ The UI is built with [Rune](https://github.com/anomalyco/rune), whose `examples/
 Start the `kurama-host` daemon first, then the UI:
 
 ```sh
-cargo build --release -p kurama   # provides the `kurama` UI and CLI
-kurama daemon &
-kurama
+cargo build --release -p kurama   # provides ./target/release/kurama
+./target/release/kurama daemon &
+./target/release/kurama
 ```
 
 Kurama connects over a user-owned Unix socket. If the daemon is not running, the app shows a disconnected state with a Retry button; it never starts or reimplements backend logic itself. The same binary provides all backend commands: `kurama auth unlock`, `kurama auth login-password`, etc.
 
-`cargo run -p kurama -- --snap kurama.png --scene populated` renders a headless snapshot; `--scene locked` and `--scene disconnected` show the other states.
+Use a debug build for headless snapshots (`cargo run -p kurama -- --snap /tmp/kurama.png --scene populated`); release builds omit Rune's `tooling` feature. `--scene locked` and `--scene disconnected` show the other states.
 
 ## Integration notes
 
