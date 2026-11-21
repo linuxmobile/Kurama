@@ -176,7 +176,6 @@ pub fn parse_private_key(raw_pem: &str) -> Result<GeneratedSshKey, String> {
     })
 }
 
-/// Derives a safe default filename from a vault item name.
 pub fn default_key_filename(item_name: &str) -> String {
     let sanitized: String = item_name
         .to_lowercase()

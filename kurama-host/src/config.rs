@@ -374,8 +374,6 @@ impl ConfigManager {
 
         self.save(&cfg)?;
         if server_changed {
-            // Destructive side effects only follow a successful save: if the
-            // new URL cannot be persisted, the old session must stay usable.
             if storage_mgr.file_path.exists() {
                 let _ = fs::remove_file(&storage_mgr.file_path);
             }
@@ -383,10 +381,6 @@ impl ConfigManager {
             keyring_mgr.clear_all();
             keyring_mgr.clear_session(&cfg.server_url);
 
-            // ADR-0025 decision 4: a server/account change must zeroize the
-            // retained quick-unlock key. Send the explicit wipe before the
-            // daemon stop (whose own lock also wipes): the request is the
-            // contract the ADR names, independent of the stop handler.
             let _ = crate::daemon::send_daemon_request(&serde_json::json!({
                 "action": "wipe_quick_unlock"
             }));
