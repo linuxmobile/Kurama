@@ -15,6 +15,13 @@ use crate::locked::LockedKey32;
 type Aes256CbcDec = cbc::Decryptor<Aes256>;
 type HmacSha256 = Hmac<Sha256>;
 
+const MIN_PBKDF2_ITERATIONS: u32 = 100_000;
+const DEFAULT_PBKDF2_ITERATIONS: u32 = 600_000;
+const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
+const MAX_ARGON2_MEMORY_MB: u32 = 1024;
+const MAX_ARGON2_PASSES: u32 = 10;
+const MAX_ARGON2_LANES: u32 = 16;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum CryptoError {
     InvalidKdfParams,
@@ -70,8 +77,11 @@ pub fn derive_master_key(
 
     match kdf_type {
         KdfType::Pbkdf2Sha256 => {
-            let iter = if iterations < 100_000 {
-                600_000
+            if iterations > MAX_PBKDF2_ITERATIONS {
+                return Err(CryptoError::InvalidKdfParams);
+            }
+            let iter = if iterations < MIN_PBKDF2_ITERATIONS {
+                DEFAULT_PBKDF2_ITERATIONS
             } else {
                 iterations
             };
@@ -83,9 +93,20 @@ pub fn derive_master_key(
             );
         }
         KdfType::Argon2id => {
-            let memory = memory_mb.unwrap_or(64) * 1024; // KB
+            let memory_mb = memory_mb.unwrap_or(64);
             let passes = if iterations < 3 { 3 } else { iterations };
             let lanes = parallelism.unwrap_or(4);
+            if memory_mb == 0
+                || memory_mb > MAX_ARGON2_MEMORY_MB
+                || passes > MAX_ARGON2_PASSES
+                || lanes == 0
+                || lanes > MAX_ARGON2_LANES
+            {
+                return Err(CryptoError::InvalidKdfParams);
+            }
+            let memory = memory_mb
+                .checked_mul(1024)
+                .ok_or(CryptoError::InvalidKdfParams)?;
 
             let params = Params::new(memory, passes, lanes, Some(32))
                 .map_err(|_| CryptoError::InvalidKdfParams)?;
@@ -578,6 +599,38 @@ pub fn decrypt_attachment_blob(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_kdf_params_reject_excessive_work_factors() {
+        let oversized_pbkdf2 = derive_master_key(
+            "user@example.com",
+            "password",
+            KdfType::Pbkdf2Sha256,
+            MAX_PBKDF2_ITERATIONS + 1,
+            None,
+            None,
+        );
+        assert_eq!(oversized_pbkdf2.unwrap_err(), CryptoError::InvalidKdfParams);
+
+        for (memory, iterations, lanes) in [
+            (MAX_ARGON2_MEMORY_MB + 1, 3, 4),
+            (u32::MAX, 3, 4),
+            (64, MAX_ARGON2_PASSES + 1, 4),
+            (64, 3, 0),
+            (64, 3, MAX_ARGON2_LANES + 1),
+            (0, 3, 4),
+        ] {
+            let result = derive_master_key(
+                "user@example.com",
+                "password",
+                KdfType::Argon2id,
+                iterations,
+                Some(memory),
+                Some(lanes),
+            );
+            assert_eq!(result.unwrap_err(), CryptoError::InvalidKdfParams);
+        }
+    }
 
     #[test]
     fn test_pbkdf2_master_key_derivation() {
