@@ -428,6 +428,33 @@ mod tests {
     }
 
     #[test]
+    fn unlock_and_account_password_fields_accept_typed_input() {
+        let mut rt = runtime(state::scene_locked);
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("unlock-password").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.key(KeyEvent {
+            key: Key::Text("hunter2".into()),
+            mods: Mods::default(),
+        });
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.password.text, "hunter2");
+
+        let mut rt = runtime(state::scene_account);
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("account-password").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.key(KeyEvent {
+            key: Key::Text("hunter2".into()),
+            mods: Mods::default(),
+        });
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.auth.as_ref().unwrap().password.text, "hunter2");
+    }
+
+    #[test]
     fn send_form_scene_shows_all_inputs() {
         let mut rt = runtime(state::scene_send_form);
         rt.frame(1.0 / 60.0);
