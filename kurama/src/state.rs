@@ -329,6 +329,9 @@ pub struct State {
     pub totp: Option<TotpMeta>,
     pub busy: bool,
     pub notice: Option<String>,
+    in_flight: usize,
+    notice_level: NoticeLevel,
+    last_status_notice: Option<String>,
     pub form_error: Option<String>,
     pub approvals: Vec<Approval>,
     pub pending_delete: Option<String>,
@@ -383,6 +386,9 @@ impl Default for State {
             totp: None,
             busy: true,
             notice: None,
+            in_flight: 0,
+            notice_level: NoticeLevel::Info,
+            last_status_notice: None,
             form_error: None,
             approvals: Vec::new(),
             pending_delete: None,
@@ -479,6 +485,52 @@ impl State {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+enum NoticeLevel {
+    #[default]
+    Info,
+    Status,
+    Urgent,
+}
+
+pub fn notice(state: &mut State, message: impl Into<String>) {
+    set_notice(state, message.into(), NoticeLevel::Info);
+}
+
+pub fn urgent_notice(state: &mut State, message: impl Into<String>) {
+    set_notice(state, message.into(), NoticeLevel::Urgent);
+}
+
+fn status_notice(state: &mut State, message: impl Into<String>) {
+    set_notice(state, message.into(), NoticeLevel::Status);
+}
+
+fn set_notice(state: &mut State, message: String, level: NoticeLevel) {
+    if level < state.notice_level {
+        return;
+    }
+    state.notice = Some(message);
+    state.notice_level = level;
+}
+
+pub fn clear_notice(state: &mut State) {
+    state.notice = None;
+    state.notice_level = NoticeLevel::Info;
+}
+
+fn finish_request(state: &mut State) {
+    state.in_flight = state.in_flight.saturating_sub(1);
+    state.busy = state.in_flight > 0;
+}
+
+fn notice_level(kind: &str) -> NoticeLevel {
+    match kind {
+        "error" | "approval" => NoticeLevel::Urgent,
+        "status" | "sync" => NoticeLevel::Status,
+        _ => NoticeLevel::Info,
+    }
+}
+
 pub fn dispatch(state: &mut State, request: Request) {
     if matches!(request, Request::Sync) {
         state.syncing = true;
@@ -486,14 +538,16 @@ pub fn dispatch(state: &mut State, request: Request) {
     }
     if let Some(sender) = &state.requests {
         if sender.send(request).is_ok() {
+            state.in_flight += 1;
             state.busy = true;
-            state.notice = None;
+            clear_notice(state);
             return;
         }
     }
     state.syncing = false;
+    state.in_flight = 0;
     state.busy = false;
-    state.notice = Some("Backend worker is unavailable.".to_owned());
+    notice(state, "Backend worker is unavailable.".to_owned());
 }
 
 pub fn select_category(state: &mut State, category: Category) {
@@ -670,7 +724,7 @@ pub fn set_auth_mode(state: &mut State, mode: AuthMode) {
         auth.mode = mode;
     }
     state.form_error = None;
-    state.notice = None;
+    clear_notice(state);
 }
 
 pub fn submit_auth(state: &mut State) {
@@ -759,7 +813,7 @@ pub fn submit_auth(state: &mut State) {
     match request {
         Ok(request) => {
             state.form_error = None;
-            state.notice = None;
+            clear_notice(state);
             dispatch(state, request);
         }
         Err(error) => state.form_error = Some(error),
@@ -944,7 +998,7 @@ pub fn use_generated(state: &mut State) {
     }
     state.generator = None;
     state.form_error = None;
-    state.notice = Some("Generated value inserted.".to_owned());
+    notice(state, "Generated value inserted.".to_owned());
 }
 
 fn prefilled_uri_draft(state: &State, item_id: &str) -> Vec<TextEdit> {
@@ -1404,7 +1458,7 @@ pub fn delete_item(state: &mut State, permanent: bool) {
     };
     if permanent && state.pending_delete.as_deref() != Some(id.as_str()) {
         state.pending_delete = Some(id);
-        state.notice = Some("Click again to delete permanently".to_owned());
+        notice(state, "Click again to delete permanently".to_owned());
         return;
     }
     state.pending_delete = None;
@@ -1701,12 +1755,16 @@ fn apply_auth_outcome(state: &mut State, outcome: AuthOutcome) {
                 };
             }
         }
-        state.notice = outcome.error;
+        if let Some(message) = outcome.error {
+            urgent_notice(state, message);
+        } else {
+            clear_notice(state);
+        }
         return;
     }
     state.form_error = None;
     if outcome.new_device_verification_required {
-        state.notice = None;
+        clear_notice(state);
         if let Some(auth) = state.auth.as_mut() {
             auth.mode = AuthMode::NewDevice;
         }
@@ -1719,10 +1777,14 @@ fn apply_auth_outcome(state: &mut State, outcome: AuthOutcome) {
                 providers: outcome.two_factor_providers.clone(),
             };
         }
-        state.notice = outcome.fido2_status;
+        if let Some(message) = outcome.fido2_status {
+            notice(state, message);
+        } else {
+            clear_notice(state);
+        }
         return;
     }
-    state.notice = None;
+    clear_notice(state);
     if outcome.two_factor_required {
         if let Some(auth) = state.auth.as_mut() {
             auth.mode = AuthMode::TwoFactor {
@@ -1770,7 +1832,7 @@ fn apply_snapshot(state: &mut State, snapshot: Snapshot) {
         state.rows = items;
         state.bump_rows_version();
     }
-    state.notice = None;
+    clear_notice(state);
     clear_reveal(state);
     if state.selected.is_none() && !state.selection_cleared {
         state.selected = state.rows.first().map(|item| item.id.clone());
@@ -1787,19 +1849,24 @@ fn apply_snapshot(state: &mut State, snapshot: Snapshot) {
 }
 
 fn apply(state: &mut State, event: Event) {
-    state.busy = false;
+    if !matches!(
+        event,
+        Event::Notices { .. } | Event::Approvals(_) | Event::AgentStatus { .. } | Event::Totp(_)
+    ) {
+        finish_request(state);
+    }
     match event {
         Event::Snapshot(snapshot) => apply_snapshot(state, snapshot),
         Event::Synced(snapshot) => {
             apply_snapshot(state, snapshot);
             state.syncing = false;
             state.sync_error = None;
-            state.notice = Some("Vault synced".to_owned());
+            status_notice(state, "Vault synced".to_owned());
         }
         Event::SyncFailed(message) => {
             state.syncing = false;
             state.sync_error = Some(message.clone());
-            state.notice = Some(format!("Sync failed: {message}"));
+            urgent_notice(state, format!("Sync failed: {message}"));
         }
         Event::Settings(settings) => {
             state.theme = settings.theme;
@@ -1874,16 +1941,41 @@ fn apply(state: &mut State, event: Event) {
         }
         Event::Notices { cursor, notices } => {
             state.event_cursor = state.event_cursor.max(cursor);
-            let mut refresh = false;
+            let highest = notices
+                .iter()
+                .map(|item| notice_level(&item.kind))
+                .max()
+                .unwrap_or(NoticeLevel::Info);
+            let mut messages = Vec::new();
             let mut approvals = false;
-            for notice in notices {
-                if matches!(notice.kind.as_str(), "status" | "sync") {
-                    refresh = true;
-                }
-                if notice.approval_id.is_some() {
+            let mut refresh = false;
+            for item in notices {
+                if item.approval_id.is_some() {
                     approvals = true;
                 }
-                state.notice = Some(notice.message);
+                match item.kind.as_str() {
+                    "status"
+                        if matches!(item.message.as_str(), "Vault unlocked" | "Vault locked") =>
+                    {
+                        if state.last_status_notice.as_deref() != Some(item.message.as_str()) {
+                            state.last_status_notice = Some(item.message.clone());
+                            refresh = true;
+                        }
+                    }
+                    "sync" if item.message == "Syncing vault…" => state.syncing = true,
+                    "sync" if item.message == "Vault synced" => {
+                        state.syncing = false;
+                        state.sync_error = None;
+                        refresh = true;
+                    }
+                    _ => {}
+                }
+                if notice_level(&item.kind) == highest {
+                    messages.push(item.message);
+                }
+            }
+            if !messages.is_empty() {
+                set_notice(state, messages.join(" · "), highest);
             }
             if approvals {
                 send_quiet(state, Request::Approvals);
@@ -1894,8 +1986,12 @@ fn apply(state: &mut State, event: Event) {
         }
         Event::Approvals(items) => {
             state.approvals = items;
-            if !state.approvals.is_empty() {
-                state.notice = Some("SSH approval requested".to_owned());
+            if state.approvals.is_empty() {
+                if state.notice.as_deref() == Some("SSH approval requested") {
+                    clear_notice(state);
+                }
+            } else {
+                urgent_notice(state, "SSH approval requested");
             }
         }
         Event::Sends(rows) => {
@@ -1919,7 +2015,7 @@ fn apply(state: &mut State, event: Event) {
             state.send_form = None;
             state.form_error = None;
             state.send_selected = Some(id);
-            state.notice = Some("Send created · link copied".to_owned());
+            notice(state, "Send created · link copied".to_owned());
             dispatch(
                 state,
                 Request::CopyText {
@@ -1933,11 +2029,14 @@ fn apply(state: &mut State, event: Event) {
             if let Some(row) = state.sends.iter_mut().find(|row| row.id == id) {
                 row.disabled = disabled;
             }
-            state.notice = Some(if disabled {
-                "Send disabled".to_owned()
-            } else {
-                "Send updated".to_owned()
-            });
+            notice(
+                state,
+                if disabled {
+                    "Send disabled".to_owned()
+                } else {
+                    "Send updated".to_owned()
+                },
+            );
             dispatch(state, Request::ListSends);
         }
         Event::SendDeleted { id } => {
@@ -1947,7 +2046,7 @@ fn apply(state: &mut State, event: Event) {
                 state.send_selected = state.sends.first().map(|row| row.id.clone());
             }
             state.send_pending_delete = None;
-            state.notice = Some("Send deleted".to_owned());
+            notice(state, "Send deleted".to_owned());
             dispatch(state, Request::ListSends);
         }
         Event::SshKeyGenerated {
@@ -1962,7 +2061,7 @@ fn apply(state: &mut State, event: Event) {
                 draft.fingerprint.replace_text(&fingerprint);
                 draft.algorithm_label = algorithm;
             }
-            state.notice = Some("SSH key generated".to_owned());
+            notice(state, "SSH key generated".to_owned());
         }
         Event::SshKeyImported {
             public,
@@ -1972,7 +2071,7 @@ fn apply(state: &mut State, event: Event) {
                 draft.public_key.replace_text(&public);
                 draft.fingerprint.replace_text(&fingerprint);
             }
-            state.notice = Some("SSH key imported".to_owned());
+            notice(state, "SSH key imported".to_owned());
         }
         Event::SshKeyExported {
             private,
@@ -1985,7 +2084,7 @@ fn apply(state: &mut State, event: Event) {
                 draft.public_key.replace_text(&public);
                 draft.fingerprint.replace_text(&fingerprint);
             }
-            state.notice = Some("SSH key exported".to_owned());
+            notice(state, "SSH key exported".to_owned());
         }
         Event::AgentStatus { running, socket } => {
             state.agent_running = running;
@@ -1993,11 +2092,14 @@ fn apply(state: &mut State, event: Event) {
         }
         Event::ApprovalAnswered { id, approve } => {
             state.approvals.retain(|prompt| prompt.id != id);
-            state.notice = Some(if approve {
-                "SSH request approved".to_owned()
-            } else {
-                "SSH request denied".to_owned()
-            });
+            notice(
+                state,
+                if approve {
+                    "SSH request approved".to_owned()
+                } else {
+                    "SSH request denied".to_owned()
+                },
+            );
             send_quiet(state, Request::Approvals);
         }
         Event::FavoriteChanged { id, favorite } => {
@@ -2006,11 +2108,14 @@ fn apply(state: &mut State, event: Event) {
                     row.favorite = favorite;
                 }
             }
-            state.notice = Some(if favorite {
-                "Added to favorites".to_owned()
-            } else {
-                "Removed from favorites".to_owned()
-            });
+            notice(
+                state,
+                if favorite {
+                    "Added to favorites".to_owned()
+                } else {
+                    "Removed from favorites".to_owned()
+                },
+            );
             send_quiet(state, Request::Refresh);
         }
         Event::Notice(message) => state.notice = Some(message),
@@ -2027,11 +2132,14 @@ fn apply(state: &mut State, event: Event) {
                 is_text: result.is_text,
                 preview,
             });
-            state.notice = Some(if preview {
-                format!("Previewing {filename}")
-            } else {
-                format!("Saved {filename}")
-            });
+            notice(
+                state,
+                if preview {
+                    format!("Previewing {filename}")
+                } else {
+                    format!("Saved {filename}")
+                },
+            );
         }
         Event::Deleted { id, permanent } => {
             state.pending_delete = None;
@@ -2045,11 +2153,14 @@ fn apply(state: &mut State, event: Event) {
                 clear_reveal(state);
             }
             state.bump_rows_version();
-            state.notice = Some(if permanent {
-                "Item permanently deleted".to_owned()
-            } else {
-                "Item moved to trash".to_owned()
-            });
+            notice(
+                state,
+                if permanent {
+                    "Item permanently deleted".to_owned()
+                } else {
+                    "Item moved to trash".to_owned()
+                },
+            );
             send_quiet(
                 state,
                 if state.location == Location::Trash {
@@ -2068,7 +2179,7 @@ fn apply(state: &mut State, event: Event) {
             state.selection_cleared = false;
             state.details = None;
             clear_reveal(state);
-            state.notice = format!("Created {name}").into();
+            notice(state, format!("Created {name}"));
             send_quiet(state, Request::Refresh);
         }
         Event::ItemRenamed { id, name, favorite } => {
@@ -2078,7 +2189,7 @@ fn apply(state: &mut State, event: Event) {
                     row.favorite = favorite;
                 }
             }
-            state.notice = Some("Item renamed".to_owned());
+            notice(state, "Item renamed".to_owned());
             send_quiet(state, Request::Refresh);
         }
         Event::Folders(folders) => {
@@ -2102,7 +2213,7 @@ fn apply(state: &mut State, event: Event) {
                 clear_reveal(state);
             }
             state.bump_rows_version();
-            state.notice = Some("Item restored".to_owned());
+            notice(state, "Item restored".to_owned());
             send_quiet(state, Request::Refresh);
         }
         Event::Totp(meta) => {
@@ -2130,9 +2241,9 @@ fn apply(state: &mut State, event: Event) {
                     let server = state.snapshot.server.clone();
                     state.auth = Some(empty_auth_draft(&server));
                 }
-                state.notice = Some("Your session expired. Sign in again.".to_owned());
+                urgent_notice(state, "Your session expired. Sign in again.".to_owned());
             } else {
-                state.notice = Some(message);
+                urgent_notice(state, message);
             }
         }
     }
@@ -2153,7 +2264,7 @@ pub fn submit_unlock(state: &mut State, _tx: &mut Tx) {
 fn queue_unlock(state: &mut State) {
     let password = state.password.text.clone();
     if password.is_empty() {
-        state.notice = Some("Enter your master password.".to_owned());
+        notice(state, "Enter your master password.".to_owned());
         return;
     }
     state.password.replace_text("");
@@ -2445,7 +2556,7 @@ pub fn submit_send(state: &mut State) {
 
 pub fn copy_send(state: &mut State, id: String) {
     let Some(url) = backend::send_url(&id) else {
-        state.notice = Some("This send has no access link.".to_owned());
+        notice(state, "This send has no access link.".to_owned());
         return;
     };
     dispatch(
@@ -2745,13 +2856,13 @@ pub fn scene_account(state: &mut State) {
     };
     state.auth = Some(empty_auth_draft(&state.snapshot.server));
     state.form_error = None;
-    state.notice = None;
+    clear_notice(state);
     state.busy = false;
 }
 
 pub fn scene_disconnected(state: &mut State) {
     state.busy = false;
-    state.notice = Some("Kurama backend is not running.".to_owned());
+    notice(state, "Kurama backend is not running.".to_owned());
 }
 
 pub fn scene_account_two_factor(state: &mut State) {
@@ -2899,7 +3010,7 @@ pub fn scene_ssh_approval(state: &mut State) {
         key_name: "Laptop key".to_owned(),
         client: "git (ssh)".to_owned(),
     }];
-    state.notice = Some("SSH approval requested".to_owned());
+    notice(state, "SSH approval requested".to_owned());
 }
 
 pub fn scene_sync_error(state: &mut State) {
@@ -3000,6 +3111,102 @@ fn fixtures() -> Vec<VaultRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_events_keep_busy_until_terminal_event() {
+        let mut state = State::default();
+        let (tx, _rx) = mpsc::channel();
+        state.requests = Some(tx);
+        dispatch(&mut state, Request::Refresh);
+        assert!(state.busy);
+
+        apply(
+            &mut state,
+            Event::Notices {
+                cursor: 1,
+                notices: Vec::new(),
+            },
+        );
+        apply(&mut state, Event::Approvals(Vec::new()));
+        assert!(state.busy, "background events must not mark work complete");
+
+        apply(&mut state, Event::Snapshot(Snapshot::default()));
+        assert!(!state.busy);
+    }
+
+    #[test]
+    fn concurrent_requests_stay_busy_until_each_completes() {
+        let mut state = State::default();
+        let (tx, _rx) = mpsc::channel();
+        state.requests = Some(tx);
+        dispatch(&mut state, Request::Refresh);
+        dispatch(&mut state, Request::Sync);
+
+        apply(&mut state, Event::Snapshot(Snapshot::default()));
+        assert!(state.busy, "one of two requests is still in flight");
+        apply(&mut state, Event::Synced(Snapshot::default()));
+        assert!(!state.busy);
+    }
+
+    #[test]
+    fn batched_notices_prefer_errors_and_refresh_only_on_transitions() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        let notice = |kind: &str, message: &str, approval_id| backend::Notice {
+            kind: kind.to_owned(),
+            message: message.to_owned(),
+            approval_id,
+        };
+
+        apply(
+            &mut state,
+            Event::Notices {
+                cursor: 1,
+                notices: vec![
+                    notice("status", "Vault locked", None),
+                    notice("sync", "Syncing vault…", None),
+                    notice("sync", "Vault synced", None),
+                    notice("error", "Vault unlock failed", None),
+                ],
+            },
+        );
+        assert_eq!(state.notice.as_deref(), Some("Vault unlock failed"));
+        assert!(!state.syncing);
+        assert_eq!(
+            rx.try_iter()
+                .filter(|r| matches!(r, Request::Refresh))
+                .count(),
+            1
+        );
+
+        apply(
+            &mut state,
+            Event::Notices {
+                cursor: 2,
+                notices: vec![
+                    notice("error", "Quick unlock failed", None),
+                    notice("error", "Vault sync failed", None),
+                    notice("status", "Vault locked", None),
+                ],
+            },
+        );
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Quick unlock failed · Vault sync failed")
+        );
+        assert!(rx.try_iter().next().is_none(), "no redundant refresh");
+    }
+
+    #[test]
+    fn approval_notice_clears_when_queue_empties() {
+        let mut state = State::default();
+        apply(&mut state, Event::Approvals(vec![Approval::default()]));
+        assert_eq!(state.notice.as_deref(), Some("SSH approval requested"));
+
+        apply(&mut state, Event::Approvals(Vec::new()));
+        assert_eq!(state.notice, None);
+    }
 
     #[test]
     fn setting_steppers_walk_choices_and_clamp() {
@@ -3742,7 +3949,7 @@ mod tests {
         let mut state = State::default();
         scene_populated(&mut state);
         state.busy = false;
-        state.notice = None;
+        clear_notice(&mut state);
         let (request_tx, _requests) = mpsc::channel();
         state.requests = Some(request_tx);
         let (event_tx, event_rx) = mpsc::channel();

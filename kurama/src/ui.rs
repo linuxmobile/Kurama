@@ -14,7 +14,7 @@ use crate::state::{
     close_settings, close_ssh_tools, confirm_delete_send, copy_field, copy_generated, copy_send,
     cycle_create_field_type, cycle_create_folder, cycle_edit_folder, cycle_ssh_algorithm,
     delete_item, disable_send, dispatch, folder_label, generate_password, logout, move_selection,
-    new_send, open_attachment, open_generator, open_sends, open_settings, open_ssh_tools,
+    new_send, notice, open_attachment, open_generator, open_sends, open_settings, open_ssh_tools,
     open_trash, refresh_agent_status, remove_create_field, remove_create_uri, remove_edit_uri,
     request_delete_send, restore_item, save_settings_paths, save_ssh_tool_key, select_category,
     select_folder, select_item, select_send, select_settings_section, send_two_factor_email,
@@ -2958,7 +2958,7 @@ fn details(s: &State, dark: bool) -> El {
                         dark,
                         move |state, tx| {
                             if let Err(error) = tx.open_url(&url) {
-                                state.notice = Some(format!("Cannot open website: {error}"));
+                                notice(state, format!("Cannot open website: {error}"));
                             }
                         },
                     ));
