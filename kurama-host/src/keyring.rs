@@ -62,7 +62,11 @@ pub struct KeyringManager {
 
 impl Default for KeyringManager {
     fn default() -> Self {
-        Self::new("secret-tool")
+        #[cfg(all(test, target_os = "linux"))]
+        let tool = "__kurama_test_secret_tool__";
+        #[cfg(not(all(test, target_os = "linux")))]
+        let tool = "secret-tool";
+        Self::new(tool)
     }
 }
 
@@ -911,6 +915,18 @@ esac
         assert!(mgr.clear_api_secret("https://vault.example.com/", "user.123"));
         assert_eq!(
             mgr.get_api_secret("https://vault.example.com", "user.123"),
+            None
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_default_manager_is_isolated_from_system_keyring() {
+        let mgr = KeyringManager::default();
+        assert_eq!(mgr.secret_tool_path, "__kurama_test_secret_tool__");
+        assert!(!mgr.clear_all());
+        assert_eq!(
+            mgr.get_token("https://vault.bitwarden.com", KIND_ACCESS_TOKEN),
             None
         );
     }
