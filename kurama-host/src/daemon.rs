@@ -137,6 +137,30 @@ fn check_running_daemon(ping: &Value, our_commit: &str) -> DaemonCheck {
     }
 }
 
+fn wait_for_socket_state(path: &Path, exists: bool, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while path.exists() != exists {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+fn wait_for_daemon(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if send_daemon_request(&json!({ "action": "ping" })).is_some() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 pub fn ensure_daemon_running() {
     if let Some(resp) = send_daemon_request(&json!({ "action": "ping" })) {
         let check = check_running_daemon(&resp, env!("GIT_HASH"));
@@ -151,7 +175,7 @@ pub fn ensure_daemon_running() {
         }
         // Outdated daemon running: gracefully stop it so we can spawn the latest binary version
         let _ = send_daemon_request(&json!({ "action": "stop" }));
-        std::thread::sleep(Duration::from_millis(50));
+        let _ = wait_for_socket_state(&get_socket_path(), false, Duration::from_secs(2));
     }
 
     if let Ok(exe_path) = env::current_exe() {
@@ -178,13 +202,7 @@ pub fn ensure_daemon_running() {
         }
 
         let _ = cmd.spawn();
-
-        for _ in 0..30 {
-            std::thread::sleep(Duration::from_millis(20));
-            if send_daemon_request(&json!({ "action": "ping" })).is_some() {
-                break;
-            }
-        }
+        let _ = wait_for_daemon(Duration::from_secs(2));
     }
 }
 
@@ -1968,6 +1986,26 @@ mod tests {
         let email_code =
             send_req(json!({ "action": "send_two_factor_email", "email": "", "password": "" }));
         assert_eq!(email_code["ok"], false);
+    }
+
+    #[test]
+    fn socket_state_polling_waits_for_changes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon.sock");
+        assert!(!wait_for_socket_state(&path, true, Duration::from_millis(30)));
+        assert!(wait_for_socket_state(&path, false, Duration::from_millis(30)));
+
+        let thread_path = path.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            let listener = UnixListener::bind(&thread_path).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            drop(listener);
+            let _ = fs::remove_file(&thread_path);
+        });
+        assert!(wait_for_socket_state(&path, true, Duration::from_secs(2)));
+        assert!(wait_for_socket_state(&path, false, Duration::from_secs(2)));
+        handle.join().unwrap();
     }
 
     #[test]
