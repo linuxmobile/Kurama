@@ -63,10 +63,10 @@ impl<const N: usize> LockedMemory<N> {
             N <= page,
             "LockedMemory payload must fit in one OS page ({page} bytes)"
         );
-        let layout =
-            Layout::from_size_align(page, page).expect("Invalid page layout for LockedMemory");
+        let layout = Layout::from_size_align(page, page)
+            .unwrap_or_else(|_| std::alloc::handle_alloc_error(Layout::new::<u8>()));
         let raw_ptr = unsafe { alloc(layout) };
-        let ptr = NonNull::new(raw_ptr).expect("Memory allocation failed for LockedMemory");
+        let ptr = NonNull::new(raw_ptr).unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
 
         // Zero out the freshly allocated page
         unsafe {

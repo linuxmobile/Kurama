@@ -3244,7 +3244,7 @@ mod tests {
         let password = "master_password";
         let master_key =
             derive_master_key(email, password, KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
-        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key).unwrap();
 
         let iv = [3u8; 16];
         let plaintext = [4u8; 64];
@@ -3356,7 +3356,7 @@ mod tests {
         let password = "master_password";
         let master_key =
             derive_master_key(email, password, KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
-        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key).unwrap();
 
         let iv = [3u8; 16];
         let plaintext = [4u8; 64];
@@ -3461,7 +3461,7 @@ mod tests {
         let password = "master_password";
         let master_key =
             derive_master_key(email, password, KdfType::Pbkdf2Sha256, 100_000, None, None).unwrap();
-        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key).unwrap();
 
         let iv = [5u8; 16];
         let plaintext = [6u8; 64];

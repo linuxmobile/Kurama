@@ -1829,7 +1829,7 @@ esac
         let password = "password123";
         let master_key =
             derive_master_key(email, password, KdfType::Pbkdf2Sha256, 5000, None, None).unwrap();
-        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key).unwrap();
 
         let iv = [1u8; 16];
         let plaintext = [2u8; 64];
@@ -1942,7 +1942,7 @@ esac
         let email2 = "other@example.com";
         let master_key2 =
             derive_master_key(email2, password, KdfType::Pbkdf2Sha256, 5000, None, None).unwrap();
-        let sym_key2 = SymmetricCryptoKey::from_master_key(&master_key2);
+        let sym_key2 = SymmetricCryptoKey::from_master_key(&master_key2).unwrap();
         let enc2 = Aes256CbcEnc::new_from_slices(&sym_key2.enc_key, &iv).unwrap();
         let mut buf2 = vec![0u8; 128];
         let ct_len2 = enc2
@@ -2105,7 +2105,7 @@ esac
         let password = "password";
         let master_key =
             derive_master_key(email, password, KdfType::Pbkdf2Sha256, 5000, None, None).unwrap();
-        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key).unwrap();
         let iv = [1u8; 16];
         let enc = Aes256CbcEnc::new_from_slices(&sym_key.enc_key, &iv).unwrap();
         let mut buf = vec![0u8; 128];
@@ -2287,7 +2287,7 @@ esac
         let password = "password123";
         let master_key =
             derive_master_key(email, password, KdfType::Pbkdf2Sha256, 5000, None, None).unwrap();
-        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key).unwrap();
 
         let iv = [3u8; 16];
         let plaintext = [4u8; 64];

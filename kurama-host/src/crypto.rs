@@ -30,6 +30,7 @@ pub enum CryptoError {
     MacMismatch,
     DecryptionFailed(String),
     InvalidKeyLength,
+    HkdfExpansionFailed,
     Utf8Error,
 }
 
@@ -42,6 +43,7 @@ impl std::fmt::Display for CryptoError {
             CryptoError::MacMismatch => write!(f, "MAC verification failed"),
             CryptoError::DecryptionFailed(s) => write!(f, "Decryption failed: {}", s),
             CryptoError::InvalidKeyLength => write!(f, "Invalid key length"),
+            CryptoError::HkdfExpansionFailed => write!(f, "HKDF key expansion failed"),
             CryptoError::Utf8Error => write!(f, "UTF-8 decoding error"),
         }
     }
@@ -144,20 +146,20 @@ impl Zeroize for SymmetricCryptoKey {
 }
 
 impl SymmetricCryptoKey {
-    pub fn from_master_key(master_key: &[u8]) -> Self {
+    pub fn from_master_key(master_key: &[u8]) -> Result<Self, CryptoError> {
         let hkdf = Hkdf::<Sha256>::new(Some(&[]), master_key);
         let mut enc_key = LockedKey32::new_zeroed();
         let mut mac_key = LockedKey32::new_zeroed();
 
         hkdf.expand(b"enc", enc_key.as_mut_slice())
-            .expect("HKDF expand enc failed");
+            .map_err(|_| CryptoError::HkdfExpansionFailed)?;
         hkdf.expand(b"mac", mac_key.as_mut_slice())
-            .expect("HKDF expand mac failed");
+            .map_err(|_| CryptoError::HkdfExpansionFailed)?;
 
-        Self {
+        Ok(Self {
             enc_key,
             mac_key: Some(mac_key),
-        }
+        })
     }
 
     pub fn decrypt_with_master_key(
@@ -787,7 +789,7 @@ mod tests {
     #[test]
     fn test_decrypt_with_master_key_rejects_tampered_mac() {
         let master_key = [23u8; 32];
-        let sym_key = SymmetricCryptoKey::from_master_key(&master_key);
+        let sym_key = SymmetricCryptoKey::from_master_key(&master_key).unwrap();
 
         let user_key_raw = [42u8; 64];
         let encrypted_user_key = sym_key

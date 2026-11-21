@@ -1890,7 +1890,7 @@ pub(crate) mod tests {
         let master_key =
             derive_master_key(email, password, KdfType::Pbkdf2Sha256, 600_000, None, None)
                 .expect("master key");
-        let master_sym = SymmetricCryptoKey::from_master_key(master_key.as_slice());
+        let master_sym = SymmetricCryptoKey::from_master_key(master_key.as_slice()).unwrap();
         let raw = [42u8; 64];
 
         let iv = [9u8; 16];
