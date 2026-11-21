@@ -281,37 +281,8 @@ impl ConfigManager {
             cfg.server_url = v.trim().to_string();
         }
 
-        if server_changed {
-            // Server address changed: purge identity_url (if not explicitly provided),
-            // vault cache (data.json), keyring credentials (api_secret, access_token, refresh_token, session),
-            // in-memory daemon state, and temporary preview attachments.
-            // Note: Remembered login email (cfg.email) is preserved for user convenience.
-            if options.identity_url.is_none() {
-                cfg.identity_url = None;
-            }
-
-            if storage_mgr.file_path.exists() {
-                let _ = fs::remove_file(&storage_mgr.file_path);
-            }
-
-            keyring_mgr.clear_all();
-            keyring_mgr.clear_session(&cfg.server_url);
-
-            // ADR-0025 decision 4: a server/account change must zeroize the
-            // retained quick-unlock key. Send the explicit wipe before the
-            // daemon stop (whose own lock also wipes): the request is the
-            // contract the ADR names, independent of the stop handler.
-            let _ = crate::daemon::send_daemon_request(&serde_json::json!({
-                "action": "wipe_quick_unlock"
-            }));
-            let _ = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "stop" }));
-            crate::attachment::clear_preview_attachments(None);
-
-            crate::log_info!(
-                "kurama:config",
-                "Bitwarden server URL changed to '{}'. Previous session, API credentials, and vault cache purged.",
-                cfg.server_url
-            );
+        if server_changed && options.identity_url.is_none() {
+            cfg.identity_url = None;
         }
 
         if let Some(v) = options.identity_url {
@@ -402,6 +373,32 @@ impl ConfigManager {
         }
 
         self.save(&cfg)?;
+        if server_changed {
+            // Destructive side effects only follow a successful save: if the
+            // new URL cannot be persisted, the old session must stay usable.
+            if storage_mgr.file_path.exists() {
+                let _ = fs::remove_file(&storage_mgr.file_path);
+            }
+
+            keyring_mgr.clear_all();
+            keyring_mgr.clear_session(&cfg.server_url);
+
+            // ADR-0025 decision 4: a server/account change must zeroize the
+            // retained quick-unlock key. Send the explicit wipe before the
+            // daemon stop (whose own lock also wipes): the request is the
+            // contract the ADR names, independent of the stop handler.
+            let _ = crate::daemon::send_daemon_request(&serde_json::json!({
+                "action": "wipe_quick_unlock"
+            }));
+            let _ = crate::daemon::send_daemon_request(&serde_json::json!({ "action": "stop" }));
+            crate::attachment::clear_preview_attachments(None);
+
+            crate::log_info!(
+                "kurama:config",
+                "Bitwarden server URL changed to '{}'. Previous session, API credentials, and vault cache purged.",
+                cfg.server_url
+            );
+        }
         if let Some(v) = quick_unlock_flip {
             // Refresh the daemon's cached setting (it no longer re-reads
             // config.json on its hot paths). The daemon owns the wipe that a
@@ -687,6 +684,40 @@ esac
                 .get_api_secret("https://vault.bitwarden.com", "user.test-api-key-id")
                 .is_none(),
             "API secret in keyring must be cleared when server changes"
+        );
+    }
+
+    #[test]
+    fn test_server_change_does_not_purge_when_save_fails() {
+        let dir = tempdir().unwrap();
+        let config_mgr = ConfigManager::new(Some(dir.path()));
+        let storage_path = dir.path().join("data.json");
+        let storage_mgr = crate::storage::StorageManager::new(storage_path.clone());
+        let keyring_mgr =
+            crate::keyring::KeyringManager::new(&create_mock_secret_tool(dir.path()));
+
+        fs::write(&storage_path, "{}").unwrap();
+        assert!(keyring_mgr.store_token(
+            DEFAULT_SERVER_URL,
+            "access_token",
+            "old-access-token"
+        ));
+
+        let result = config_mgr.update_config(
+            ConfigUpdateOptions {
+                server_url: Some("https://vaultwarden.custom.corp".to_string()),
+                ..Default::default()
+            },
+            &storage_mgr,
+            &keyring_mgr,
+        );
+        assert!(result.is_err(), "writing config to a directory must fail");
+        assert!(storage_path.exists(), "vault cache must survive a failed save");
+        assert!(
+            keyring_mgr
+                .get_token(DEFAULT_SERVER_URL, "access_token")
+                .is_some(),
+            "tokens must survive a failed save"
         );
     }
 
