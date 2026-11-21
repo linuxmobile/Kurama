@@ -1002,6 +1002,8 @@ impl Peer {
         };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
         let ok = unsafe {
+            // SAFETY: cred is initialized and len is the exact size of ucred;
+            // SO_PEERCRED writes one ucred for this connected socket.
             libc::getsockopt(
                 std::os::fd::AsRawFd::as_raw_fd(stream),
                 libc::SOL_SOCKET,
@@ -1011,12 +1013,21 @@ impl Peer {
             )
         } == 0;
         if ok {
-            let mut peer = Peer::from_pid(cred.pid);
-            peer.app = peer.find_app();
-            peer
+            Peer::from_cred(cred)
         } else {
             Peer::default()
         }
+    }
+
+    fn from_cred(cred: libc::ucred) -> Peer {
+        // SAFETY: getuid takes no arguments and has no preconditions.
+        let current_uid = unsafe { libc::getuid() };
+        if cred.uid != current_uid || cred.pid <= 0 {
+            return Peer::default();
+        }
+        let mut peer = Peer::from_pid(cred.pid);
+        peer.app = peer.find_app();
+        peer
     }
 
     fn from_pid(pid: i32) -> Peer {
@@ -2481,6 +2492,30 @@ mod tests {
         );
         assert!(blob_of("ssh-ed25519").is_none());
         assert!(blob_of("ssh-ed25519 !!!notbase64").is_none());
+    }
+
+    #[test]
+    fn peer_builder_rejects_foreign_uid() {
+        let foreign = libc::ucred {
+            pid: std::process::id() as i32,
+            uid: u32::MAX,
+            gid: 0,
+        };
+        let peer = Peer::from_cred(foreign);
+        assert_eq!(
+            (peer.pid, peer.exe.as_str(), peer.app.as_str()),
+            (0, "", ""),
+            "a foreign UID must yield an unidentified peer"
+        );
+
+        // SAFETY: getuid takes no arguments and has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        let own = Peer::from_cred(libc::ucred {
+            pid: std::process::id() as i32,
+            uid,
+            gid: 0,
+        });
+        assert_eq!(own.pid, std::process::id() as i32);
     }
 
     #[test]
