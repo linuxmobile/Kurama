@@ -1,12 +1,12 @@
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -205,6 +205,8 @@ pub fn send_daemon_request(req: &Value) -> Option<Value> {
     }
 
     let mut stream = UnixStream::connect(&socket_path).ok()?;
+    let _ = stream.set_read_timeout(Some(CLIENT_READ_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT));
 
     // Mutual SO_PEERCRED verification: client verifies that server process UID matches current UID
     if let Err(e) = verify_peer_credentials(&stream) {
@@ -226,14 +228,55 @@ pub fn send_daemon_request(req: &Value) -> Option<Value> {
     }
 
     let payload = format!("{}\n", payload_val);
+    if payload.len() as u64 > MAX_REQUEST_BYTES {
+        crate::log_error!("kurama:daemon", "IPC request exceeds the size limit");
+        return None;
+    }
     stream.write_all(payload.as_bytes()).ok()?;
     stream.flush().ok()?;
 
-    let mut reader = BufReader::new(stream);
+    let mut reader = BufReader::new(stream).take(MAX_RESPONSE_BYTES);
     let mut response_line = String::new();
-    reader.read_line(&mut response_line).ok()?;
+    if reader.read_line(&mut response_line).ok()? == 0 || !response_line.ends_with('\n') {
+        return None;
+    }
 
     serde_json::from_str(&response_line).ok()
+}
+
+const MAX_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_CONCURRENT_CONNECTIONS: usize = 32;
+const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+
+struct ConnectionGuard;
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn try_acquire_connection() -> Option<ConnectionGuard> {
+    let mut active = ACTIVE_CONNECTIONS.load(Ordering::Acquire);
+    loop {
+        if active >= MAX_CONCURRENT_CONNECTIONS {
+            return None;
+        }
+        match ACTIVE_CONNECTIONS.compare_exchange_weak(
+            active,
+            active + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Some(ConnectionGuard),
+            Err(current) => active = current,
+        }
+    }
 }
 
 pub struct DaemonState {
@@ -889,9 +932,19 @@ pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => {
+            Ok(mut stream) => {
+                let Some(guard) = try_acquire_connection() else {
+                    let _ = stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT));
+                    let _ = writeln!(
+                        stream,
+                        "{}",
+                        json!({ "ok": false, "error": "Too many concurrent requests" })
+                    );
+                    continue;
+                };
                 let st = state.clone();
                 std::thread::spawn(move || {
+                    let _guard = guard;
                     let _ = handle_client(stream, st);
                 });
             }
@@ -1081,7 +1134,19 @@ fn auth_result_json(result: crate::auth::AuthResult) -> Value {
     }
 }
 
-fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<()> {
+fn handle_client(stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<()> {
+    handle_client_with_timeouts(stream, state, SERVER_READ_TIMEOUT, SOCKET_IO_TIMEOUT)
+}
+
+fn handle_client_with_timeouts(
+    mut stream: UnixStream,
+    state: Arc<DaemonState>,
+    read_timeout: Duration,
+    io_timeout: Duration,
+) -> std::io::Result<()> {
+    let _ = stream.set_read_timeout(Some(read_timeout));
+    let _ = stream.set_write_timeout(Some(io_timeout));
+
     if let Err(e) = verify_peer_credentials(&stream) {
         crate::log_error!(
             "kurama:daemon",
@@ -1093,9 +1158,16 @@ fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> std::io::Re
         return Ok(());
     }
 
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut reader = BufReader::new(stream.try_clone()?).take(MAX_REQUEST_BYTES);
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    if reader.read_line(&mut line)? == 0 {
+        return Ok(());
+    }
+    if !line.ends_with('\n') {
+        let err = json!({ "ok": false, "error": "Request too large" });
+        let _ = writeln!(stream, "{}", err);
+        return Ok(());
+    }
 
     if line.trim().is_empty() {
         return Ok(());
@@ -1875,6 +1947,72 @@ mod tests {
         let email_code =
             send_req(json!({ "action": "send_two_factor_email", "email": "", "password": "" }));
         assert_eq!(email_code["ok"], false);
+    }
+
+    #[test]
+    fn ipc_rejects_oversized_requests() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(DaemonState::new(
+            StorageManager::new(dir.path().join("daemon_data.json")),
+            15,
+        ));
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let handle = std::thread::spawn(move || {
+            handle_client_with_timeouts(
+                server,
+                state,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            )
+        });
+
+        client
+            .write_all(&vec![b'a'; MAX_REQUEST_BYTES as usize])
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(&client).read_line(&mut line).unwrap();
+        handle.join().unwrap().unwrap();
+
+        let response: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(response["ok"], false);
+        assert!(response["error"].as_str().unwrap().contains("too large"));
+    }
+
+    #[test]
+    fn ipc_limits_concurrent_connections() {
+        let mut guards = Vec::new();
+        while let Some(guard) = try_acquire_connection() {
+            guards.push(guard);
+        }
+        assert_eq!(guards.len(), MAX_CONCURRENT_CONNECTIONS);
+        assert!(try_acquire_connection().is_none());
+
+        guards.clear();
+        assert!(try_acquire_connection().is_some());
+    }
+
+    #[test]
+    fn ipc_times_out_idle_clients() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(DaemonState::new(
+            StorageManager::new(dir.path().join("daemon_data.json")),
+            15,
+        ));
+        let (client, server) = UnixStream::pair().unwrap();
+        let handle = std::thread::spawn(move || {
+            handle_client_with_timeouts(
+                server,
+                state,
+                Duration::from_millis(50),
+                Duration::from_millis(50),
+            )
+        });
+
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut line = String::new();
+        assert_eq!(BufReader::new(&client).read_line(&mut line).unwrap(), 0);
+        assert!(handle.join().unwrap().is_err(), "idle client must time out");
     }
 
     #[test]
