@@ -3,9 +3,37 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+#[derive(Debug)]
+struct TimerState {
+    active: bool,
+    generation: u64,
+    deadline: Instant,
+}
+
+impl Default for TimerState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            generation: 0,
+            deadline: Instant::now(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ClearTimer {
+    state: Mutex<TimerState>,
+    wake: Condvar,
+    started: AtomicBool,
+    #[cfg(test)]
+    spawn_count: AtomicUsize,
+}
 
 #[derive(Debug, Clone)]
 pub struct ClipboardManager {
@@ -13,6 +41,7 @@ pub struct ClipboardManager {
     pub detach_worker: bool,
     gen_path: Option<PathBuf>,
     generation: Arc<AtomicU64>,
+    timer: Arc<ClearTimer>,
 }
 
 impl Default for ClipboardManager {
@@ -31,6 +60,7 @@ impl ClipboardManager {
             detach_worker: true,
             gen_path: None,
             generation: Arc::new(AtomicU64::new(1)),
+            timer: Arc::new(ClearTimer::default()),
         }
     }
 
@@ -90,6 +120,7 @@ impl ClipboardManager {
         }
 
         let mut cmd = Command::new(&self.wl_copy_path);
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
         if sensitive {
             cmd.arg("--sensitive");
         }
@@ -112,8 +143,20 @@ impl ClipboardManager {
             }
         };
 
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
+        let wrote = match child.stdin.take() {
+            Some(mut stdin) => stdin
+                .write_all(text.as_bytes())
+                .and_then(|_| stdin.flush()),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "wl-copy stdin unavailable",
+            )),
+        };
+        if let Err(e) = wrote {
+            let _ = child.kill();
+            let _ = child.wait();
+            crate::log_error!("kurama:clipboard", "Failed to write to wl-copy: {:?}", e);
+            return false;
         }
 
         let success = match child.wait() {
@@ -141,28 +184,28 @@ impl ClipboardManager {
 
     fn schedule_auto_clear(&self, timeout: Duration) {
         let expected_gen = self.next_generation();
-        let copy_path = self.wl_copy_path.clone();
-        let gen_path = self.get_generation_file_path();
-        let local_gen = Arc::clone(&self.generation);
-
-        // 1. In-process timer thread: handles daemon, long-lived hosts, and test suites
-        let _ = std::thread::Builder::new()
-            .name("clipboard-autoclear".into())
-            .spawn(move || {
-                std::thread::sleep(timeout);
-                let cur = if let Ok(content) = fs::read_to_string(&gen_path) {
-                    content
-                        .trim()
-                        .parse::<u64>()
-                        .unwrap_or_else(|_| local_gen.load(Ordering::SeqCst))
-                } else {
-                    local_gen.load(Ordering::SeqCst)
-                };
-
-                if cur == expected_gen {
-                    let _ = Command::new(&copy_path).arg("--clear").output();
-                }
-            });
+        let timer = Arc::clone(&self.timer);
+        {
+            let mut state = timer.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.active = true;
+            state.generation = expected_gen;
+            state.deadline = Instant::now() + timeout;
+        }
+        timer.wake.notify_all();
+        if !timer.started.swap(true, Ordering::AcqRel) {
+            #[cfg(test)]
+            timer.spawn_count.fetch_add(1, Ordering::SeqCst);
+            let copy_path = self.wl_copy_path.clone();
+            let gen_path = self.get_generation_file_path();
+            let local_gen = Arc::clone(&self.generation);
+            let spawned = std::thread::Builder::new()
+                .name("clipboard-autoclear".into())
+                .spawn(move || run_clear_timer(timer, copy_path, gen_path, local_gen));
+            if spawned.is_err() {
+                let timer = Arc::clone(&self.timer);
+                timer.started.store(false, Ordering::Release);
+            }
+        }
 
         // 2. Detached worker process: ensures timeout survives CLI parent exit without /bin/sh
         if self.detach_worker && !cfg!(test) {
@@ -221,6 +264,48 @@ impl ClipboardManager {
                 crate::log_error!("kurama:clipboard", "Failed to clear clipboard: {:?}", e);
                 false
             }
+        }
+    }
+}
+
+fn run_clear_timer(
+    timer: Arc<ClearTimer>,
+    copy_path: String,
+    gen_path: PathBuf,
+    local_gen: Arc<AtomicU64>,
+) {
+    loop {
+        let mut state = timer.state.lock().unwrap_or_else(|e| e.into_inner());
+        while !state.active {
+            state = timer.wake.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        loop {
+            let remaining = state.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (next, result) = timer
+                .wake
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            state = next;
+            if result.timed_out() || !state.active {
+                break;
+            }
+        }
+        if !state.active {
+            continue;
+        }
+        let expected = state.generation;
+        state.active = false;
+        drop(state);
+
+        let current = fs::read_to_string(&gen_path)
+            .ok()
+            .and_then(|content| content.trim().parse::<u64>().ok())
+            .unwrap_or_else(|| local_gen.load(Ordering::SeqCst));
+        if current == expected {
+            let _ = Command::new(&copy_path).arg("--clear").output();
         }
     }
 }
@@ -468,5 +553,40 @@ fi
         // Verify file permissions 0600
         let meta = fs::metadata(&gen_file).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn test_copy_propagates_stdin_write_failure() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("wl-copy-fail");
+        crate::write_test_executable(&script, "#!/bin/sh\nexit 0\n");
+        let mgr = ClipboardManager::new(script.to_str().unwrap()).without_detached_worker();
+
+        assert!(
+            !mgr.copy(&"x".repeat(1024 * 1024), true, 10),
+            "a failed stdin write must not be reported as a copy"
+        );
+    }
+
+    #[test]
+    fn test_repeated_sensitive_copies_use_one_timer() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("wl-copy-mock");
+        let log = dir.path().join("args.log");
+        crate::write_test_executable(
+            &script,
+            &format!("#!/bin/sh\nprintf '%s\n' \"$*\" >> \"{}\"\nexit 0\n", log.display()),
+        );
+        let gen = dir.path().join("clipboard_gen");
+        let mgr = ClipboardManager::new(script.to_str().unwrap())
+            .without_detached_worker()
+            .with_generation_path(gen.clone());
+
+        for _ in 0..5 {
+            assert!(mgr.copy("secret", true, 1));
+        }
+        assert_eq!(mgr.timer.spawn_count.load(Ordering::SeqCst), 1);
+        assert_eq!(mgr.current_generation(), 6);
+        assert!(fs::read_to_string(&log).unwrap().lines().all(|l| l == "--sensitive"));
     }
 }
