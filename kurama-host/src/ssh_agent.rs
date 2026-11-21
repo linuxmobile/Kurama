@@ -189,6 +189,22 @@ impl SshAgent {
             a.insert(key);
         }
     }
+
+    pub fn forget_approvals(&self) {
+        if let Ok(mut a) = self.approvals.lock() {
+            a.clear();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remember_approval(&self, key: &str) {
+        self.approve(key.to_owned());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_approvals(&self) -> bool {
+        self.approvals.lock().is_ok_and(|a| !a.is_empty())
+    }
 }
 
 /// Post a prompt and wait for its answer; no answer within the timeout denies.

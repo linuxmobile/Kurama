@@ -1378,6 +1378,7 @@ fn handle_client_with_timeouts(
         "logout" => {
             let result = auth_manager_for_request(state.as_ref(), &req).logout();
             state.lock();
+            state.ssh_agent.forget_approvals();
             state.record_event("status", json!({ "status": "unauthenticated" }));
             auth_result_json(result)
         }
@@ -2038,6 +2039,10 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
+        state
+            .ssh_agent
+            .remember_approval("fingerprint|client|app");
+        assert!(state.ssh_agent.has_approvals());
 
         let (mut client, server) = UnixStream::pair().unwrap();
         let st = state.clone();
@@ -2054,6 +2059,10 @@ mod tests {
         assert_eq!(response["ok"], true);
         assert_eq!(response["status"], "unauthenticated");
         assert!(!state.vault_mgr.is_unlocked());
+        assert!(
+            !state.ssh_agent.has_approvals(),
+            "logout must forget remembered SSH approvals"
+        );
         let storage = state.vault_mgr.storage_mgr.load();
         assert!(storage.server_url.is_empty());
         assert!(storage.user_email.is_empty());
