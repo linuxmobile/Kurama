@@ -330,12 +330,25 @@ impl KeyringManager {
     }
 
     pub fn clear_all(&self) -> bool {
-        match Command::new(&self.secret_tool_path)
-            .args(["clear", "service", SERVICE_NAME])
-            .output()
+        let mut cleared = self.clear_service(SERVICE_NAME);
+        cleared &= self.clear_service(LEGACY_SERVICE_NAME);
+        cleared
+    }
+
+    fn clear_service(&self, service: &str) -> bool {
+        #[cfg(not(target_os = "linux"))]
         {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
+            native::clear(&format!("{service}|{ACCOUNT_NAME}"))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            match Command::new(&self.secret_tool_path)
+                .args(["clear", "service", service])
+                .output()
+            {
+                Ok(output) => output.status.success(),
+                Err(_) => false,
+            }
         }
     }
 
@@ -473,6 +486,31 @@ mod tests {
         let mgr = KeyringManager::default();
         assert!(!mgr.store_session("https://vault.bitwarden.com", ""));
         assert!(!mgr.store_session("", "some_token"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_clear_all_removes_legacy_service() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("clears.log");
+        let script_path = dir.path().join("mock-secret-tool");
+        let script = format!(
+            r##"#!/bin/sh
+printf '%s\n' "$*" >> "{}"
+exit 0
+"##,
+            log.display()
+        );
+        crate::write_test_executable(&script_path, script);
+
+        let mgr = KeyringManager::new(script_path.to_str().unwrap());
+        assert!(mgr.clear_all());
+        let log = fs::read_to_string(log).unwrap();
+        assert!(log.contains("clear service kurama"), "{log}");
+        assert!(
+            log.contains(&format!("clear service {LEGACY_SERVICE_NAME}")),
+            "{log}"
+        );
     }
 
     #[test]
