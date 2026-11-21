@@ -2956,8 +2956,6 @@ pub fn scene_trash(state: &mut State) {
         folder_id: "folder-personal".to_owned(),
         updated: "2026-01-01T00:00:00Z".to_owned(),
     }];
-    state.snapshot.items = state.rows.clone();
-    state.snapshot.items_count = state.rows.len();
     state.selected = state.rows.first().map(|item| item.id.clone());
     state.bump_rows_version();
 }

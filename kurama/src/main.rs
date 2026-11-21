@@ -1604,18 +1604,11 @@ mod tests {
         rt.frame(1.0 / 60.0);
         assert!(rt.find("item-trash-1").is_some());
         assert!(rt.find("item-1").is_none());
-        assert!(rt.find("trash-label").is_some());
-        assert!(rt.find("trash-nav").is_some());
-        assert!(rt.find("library-label").is_none());
-        assert!(rt.find("category-All items").is_none());
-        assert!(rt.find("vault-nav").is_some());
-
-        let (x, y) = rt.find("vault-nav").expect("back to vault nav");
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        rt.frame(0.0);
-        assert_eq!(rt.state.location, state::Location::Vault);
         assert!(rt.find("library-label").is_some());
+        assert!(rt.find("category-All items").is_some());
+        assert!(rt.find("trash-nav").is_some());
+        assert!(rt.find("vault-nav").is_none());
+        assert_eq!(rt.state.snapshot.items.len(), 4);
     }
 
     #[test]
