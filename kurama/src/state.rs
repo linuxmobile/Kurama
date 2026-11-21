@@ -1577,8 +1577,9 @@ pub fn setup(state: &mut State, wake: Waker) {
 }
 
 pub fn poll(state: &mut State, seconds: f64, _tx: &mut Tx) -> bool {
-    let before = visible_fingerprint(state);
-    tick_totp(state, seconds);
+    let before_busy = state.busy;
+    let before_notice = state.notice.clone();
+    let changed = tick_totp(state, seconds);
     state.event_timer += seconds;
     if state.event_timer >= 1.0 {
         state.event_timer = 0.0;
@@ -1597,22 +1598,27 @@ pub fn poll(state: &mut State, seconds: f64, _tx: &mut Tx) -> bool {
     }
 
     let Some(events) = &state.events else {
-        return visible_fingerprint(state) != before;
+        return changed;
     };
     let queued: Vec<Event> = events.try_iter().collect();
     if queued.is_empty() {
-        return visible_fingerprint(state) != before;
+        return changed;
     }
+    let before = visible_fingerprint(state);
     for event in queued {
         apply(state, event);
     }
-    visible_fingerprint(state) != before
+    changed
+        || visible_fingerprint(state) != before
+        || state.busy != before_busy
+        || state.notice != before_notice
 }
 
-fn tick_totp(state: &mut State, seconds: f64) {
+fn tick_totp(state: &mut State, seconds: f64) -> bool {
     let Some(totp) = state.totp.as_mut() else {
-        return;
+        return false;
     };
+    let before = totp.ttl;
     state.totp_timer += seconds;
     while state.totp_timer >= 1.0 {
         state.totp_timer -= 1.0;
@@ -1623,7 +1629,9 @@ fn tick_totp(state: &mut State, seconds: f64) {
         state.totp = None;
         clear_totp(&item_id);
         send_quiet(state, Request::Totp { item_id });
+        return true;
     }
+    totp.ttl != before
 }
 
 fn visible_fingerprint(state: &State) -> u64 {
@@ -1634,8 +1642,6 @@ fn visible_fingerprint(state: &State) -> u64 {
     state.snapshot.last_sync.hash(&mut hasher);
     state.snapshot.items_count.hash(&mut hasher);
     state.query.text.hash(&mut hasher);
-    state.busy.hash(&mut hasher);
-    state.notice.hash(&mut hasher);
     state.theme.hash(&mut hasher);
     state.settings_open.hash(&mut hasher);
     state.settings_section.hash(&mut hasher);
@@ -1992,9 +1998,10 @@ fn apply(state: &mut State, event: Event) {
                     }
                     "sync" if item.message == "Syncing vault…" => state.syncing = true,
                     "sync" if item.message == "Vault synced" => {
+                        let was_syncing = state.syncing;
                         state.syncing = false;
                         state.sync_error = None;
-                        refresh = true;
+                        refresh = was_syncing;
                     }
                     _ => {}
                 }
@@ -4103,6 +4110,40 @@ mod tests {
             })
             .unwrap();
         assert!(poll(&mut state, 0.0, &mut tx));
+    }
+
+    #[test]
+    fn sync_success_refreshes_only_after_syncing() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let (request_tx, requests) = mpsc::channel();
+        state.requests = Some(request_tx);
+        state.syncing = true;
+        let notice = backend::Notice {
+            kind: "sync".to_owned(),
+            message: "Vault synced".to_owned(),
+            approval_id: None,
+        };
+
+        apply(
+            &mut state,
+            Event::Notices {
+                cursor: 1,
+                notices: vec![notice.clone()],
+            },
+        );
+        assert!(requests
+            .try_iter()
+            .any(|request| matches!(request, Request::Refresh)));
+
+        apply(
+            &mut state,
+            Event::Notices {
+                cursor: 2,
+                notices: vec![notice],
+            },
+        );
+        assert!(requests.try_iter().next().is_none());
     }
 
     #[test]

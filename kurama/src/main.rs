@@ -258,7 +258,17 @@ mod tests {
     use super::*;
     use crate::backend::{Approval, FieldValue, ItemField, Request};
     use crate::theme::ThemePreference;
-    use rune::{Env, Mods, Runtime};
+    use rune::{Cx, El, Env, Mods, Runtime};
+    use std::cell::Cell;
+
+    thread_local! {
+        static VIEW_BUILDS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn counting_view(s: &State, cx: &mut Cx<State>) -> El {
+        VIEW_BUILDS.with(|count| count.set(count.get() + 1));
+        ui::view(s, cx)
+    }
 
     fn runtime(scene: impl FnOnce(&mut State)) -> Runtime<State> {
         let mut state = State::default();
@@ -272,6 +282,27 @@ mod tests {
                 scale: 1.0,
             },
         )
+    }
+
+    #[test]
+    fn identical_polls_do_not_rebuild_the_view() {
+        let mut rt = Runtime::new(
+            State::default(),
+            counting_view,
+            (1160.0, 760.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        rt.poll = Some(state::poll);
+        rt.frame(0.0);
+        let baseline = VIEW_BUILDS.with(Cell::get);
+
+        rt.frame(0.0);
+        rt.frame(1.0 / 60.0);
+
+        assert_eq!(VIEW_BUILDS.with(Cell::get), baseline);
     }
 
     #[test]
