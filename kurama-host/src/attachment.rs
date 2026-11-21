@@ -95,22 +95,39 @@ pub fn is_safe_path_component(s: &str) -> bool {
 }
 
 pub fn get_preview_dir(item_id: Option<&str>) -> PathBuf {
-    let base = if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime_dir)
-            .join("kurama")
-            .join("attachments")
-    } else {
-        #[cfg(unix)]
-        let uid = unsafe { libc::getuid() };
-        #[cfg(not(unix))]
-        let uid = 1000;
-        PathBuf::from(format!("/tmp/kurama-{}/attachments", uid))
-    };
+    let base = crate::daemon::get_runtime_dir()
+        .join("kurama")
+        .join("attachments");
 
     match item_id {
         Some(id) if is_safe_path_component(id) => base.join(id),
         _ => base,
     }
+}
+
+fn remove_owned_preview_dir(dir: &Path) {
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return;
+    };
+    if meta.file_type().is_symlink() {
+        crate::log_warn!(
+            "kurama:attachment",
+            "Refusing preview cleanup through a symlink"
+        );
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.uid() != unsafe { libc::getuid() } {
+            crate::log_warn!(
+                "kurama:attachment",
+                "Refusing preview cleanup of a directory owned by another UID"
+            );
+            return;
+        }
+    }
+    let _ = fs::remove_dir_all(dir);
 }
 
 pub fn clear_preview_attachments(item_id: Option<&str>) {
@@ -130,17 +147,22 @@ pub fn clear_preview_attachments(item_id: Option<&str>) {
     }
 
     let dir = get_preview_dir(item_id);
-    if dir.exists() {
-        let _ = fs::remove_dir_all(&dir);
-    }
-    // Also clean up legacy /tmp/kurama/attachments if present
-    let legacy_dir = if let Some(id) = item_id {
-        PathBuf::from("/tmp/kurama/attachments").join(id)
-    } else {
-        PathBuf::from("/tmp/kurama/attachments")
-    };
-    if legacy_dir.exists() {
-        let _ = fs::remove_dir_all(&legacy_dir);
+    remove_owned_preview_dir(&dir);
+
+    let legacy_roots = [
+        PathBuf::from("/tmp/kurama/attachments"),
+        #[cfg(unix)]
+        PathBuf::from(format!(
+            "/tmp/kurama-{}/attachments",
+            unsafe { libc::getuid() }
+        )),
+    ];
+    for root in legacy_roots {
+        let legacy_dir = match item_id {
+            Some(id) => root.join(id),
+            None => root,
+        };
+        remove_owned_preview_dir(&legacy_dir);
     }
 }
 
@@ -1278,6 +1300,42 @@ mod tests {
         assert!(
             !res.ok,
             "Should not return dirty cached ciphertext as preview"
+        );
+    }
+
+    #[test]
+    fn test_preview_dir_follows_validated_runtime_dir() {
+        let _lock = crate::env_lock();
+        let runtime = tempfile::tempdir().unwrap();
+        let old = env::var_os("XDG_RUNTIME_DIR");
+        env::set_var("XDG_RUNTIME_DIR", runtime.path());
+
+        let expected = crate::daemon::get_runtime_dir()
+            .join("kurama")
+            .join("attachments")
+            .join("item");
+        assert_eq!(get_preview_dir(Some("item")), expected);
+
+        match old {
+            Some(value) => env::set_var("XDG_RUNTIME_DIR", value),
+            None => env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_preview_cleanup_refuses_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("secret"), b"payload").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        remove_owned_preview_dir(&link);
+        assert!(
+            target.join("secret").exists(),
+            "cleanup must not follow a preview symlink"
         );
     }
 
