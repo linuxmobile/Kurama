@@ -1134,6 +1134,31 @@ fn auth_result_json(result: crate::auth::AuthResult) -> Value {
     }
 }
 
+fn batch_item_result(
+    ids: Vec<String>,
+    mut apply: impl FnMut(&str) -> Result<(), String>,
+) -> Value {
+    let mut succeeded = Vec::new();
+    let mut failed = Vec::new();
+    for id in ids {
+        match apply(&id) {
+            Ok(()) => succeeded.push(id),
+            Err(e) => failed.push((id, e)),
+        }
+    }
+    let error = failed.first().map(|(_, message)| message.clone());
+    json!({
+        "ok": failed.is_empty(),
+        "partial": !failed.is_empty() && !succeeded.is_empty(),
+        "succeeded": succeeded,
+        "failed": failed
+            .iter()
+            .map(|(id, message)| json!({ "id": id, "error": message }))
+            .collect::<Vec<_>>(),
+        "error": error,
+    })
+}
+
 fn handle_client(stream: UnixStream, state: Arc<DaemonState>) -> std::io::Result<()> {
     handle_client_with_timeouts(stream, state, SERVER_READ_TIMEOUT, SOCKET_IO_TIMEOUT)
 }
@@ -1446,20 +1471,11 @@ fn handle_client_with_timeouts(
                 })
                 .unwrap_or_default();
             let value = req.get("value").and_then(Value::as_bool).unwrap_or(false);
-            let mut error = None;
-            for id in &ids {
-                if let Err(e) = state
+            batch_item_result(ids, |id| {
+                state
                     .vault_mgr
                     .favorite_item(id, value, client_context.as_ref())
-                {
-                    error = Some(e);
-                    break;
-                }
-            }
-            match error {
-                None => json!({ "ok": true }),
-                Some(e) => json!({ "ok": false, "error": e }),
-            }
+            })
         }
         "delete_item" => {
             let ids: Vec<String> = req
@@ -1475,20 +1491,11 @@ fn handle_client_with_timeouts(
                 .get("permanent")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let mut error = None;
-            for id in &ids {
-                if let Err(e) = state
+            batch_item_result(ids, |id| {
+                state
                     .vault_mgr
                     .delete_item(id, permanent, client_context.as_ref())
-                {
-                    error = Some(e);
-                    break;
-                }
-            }
-            match error {
-                None => json!({ "ok": true }),
-                Some(e) => json!({ "ok": false, "error": e }),
-            }
+            })
         }
         "restore_item" => {
             let id = req.get("id").and_then(Value::as_str).unwrap_or("");
@@ -1588,20 +1595,13 @@ fn handle_client_with_timeouts(
                         .collect()
                 })
                 .unwrap_or_default();
-            let mut error = None;
-            for id in &ids {
-                if let Err(e) = state
+            let mut result = batch_item_result(ids, |id| {
+                state
                     .vault_mgr
                     .delete_item(id, true, client_context.as_ref())
-                {
-                    error = Some(e);
-                    break;
-                }
-            }
-            match error {
-                None => json!({ "ok": true, "count": ids.len() }),
-                Some(e) => json!({ "ok": false, "error": e }),
-            }
+            });
+            result["count"] = json!(result["succeeded"].as_array().map_or(0, Vec::len));
+            result
         }
         "folders" => match state.vault_mgr.folders() {
             Ok(folders) => json!({ "ok": true, "folders": folders }),
@@ -1948,6 +1948,30 @@ mod tests {
         let email_code =
             send_req(json!({ "action": "send_two_factor_email", "email": "", "password": "" }));
         assert_eq!(email_code["ok"], false);
+    }
+
+    #[test]
+    fn batch_results_report_partial_success() {
+        let result = batch_item_result(
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            |id| {
+                if id == "b" {
+                    Err("denied".to_owned())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["partial"], true);
+        assert_eq!(result["succeeded"], json!(["a", "c"]));
+        assert_eq!(result["failed"][0]["id"], "b");
+        assert_eq!(result["failed"][0]["error"], "denied");
+        assert_eq!(result["error"], "denied");
+
+        let all_ok = batch_item_result(vec!["a".to_owned()], |_| Ok(()));
+        assert_eq!(all_ok["ok"], true);
+        assert_eq!(all_ok["partial"], false);
     }
 
     #[test]
