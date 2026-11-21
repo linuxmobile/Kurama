@@ -1848,6 +1848,30 @@ fn apply_snapshot(state: &mut State, snapshot: Snapshot) {
     }
 }
 
+fn clear_session_secrets(state: &mut State) {
+    state.revealed = None;
+    state.totp = None;
+    state.password.replace_text("");
+    state.form_error = None;
+    state.send_error = None;
+    state.send_form = None;
+    state.send_selected = None;
+    state.send_pending_delete = None;
+    state.generator = None;
+    state.ssh_tools = None;
+    state.attachment_preview = None;
+    state.approvals.clear();
+    state.syncing = false;
+    state.sync_error = None;
+    let server = state.snapshot.server.clone();
+    state.auth = Some(empty_auth_draft(&server));
+
+    backend::clear_revealed();
+    backend::clear_all_totp();
+    backend::clear_send_urls();
+    backend::clear_attachment_text();
+}
+
 fn apply(state: &mut State, event: Event) {
     if !matches!(
         event,
@@ -2234,13 +2258,8 @@ fn apply(state: &mut State, event: Event) {
                 state.details = None;
                 state.edit = None;
                 state.create = None;
-                clear_reveal(state);
-                state.password.replace_text("");
+                clear_session_secrets(state);
                 state.bump_rows_version();
-                if state.auth.is_none() {
-                    let server = state.snapshot.server.clone();
-                    state.auth = Some(empty_auth_draft(&server));
-                }
                 urgent_notice(state, "Your session expired. Sign in again.".to_owned());
             } else {
                 urgent_notice(state, message);
@@ -3206,6 +3225,68 @@ mod tests {
 
         apply(&mut state, Event::Approvals(Vec::new()));
         assert_eq!(state.notice, None);
+    }
+
+    #[test]
+    fn session_expiry_clears_all_secret_drafts_and_caches() {
+        let _guard = backend::REVEAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut state = State::default();
+        state.password = TextEdit::new("master-password");
+        let mut auth = empty_auth_draft("https://vault.example.com");
+        auth.password = TextEdit::new("typed-password").secure();
+        state.auth = Some(auth);
+        let mut send = empty_send_draft();
+        send.text = TextEdit::new("send-secret").secure();
+        send.password = TextEdit::new("send-password").secure();
+        state.send_form = Some(send);
+        state.send_selected = Some("send-1".to_owned());
+        let mut ssh = empty_ssh_tools_draft();
+        ssh.private_key = TextEdit::new("private-key-material").secure();
+        state.ssh_tools = Some(ssh);
+        let mut generator = empty_generator(GeneratorTarget::None);
+        generator.value = TextEdit::new("generated-secret");
+        state.generator = Some(generator);
+        state.attachment_preview = Some(AttachmentView {
+            filename: "note.txt".to_owned(),
+            path: "/tmp/note.txt".to_owned(),
+            is_image: false,
+            is_text: true,
+            preview: true,
+        });
+        state.revealed = Some("field".to_owned());
+        state.totp = Some(TotpMeta {
+            item_id: "item".to_owned(),
+            ttl: 30,
+            period: 30,
+        });
+        backend::stash_revealed("field", "revealed-secret".to_owned());
+        backend::stash_totp("item", "123456".to_owned());
+        backend::stash_send_url(
+            "send-1",
+            &Secret::new("https://send.example/secret".to_owned()),
+        );
+        backend::stash_attachment_text("note.txt", Secret::new("attachment-secret".to_owned()));
+
+        apply(&mut state, Event::Error("Session expired".to_owned()));
+
+        assert!(state.send_form.is_none());
+        assert!(state.send_selected.is_none());
+        assert!(state.ssh_tools.is_none());
+        assert!(state.generator.is_none());
+        assert!(state.attachment_preview.is_none());
+        assert!(state.revealed.is_none());
+        assert!(state.totp.is_none());
+        assert!(state.password.text.is_empty());
+        assert!(state
+            .auth
+            .as_ref()
+            .is_some_and(|a| a.password.text.is_empty()));
+        assert_eq!(backend::revealed_value("field"), None);
+        assert_eq!(backend::totp_value("item"), None);
+        assert_eq!(backend::send_url("send-1"), None);
+        assert_eq!(backend::attachment_text("note.txt"), None);
     }
 
     #[test]

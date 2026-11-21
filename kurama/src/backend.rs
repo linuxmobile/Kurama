@@ -468,6 +468,12 @@ pub fn clear_totp(item_id: &str) {
     }
 }
 
+pub fn clear_all_totp() {
+    if let Ok(mut totp) = TOTP.lock() {
+        *totp = None;
+    }
+}
+
 pub fn stash_revealed(key: &str, value: String) {
     if let Ok(mut revealed) = REVEALED.lock() {
         *revealed = Some((key.to_owned(), Secret::new(value)));
