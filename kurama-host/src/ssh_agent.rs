@@ -23,6 +23,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -120,6 +121,9 @@ pub struct SshAgent {
     approvals: Mutex<HashSet<String>>,
     /// Whether the socket is currently bound.
     running: std::sync::atomic::AtomicBool,
+    listener: Mutex<Option<UnixListener>>,
+    stop_writer: Mutex<Option<UnixStream>>,
+    accept_thread: Mutex<Option<JoinHandle<()>>>,
     /// An unlock prompt is already on screen.
     unlock_prompted: std::sync::atomic::AtomicBool,
     /// Lock generation the "Vault locked" notification was last posted for.
@@ -140,6 +144,9 @@ impl Default for SshAgent {
             next_id: AtomicU64::new(1),
             approvals: Mutex::new(HashSet::new()),
             running: std::sync::atomic::AtomicBool::new(false),
+            listener: Mutex::new(None),
+            stop_writer: Mutex::new(None),
+            accept_thread: Mutex::new(None),
             unlock_prompted: std::sync::atomic::AtomicBool::new(false),
             last_notified_generation: std::sync::atomic::AtomicU64::new(u64::MAX),
             prompt_timeout: PROMPT_TIMEOUT,
@@ -204,6 +211,31 @@ impl SshAgent {
     #[cfg(test)]
     pub(crate) fn has_approvals(&self) -> bool {
         self.approvals.lock().is_ok_and(|a| !a.is_empty())
+    }
+
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Ok(mut writer) = self.stop_writer.lock() {
+            if let Some(mut stream) = writer.take() {
+                let _ = stream.write_all(&[1]);
+            }
+        }
+        if let Ok(mut thread) = self.accept_thread.lock() {
+            if let Some(handle) = thread.take() {
+                let _ = handle.join();
+            }
+        }
+        if let Ok(mut listener) = self.listener.lock() {
+            *listener = None;
+        }
+        if let Ok(mut writer) = self.stop_writer.lock() {
+            *writer = None;
+        }
+        remove_socket();
+    }
+
+    fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
     }
 }
 
@@ -425,10 +457,7 @@ pub fn apply(state: &Arc<DaemonState>) -> std::io::Result<bool> {
     if enabled && !running {
         spawn(state.clone())?;
     } else if !enabled && running {
-        // An unlinked socket can't be connected to; the idle accept thread
-        // ends with the daemon.
-        state.ssh_agent.running.store(false, Ordering::SeqCst);
-        remove_socket();
+        state.ssh_agent.stop();
         crate::log_info!("kurama:ssh-agent", "stopped");
     }
     Ok(enabled)
@@ -445,19 +474,93 @@ pub fn spawn(state: Arc<DaemonState>) -> std::io::Result<()> {
         crate::daemon::validate_socket_path(&path)?;
         let _ = fs::remove_file(&path);
     }
-    let listener = UnixListener::bind(&path)?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    let listener = match UnixListener::bind(&path) {
+        Ok(listener) => listener,
+        Err(e) => {
+            let _ = fs::remove_file(&path);
+            return Err(e);
+        }
+    };
+    if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+        drop(listener);
+        let _ = fs::remove_file(&path);
+        return Err(e);
+    }
+    if let Err(e) = listener.set_nonblocking(true) {
+        drop(listener);
+        let _ = fs::remove_file(&path);
+        return Err(e);
+    }
+    let accept_listener = match listener.try_clone() {
+        Ok(clone) => clone,
+        Err(e) => {
+            drop(listener);
+            let _ = fs::remove_file(&path);
+            return Err(e);
+        }
+    };
+    let (mut stop_reader, stop_writer) = match UnixStream::pair() {
+        Ok(pair) => pair,
+        Err(e) => {
+            drop(accept_listener);
+            drop(listener);
+            let _ = fs::remove_file(&path);
+            return Err(e);
+        }
+    };
+    if let Err(e) = stop_reader.set_nonblocking(true) {
+        drop(stop_writer);
+        drop(stop_reader);
+        drop(accept_listener);
+        drop(listener);
+        let _ = fs::remove_file(&path);
+        return Err(e);
+    }
     crate::log_info!("kurama:ssh-agent", "listening on {}", path.display());
     state.ssh_agent.running.store(true, Ordering::SeqCst);
-    let host: Arc<dyn Host> = state;
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            if !host.agent().running.load(Ordering::SeqCst) {
-                break;
+    if let Ok(mut stored) = state.ssh_agent.listener.lock() {
+        *stored = Some(listener);
+    }
+    if let Ok(mut stored) = state.ssh_agent.stop_writer.lock() {
+        *stored = Some(stop_writer);
+    }
+    let host: Arc<dyn Host> = state.clone();
+    let thread_host = host.clone();
+    let handle = std::thread::Builder::new()
+        .name("ssh-agent-listener".into())
+        .spawn(move || {
+            loop {
+                match accept_listener.accept() {
+                    Ok((stream, _)) => {
+                        if thread_host.agent().is_running() {
+                            accepted(&thread_host, Ok(stream));
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        let mut signal = [0u8; 1];
+                        match stop_reader.read(&mut signal) {
+                            Ok(0) | Ok(_) => break,
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(20));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    Err(_) => break,
+                }
             }
-            accepted(&host, stream);
+        });
+    match handle {
+        Ok(handle) => {
+            if let Ok(mut stored) = state.ssh_agent.accept_thread.lock() {
+                *stored = Some(handle);
+            }
         }
-    });
+        Err(e) => {
+            state.ssh_agent.stop();
+            return Err(e);
+        }
+    }
     Ok(())
 }
 
@@ -2886,6 +2989,33 @@ mod tests {
         assert!(!is_running(&state));
         assert!(!socket_path().exists());
         remove_socket();
+    }
+
+    #[test]
+    fn repeated_spawn_and_stop_releases_the_listener() {
+        let _lock = crate::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let old_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        let state = Arc::new(crate::daemon::DaemonState::new(
+            crate::storage::StorageManager::new(dir.path().join("data.json")),
+            15,
+        ));
+
+        for _ in 0..5 {
+            spawn(state.clone()).unwrap();
+            assert!(state.ssh_agent.is_running());
+            assert!(socket_path().exists());
+            state.ssh_agent.stop();
+            assert!(!state.ssh_agent.is_running());
+            assert!(!socket_path().exists());
+            assert!(state.ssh_agent.accept_thread.lock().unwrap().is_none());
+        }
+
+        match old_runtime {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
     }
 
     #[test]

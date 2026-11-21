@@ -877,6 +877,25 @@ fn acquire_primary_lock() -> Option<std::fs::File> {
     None
 }
 
+fn bind_secure_socket(
+    path: &Path,
+    apply_permissions: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<UnixListener> {
+    let listener = match UnixListener::bind(path) {
+        Ok(listener) => listener,
+        Err(e) => {
+            let _ = fs::remove_file(path);
+            return Err(e);
+        }
+    };
+    if let Err(e) = apply_permissions(path) {
+        drop(listener);
+        let _ = fs::remove_file(path);
+        return Err(e);
+    }
+    Ok(listener)
+}
+
 pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
     let socket_path = get_socket_path();
     if socket_path.exists() {
@@ -891,10 +910,11 @@ pub fn run_daemon_server(state: Arc<DaemonState>) -> std::io::Result<()> {
         crate::fs_util::create_secure_dir_all(parent, 0o700)?;
     }
 
-    let listener = UnixListener::bind(&socket_path)?;
-    let mut perms = fs::metadata(&socket_path)?.permissions();
-    perms.set_mode(0o600);
-    fs::set_permissions(&socket_path, perms)?;
+    let listener = bind_secure_socket(&socket_path, |path| {
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(path, perms)
+    })?;
 
     if let Err(e) = crate::ssh_agent::apply(&state) {
         crate::log_error!("kurama:daemon", "SSH agent failed to start: {}", e);
@@ -1948,6 +1968,23 @@ mod tests {
         let email_code =
             send_req(json!({ "action": "send_two_factor_email", "email": "", "password": "" }));
         assert_eq!(email_code["ok"], false);
+    }
+
+    #[test]
+    fn failed_socket_setup_removes_the_socket() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("daemon.sock");
+        let error = bind_secure_socket(&path, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "simulated permission failure",
+            ))
+        });
+        assert!(error.is_err());
+        assert!(!path.exists(), "a failed bind must not leave a stale socket");
+        let listener = UnixListener::bind(&path).unwrap();
+        drop(listener);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
