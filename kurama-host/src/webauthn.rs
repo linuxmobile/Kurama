@@ -2,9 +2,83 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::env;
+use std::fs;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use url::Url;
+
+const TRUSTED_BIN_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/local/bin"];
+
+static FIDO2_TOKEN: OnceLock<Option<PathBuf>> = OnceLock::new();
+static FIDO2_ASSERT: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+fn trusted_dir(dir: &Path) -> bool {
+    let Ok(meta) = fs::metadata(dir) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        meta.uid() == 0 && meta.permissions().mode() & 0o022 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        true
+    }
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn resolve_helper(env_name: &str, name: &str) -> Option<PathBuf> {
+    if let Some(configured) = env::var_os(env_name) {
+        let path = PathBuf::from(configured);
+        return (path.is_absolute() && is_executable_file(&path)).then_some(path);
+    }
+    TRUSTED_BIN_DIRS
+        .iter()
+        .map(|dir| Path::new(dir).join(name))
+        .find(|candidate| {
+            trusted_dir(candidate.parent().unwrap_or(Path::new("/")))
+                && is_executable_file(candidate)
+        })
+}
+
+fn fido2_token() -> Option<&'static Path> {
+    FIDO2_TOKEN
+        .get_or_init(|| resolve_helper("KURAMA_FIDO2_TOKEN", "fido2-token"))
+        .as_deref()
+}
+
+fn fido2_assert() -> Option<&'static Path> {
+    FIDO2_ASSERT
+        .get_or_init(|| resolve_helper("KURAMA_FIDO2_ASSERT", "fido2-assert"))
+        .as_deref()
+}
+
+fn is_hidraw_device(path: &str) -> bool {
+    path.strip_prefix("/dev/hidraw")
+        .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebAuthnChallenge {
@@ -153,7 +227,10 @@ impl Fido2Status {
 
 /// Checks the operational status of the FIDO2 environment (tool presence and device detection).
 pub fn check_fido2_status() -> Fido2Status {
-    match Command::new("fido2-token").arg("-L").output() {
+    let Some(token) = fido2_token() else {
+        return Fido2Status::ToolNotFound;
+    };
+    match Command::new(token).arg("-L").output() {
         Ok(output) => {
             if !output.status.success() {
                 return Fido2Status::OtherError;
@@ -163,7 +240,7 @@ pub fn check_fido2_status() -> Fido2Status {
                 let trimmed = line.trim();
                 if let Some(pos) = trimmed.find(':') {
                     let dev = &trimmed[..pos];
-                    if dev.starts_with("/dev/hidraw") {
+                    if is_hidraw_device(dev) {
                         return Fido2Status::Available;
                     }
                 }
@@ -177,7 +254,10 @@ pub fn check_fido2_status() -> Fido2Status {
 
 /// Discovers connected FIDO2 USB devices using `fido2-token -L`.
 pub fn find_fido2_device() -> Result<String, String> {
-    let output = Command::new("fido2-token")
+    let Some(token) = fido2_token() else {
+        return Err("libfido2 tools not found. Please install the 'libfido2' package (e.g. sudo pacman -S libfido2).".to_string());
+    };
+    let output = Command::new(token)
         .arg("-L")
         .output()
         .map_err(|e| {
@@ -200,7 +280,7 @@ pub fn find_fido2_device() -> Result<String, String> {
         let trimmed = line.trim();
         if let Some(pos) = trimmed.find(':') {
             let dev = &trimmed[..pos];
-            if dev.starts_with("/dev/hidraw") {
+            if is_hidraw_device(dev) {
                 return Ok(dev.to_string());
             }
         }
@@ -216,7 +296,13 @@ fn run_fido2_assert(
     stdin_payload: &str,
     user_presence: bool,
 ) -> Result<std::process::Output, String> {
-    let mut cmd = Command::new("fido2-assert");
+    if !is_hidraw_device(device_path) {
+        return Err("Refusing to use a non-hidraw device path".to_string());
+    }
+    let Some(assert) = fido2_assert() else {
+        return Err("libfido2 tools not found. Please install the 'libfido2' package (e.g. sudo pacman -S libfido2).".to_string());
+    };
+    let mut cmd = Command::new(assert);
     cmd.arg("-G").arg("-t").arg("pin=false");
     if !user_presence {
         cmd.arg("-t").arg("up=false");
@@ -291,6 +377,9 @@ pub fn perform_fido2_assertion(
     challenge_data: &WebAuthnChallenge,
     device_path: &str,
 ) -> Result<serde_json::Value, String> {
+    if !is_hidraw_device(device_path) {
+        return Err("Refusing to use a non-hidraw device path".to_string());
+    }
     let origin = &challenge_data.origin;
     let client_data_json = serde_json::json!({
         "type": "webauthn.get",
@@ -380,6 +469,51 @@ pub fn create_webauthn_two_factor_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_hidraw_device_matching() {
+        assert!(is_hidraw_device("/dev/hidraw0"));
+        assert!(is_hidraw_device("/dev/hidraw12"));
+        for invalid in [
+            "/dev/hidraw",
+            "/dev/hidrawX",
+            "/dev/hidraw0/escape",
+            "/dev/hidraw0evil",
+            "/tmp/fido2-token",
+            "hidraw0",
+        ] {
+            assert!(!is_hidraw_device(invalid), "accepted {invalid}");
+        }
+        assert!(run_fido2_assert("/dev/hidraw0/escape", "", true)
+            .unwrap_err()
+            .contains("non-hidraw"));
+    }
+
+    #[test]
+    fn test_fido2_helper_resolution_requires_trusted_path() {
+        let _lock = crate::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let mock = dir.path().join("fido2-token");
+        crate::write_test_executable(&mock, "#!/bin/sh\nexit 0\n");
+        let old_override = env::var_os("KURAMA_FIDO2_TOKEN");
+        env::remove_var("KURAMA_FIDO2_TOKEN");
+
+        let resolved = resolve_helper("KURAMA_FIDO2_TOKEN", "fido2-token");
+        assert!(
+            resolved.as_ref().map_or(true, |path| !path.starts_with(dir.path())),
+            "only trusted absolute paths are considered: {resolved:?}"
+        );
+
+        env::set_var("KURAMA_FIDO2_TOKEN", "fido2-token");
+        assert_eq!(resolve_helper("KURAMA_FIDO2_TOKEN", "fido2-token"), None);
+        env::set_var("KURAMA_FIDO2_TOKEN", mock.to_str().unwrap());
+        assert_eq!(resolve_helper("KURAMA_FIDO2_TOKEN", "fido2-token"), Some(mock));
+
+        match old_override {
+            Some(value) => env::set_var("KURAMA_FIDO2_TOKEN", value),
+            None => env::remove_var("KURAMA_FIDO2_TOKEN"),
+        }
+    }
 
     #[test]
     fn test_base64_base64url_roundtrip() {
