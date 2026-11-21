@@ -3236,11 +3236,13 @@ mod tests {
         let _guard = backend::REVEAL_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let mut state = State::default();
-        state.password = TextEdit::new("master-password");
         let mut auth = empty_auth_draft("https://vault.example.com");
         auth.password = TextEdit::new("typed-password").secure();
-        state.auth = Some(auth);
+        let mut state = State {
+            password: TextEdit::new("master-password"),
+            auth: Some(auth),
+            ..State::default()
+        };
         let mut send = empty_send_draft();
         send.text = TextEdit::new("send-secret").secure();
         send.password = TextEdit::new("send-password").secure();
@@ -3361,8 +3363,10 @@ mod tests {
 
     #[test]
     fn auth_challenges_switch_the_active_form() {
-        let mut state = State::default();
-        state.auth = Some(empty_auth_draft("https://vault.example.com"));
+        let mut state = State {
+            auth: Some(empty_auth_draft("https://vault.example.com")),
+            ..State::default()
+        };
         apply_auth_outcome(
             &mut state,
             AuthOutcome {
@@ -3396,8 +3400,10 @@ mod tests {
 
     #[test]
     fn fido2_challenge_switches_to_security_key_form() {
-        let mut state = State::default();
-        state.auth = Some(empty_auth_draft("https://vault.example.com"));
+        let mut state = State {
+            auth: Some(empty_auth_draft("https://vault.example.com")),
+            ..State::default()
+        };
         apply_auth_outcome(
             &mut state,
             AuthOutcome {

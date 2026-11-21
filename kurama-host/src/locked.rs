@@ -54,7 +54,6 @@ unsafe impl<const N: usize> Send for LockedMemory<N> {}
 unsafe impl<const N: usize> Sync for LockedMemory<N> {}
 
 pub type LockedKey32 = LockedMemory<32>;
-pub type LockedKey64 = LockedMemory<64>;
 
 impl<const N: usize> LockedMemory<N> {
     pub fn new_zeroed() -> Self {
