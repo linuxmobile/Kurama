@@ -2555,6 +2555,75 @@ fn vault(s: &State, dark: bool) -> El {
     body.key("vault")
 }
 
+fn trash_nav(s: &State, dark: bool) -> El {
+    let t = tok::theme(dark);
+    let active = s.location == Location::Trash;
+    el().key("trash-nav")
+        .h(34.0)
+        .px(10.0)
+        .radius(8.0)
+        .role("button")
+        .label("Trash")
+        .checked(active)
+        .focusable(true)
+        .fill(if active {
+            selected_row(dark)
+        } else {
+            Color::TRANSPARENT
+        })
+        .hover(t.hover)
+        .press(t.press)
+        .cursor(Cursor::Pointer)
+        .on_press(|s: &mut State| {
+            if s.location != Location::Trash {
+                open_trash(s);
+            }
+        })
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .gap(8.0)
+                .child(
+                    text("Trash")
+                        .font(type_::LABEL)
+                        .color(if active { accent(dark) } else { t.text })
+                        .grow(1.0),
+                )
+                .child(
+                    text(if active {
+                        s.rows.len().to_string()
+                    } else {
+                        String::new()
+                    })
+                    .font(META)
+                    .color(t.text_secondary),
+                ),
+        )
+}
+
+fn back_to_vault_nav(dark: bool) -> El {
+    let t = tok::theme(dark);
+    el().key("vault-nav")
+        .h(34.0)
+        .px(10.0)
+        .radius(8.0)
+        .role("button")
+        .label("Back to vault")
+        .focusable(true)
+        .fill(Color::TRANSPARENT)
+        .hover(t.hover)
+        .press(t.press)
+        .cursor(Cursor::Pointer)
+        .on_press(|s: &mut State| select_category(s, Category::All))
+        .child(
+            text("Back to vault")
+                .font(type_::LABEL)
+                .color(t.text)
+                .grow(1.0),
+        )
+}
+
 fn sidebar(s: &State, dark: bool) -> El {
     let t = tok::theme(dark);
     let mut nav = col()
@@ -2564,14 +2633,29 @@ fn sidebar(s: &State, dark: bool) -> El {
         .padding(12.0)
         .gap(3.0)
         .fill(t.card)
-        .border(1.0, t.card_border)
-        .child(
-            text("LIBRARY")
-                .key("library-label")
-                .font(SECTION_TITLE)
-                .color(t.text_secondary)
-                .padding(8.0),
-        );
+        .border(1.0, t.card_border);
+
+    if s.location == Location::Trash {
+        return nav
+            .child(
+                text("TRASH")
+                    .key("trash-label")
+                    .font(SECTION_TITLE)
+                    .color(t.text_secondary)
+                    .padding(8.0),
+            )
+            .child(back_to_vault_nav(dark))
+            .child(trash_nav(s, dark))
+            .child(el().grow(1.0));
+    }
+
+    nav = nav.child(
+        text("LIBRARY")
+            .key("library-label")
+            .font(SECTION_TITLE)
+            .color(t.text_secondary)
+            .padding(8.0),
+    );
 
     for category in Category::ALL {
         let active = s.category == category;
@@ -2667,36 +2751,9 @@ fn sidebar(s: &State, dark: bool) -> El {
                 ),
         );
     }
-    nav = nav.child(folders).child(
-        el().key("trash-nav")
-            .h(34.0)
-            .px(10.0)
-            .radius(8.0)
-            .role("button")
-            .label("Trash")
-            .checked(s.location == Location::Trash)
-            .focusable(true)
-            .fill(if s.location == Location::Trash {
-                selected_row(dark)
-            } else {
-                Color::TRANSPARENT
-            })
-            .hover(t.hover)
-            .press(t.press)
-            .cursor(Cursor::Pointer)
-            .on_press(|s: &mut State| open_trash(s))
-            .child(
-                text("Trash")
-                    .font(type_::LABEL)
-                    .color(if s.location == Location::Trash {
-                        accent(dark)
-                    } else {
-                        t.text
-                    }),
-            ),
-    );
-
-    nav.child(el().grow(1.0))
+    nav.child(folders)
+        .child(trash_nav(s, dark))
+        .child(el().grow(1.0))
 }
 
 fn item_list(s: &State, dark: bool) -> El {
