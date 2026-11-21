@@ -325,7 +325,7 @@ pub struct State {
     pub agent_socket: String,
     pub syncing: bool,
     pub sync_error: Option<String>,
-    pub revealed: Option<String>,
+    pub revealed: Option<(String, String)>,
     pub totp: Option<TotpMeta>,
     pub busy: bool,
     pub notice: Option<String>,
@@ -634,13 +634,17 @@ pub fn select_item(state: &mut State, id: String) {
 }
 
 pub fn toggle_reveal(state: &mut State, key: String) {
-    if state.revealed.as_deref() == Some(key.as_str()) {
-        clear_reveal(state);
-        return;
-    }
     let Some(item_id) = state.selected.clone() else {
         return;
     };
+    if state
+        .revealed
+        .as_ref()
+        .is_some_and(|(stored_item, stored_key)| stored_item == &item_id && stored_key == &key)
+    {
+        clear_reveal(state);
+        return;
+    }
     clear_reveal(state);
     send_quiet(state, Request::RevealField { item_id, key });
 }
@@ -1960,7 +1964,7 @@ fn apply(state: &mut State, event: Event) {
                     .as_ref()
                     .is_some_and(|details| details.fields.iter().any(|field| field.key == key));
             if known {
-                state.revealed = Some(key);
+                state.revealed = Some((item_id, key));
             }
         }
         Event::Notices { cursor, notices } => {
@@ -3255,13 +3259,13 @@ mod tests {
             is_text: true,
             preview: true,
         });
-        state.revealed = Some("field".to_owned());
+        state.revealed = Some(("item".to_owned(), "field".to_owned()));
         state.totp = Some(TotpMeta {
             item_id: "item".to_owned(),
             ttl: 30,
             period: 30,
         });
-        backend::stash_revealed("field", "revealed-secret".to_owned());
+        backend::stash_revealed("item", "field", "revealed-secret".to_owned());
         backend::stash_totp("item", "123456".to_owned());
         backend::stash_send_url(
             "send-1",
@@ -3283,7 +3287,7 @@ mod tests {
             .auth
             .as_ref()
             .is_some_and(|a| a.password.text.is_empty()));
-        assert_eq!(backend::revealed_value("field"), None);
+        assert_eq!(backend::revealed_value("item", "field"), None);
         assert_eq!(backend::totp_value("item"), None);
         assert_eq!(backend::send_url("send-1"), None);
         assert_eq!(backend::attachment_text("note.txt"), None);
@@ -3820,7 +3824,7 @@ mod tests {
             request,
             Request::RevealField { item_id, key } if item_id == "1" && key == "password"
         )));
-        backend::stash_revealed("password", "super-secret".to_owned());
+        backend::stash_revealed("1", "password", "super-secret".to_owned());
         apply(
             &mut state,
             Event::Revealed {
@@ -3828,16 +3832,43 @@ mod tests {
                 key: "password".to_owned(),
             },
         );
-        assert_eq!(state.revealed.as_deref(), Some("password"));
         assert_eq!(
-            backend::revealed_value("password").as_deref(),
+            state
+                .revealed
+                .as_ref()
+                .map(|(id, key)| (id.as_str(), key.as_str())),
+            Some(("1", "password"))
+        );
+        assert_eq!(
+            backend::revealed_value("1", "password").as_deref(),
             Some("super-secret")
         );
+        assert_eq!(backend::revealed_value("2", "password"), None);
         assert!(!format!("{:?}", state.revealed).contains("super-secret"));
 
         toggle_reveal(&mut state, "password".to_owned());
         assert_eq!(state.revealed, None);
-        assert_eq!(backend::revealed_value("password"), None);
+        assert_eq!(backend::revealed_value("1", "password"), None);
+    }
+
+    #[test]
+    fn stale_reveal_from_another_item_is_rejected() {
+        let _guard = backend::REVEAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut state = State::default();
+        scene_populated(&mut state);
+        backend::stash_revealed("2", "password", "other-secret".to_owned());
+
+        apply(
+            &mut state,
+            Event::Revealed {
+                item_id: "2".to_owned(),
+                key: "password".to_owned(),
+            },
+        );
+        assert_eq!(state.revealed, None);
+        assert_eq!(backend::revealed_value("1", "password"), None);
     }
 
     #[test]
@@ -3849,13 +3880,13 @@ mod tests {
         scene_populated(&mut state);
         let (tx, rx) = mpsc::channel();
         state.requests = Some(tx);
-        backend::stash_revealed("password", "old-secret".to_owned());
-        state.revealed = Some("password".to_owned());
+        backend::stash_revealed("1", "password", "old-secret".to_owned());
+        state.revealed = Some(("1".to_owned(), "password".to_owned()));
 
         select_item(&mut state, "2".to_owned());
         assert_eq!(state.selected.as_deref(), Some("2"));
         assert_eq!(state.revealed, None);
-        assert_eq!(backend::revealed_value("password"), None);
+        assert_eq!(backend::revealed_value("1", "password"), None);
         assert!(rx.try_iter().any(|request| matches!(
             request,
             Request::Details { id } if id == "2"

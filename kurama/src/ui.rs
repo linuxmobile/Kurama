@@ -2903,13 +2903,15 @@ fn details(s: &State, dark: bool) -> El {
         .child(field("Type", type_label.as_ref(), dark));
     if let Some(details) = s.details.as_ref().filter(|details| details.id == item.id) {
         for detail in &details.fields {
-            let revealed = s.revealed.as_deref() == Some(detail.key.as_str());
+            let revealed = s
+                .revealed
+                .as_ref()
+                .is_some_and(|(id, key)| id == &details.id && key == &detail.key);
             let sensitive = matches!(detail.value, FieldValue::Masked);
             let shown = match &detail.value {
                 FieldValue::Text(value) => value.clone(),
-                FieldValue::Masked if revealed => {
-                    revealed_value(&detail.key).unwrap_or_else(|| "••••••••".to_owned())
-                }
+                FieldValue::Masked if revealed => revealed_value(&details.id, &detail.key)
+                    .unwrap_or_else(|| "••••••••".to_owned()),
                 FieldValue::Masked => "••••••••".to_owned(),
             };
             let shown = if detail.key == "totp" {

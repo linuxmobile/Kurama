@@ -438,7 +438,7 @@ impl Drop for Secret {
     }
 }
 
-static REVEALED: Mutex<Option<(String, Secret)>> = Mutex::new(None);
+static REVEALED: Mutex<Option<(String, String, Secret)>> = Mutex::new(None);
 
 #[cfg(test)]
 pub static REVEAL_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -474,16 +474,16 @@ pub fn clear_all_totp() {
     }
 }
 
-pub fn stash_revealed(key: &str, value: String) {
+pub fn stash_revealed(item_id: &str, key: &str, value: String) {
     if let Ok(mut revealed) = REVEALED.lock() {
-        *revealed = Some((key.to_owned(), Secret::new(value)));
+        *revealed = Some((item_id.to_owned(), key.to_owned(), Secret::new(value)));
     }
 }
 
-pub fn revealed_value(key: &str) -> Option<String> {
+pub fn revealed_value(item_id: &str, key: &str) -> Option<String> {
     let revealed = REVEALED.lock().ok()?;
-    let (stored_key, value) = revealed.as_ref()?;
-    (stored_key == key).then(|| value.as_str().to_owned())
+    let (stored_item, stored_key, value) = revealed.as_ref()?;
+    (stored_item == item_id && stored_key == key).then(|| value.as_str().to_owned())
 }
 
 pub fn clear_revealed() {
@@ -492,17 +492,22 @@ pub fn clear_revealed() {
     }
 }
 
-static SEND_URLS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+static SEND_URLS: Mutex<Option<HashMap<String, Secret>>> = Mutex::new(None);
 
 pub fn stash_send_url(id: &str, url: &Secret) {
     if let Ok(mut urls) = SEND_URLS.lock() {
         urls.get_or_insert_with(HashMap::new)
-            .insert(id.to_owned(), url.as_str().to_owned());
+            .insert(id.to_owned(), url.clone());
     }
 }
 
 pub fn send_url(id: &str) -> Option<String> {
-    SEND_URLS.lock().ok()?.as_ref()?.get(id).cloned()
+    SEND_URLS
+        .lock()
+        .ok()?
+        .as_ref()?
+        .get(id)
+        .map(|url| url.as_str().to_owned())
 }
 
 pub fn clear_send_urls() {
@@ -649,7 +654,7 @@ pub fn perform(request: Request) -> Event {
         },
         Request::RevealField { item_id, key } => match revealed_field(&item_id, &key) {
             Ok(value) => {
-                stash_revealed(&key, value);
+                stash_revealed(&item_id, &key, value);
                 Event::Revealed { item_id, key }
             }
             Err(error) => Event::Error(error),
@@ -2273,13 +2278,14 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         clear_revealed();
-        stash_revealed("store-test-key", "super-secret".to_owned());
+        stash_revealed("item-1", "store-test-key", "super-secret".to_owned());
         assert_eq!(
-            revealed_value("store-test-key").as_deref(),
+            revealed_value("item-1", "store-test-key").as_deref(),
             Some("super-secret")
         );
-        assert_eq!(revealed_value("notes"), None);
+        assert_eq!(revealed_value("item-1", "notes"), None);
+        assert_eq!(revealed_value("item-2", "store-test-key"), None);
         clear_revealed();
-        assert_eq!(revealed_value("store-test-key"), None);
+        assert_eq!(revealed_value("item-1", "store-test-key"), None);
     }
 }

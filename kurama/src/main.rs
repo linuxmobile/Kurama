@@ -709,10 +709,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         backend::clear_revealed();
-        backend::stash_revealed("ui-reveal-test", "shown-secret".to_owned());
+        backend::stash_revealed("1", "ui-reveal-test", "shown-secret".to_owned());
         let mut rt = runtime(|state| {
             state::scene_populated(state);
-            state.revealed = Some("ui-reveal-test".to_owned());
+            state.revealed = Some(("1".to_owned(), "ui-reveal-test".to_owned()));
             state.details.as_mut().unwrap().fields.push(ItemField {
                 key: "ui-reveal-test".to_owned(),
                 label: "Test secret".to_owned(),
