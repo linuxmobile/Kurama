@@ -2569,14 +2569,8 @@ pub fn run() -> ExitCode {
                     }
 
                     let target_dir = out_dir.unwrap_or_else(|| PathBuf::from("."));
-                    let priv_filename = private_key_file.unwrap_or_else(|| {
-                        let safe_name = ssh_item.name.to_lowercase().replace([' ', '/'], "_");
-                        if safe_name.is_empty() {
-                            "id_ssh_key".to_string()
-                        } else {
-                            safe_name
-                        }
-                    });
+                    let priv_filename = private_key_file
+                        .unwrap_or_else(|| crate::ssh::default_key_filename(&ssh_item.name));
                     let pub_filename =
                         public_key_file.unwrap_or_else(|| format!("{}.pub", priv_filename));
 

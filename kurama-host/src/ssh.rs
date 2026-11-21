@@ -176,6 +176,28 @@ pub fn parse_private_key(raw_pem: &str) -> Result<GeneratedSshKey, String> {
     })
 }
 
+/// Derives a safe default filename from a vault item name.
+pub fn default_key_filename(item_name: &str) -> String {
+    let sanitized: String = item_name
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.bytes().any(|b| b.is_ascii_alphanumeric())
+        && crate::attachment::is_safe_path_component(&sanitized)
+    {
+        sanitized
+    } else {
+        "id_ssh_key".to_owned()
+    }
+}
+
 /// Atomically writes named private key (0600) and public key (0644) files to target directory.
 pub fn write_keypair_files_named(
     out_dir: &Path,
@@ -184,6 +206,14 @@ pub fn write_keypair_files_named(
     private_key: &str,
     public_key: &str,
 ) -> std::io::Result<(PathBuf, PathBuf)> {
+    if !crate::attachment::is_safe_path_component(priv_filename)
+        || !crate::attachment::is_safe_path_component(pub_filename)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Unsafe SSH key filename",
+        ));
+    }
     crate::fs_util::create_secure_dir_all(out_dir, 0o700)?;
 
     let priv_path = out_dir.join(priv_filename);
@@ -224,6 +254,31 @@ pub fn write_keypair_files(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_default_key_filename_is_safe() {
+        assert_eq!(default_key_filename("My SSH Key"), "my_ssh_key");
+        assert_eq!(default_key_filename("../escape"), "___escape");
+        assert_eq!(default_key_filename(".."), "id_ssh_key");
+        assert_eq!(default_key_filename(""), "id_ssh_key");
+        for name in ["my_ssh_key", "___escape", "id_ssh_key"] {
+            assert!(crate::attachment::is_safe_path_component(name));
+        }
+    }
+
+    #[test]
+    fn test_unsafe_key_filenames_are_rejected_before_write() {
+        let dir = tempdir().unwrap();
+        let result = write_keypair_files_named(
+            dir.path(),
+            "../stolen-key",
+            "stolen.pub",
+            "private",
+            "public",
+        );
+        assert!(result.is_err());
+        assert!(!dir.path().parent().unwrap().join("stolen-key").exists());
+    }
 
     #[test]
     fn test_generate_ed25519_keypair() {
