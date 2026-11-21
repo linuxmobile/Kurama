@@ -14,7 +14,13 @@ pub fn create_secure_dir_all<P: AsRef<Path>>(path: P, mode: u32) -> std::io::Res
     {
         use std::os::unix::fs::PermissionsExt;
         if p != Path::new("/tmp") && p != Path::new("/") {
-            let metadata = fs::metadata(p)?;
+            let metadata = fs::symlink_metadata(p)?;
+            if !metadata.file_type().is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Refusing to secure a symlink or non-directory path",
+                ));
+            }
             let mut perms = metadata.permissions();
             if perms.mode() & 0o777 != mode {
                 perms.set_mode(mode);
@@ -41,7 +47,15 @@ pub fn atomic_write_file<P: AsRef<Path>>(
         fs::create_dir_all(parent)?;
     }
 
-    let filename = dest.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let filename = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Destination filename must be valid UTF-8",
+            )
+        })?;
     let nonce = OsRng.next_u64();
     let temp_path = parent.join(format!(
         ".tmp_{}_{}_{}",
@@ -118,7 +132,13 @@ pub fn ensure_secure_permissions<P: AsRef<Path>>(path: P, mode: u32) -> std::io:
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let metadata = fs::metadata(path.as_ref())?;
+        let metadata = fs::symlink_metadata(path.as_ref())?;
+        if metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Refusing to chmod a symlink",
+            ));
+        }
         let mut perms = metadata.permissions();
         if perms.mode() & 0o777 != mode {
             perms.set_mode(mode);
@@ -137,6 +157,33 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_secure_dir_rejects_symlink() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(create_secure_dir_all(&link, 0o700).is_err());
+        let meta = fs::metadata(&target).unwrap();
+        assert_ne!(meta.permissions().mode() & 0o777, 0o700);
+        assert!(ensure_secure_permissions(&link, 0o600).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_atomic_write_rejects_non_utf8_filename() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempdir().unwrap();
+        let path = std::path::PathBuf::from(OsString::from_vec(vec![0xff]));
+        let full = dir.path().join(path);
+        assert!(atomic_write_file(&full, b"payload", 0o600).is_err());
+    }
 
     #[test]
     fn test_create_secure_dir_all() {
