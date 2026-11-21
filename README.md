@@ -16,6 +16,10 @@ The UI is built with [Rune](https://github.com/anomalyco/rune), whose `examples/
 - `kurama-host/` — backend library and daemon, renamed from `omawarden`.
 - `rune/` — pinned Rune source tree used as a local path dependency.
 
+## Setup
+
+The Rune source URL and revision are pinned in `rune-pin.toml`. Run `./scripts/setup-rune.sh` on a fresh checkout; the build verifies `rune/` is at that revision and fails clearly on a mismatch.
+
 ## Running
 
 Start the `kurama-host` daemon first, then the UI:
