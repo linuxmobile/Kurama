@@ -1,4 +1,8 @@
-# Kurama
+# 蔵馬 (Kurama)
+
+> The treasury keeps its own counsel.
+
+**蔵 (kura)** is the Japanese word for _storehouse_ — the quiet room where what matters is kept. Kurama gives that room a guardian and a key: a native desktop vault that holds your passwords, Sends and SSH secrets close, while only metadata is allowed to reach the light.
 
 Kurama is a native desktop vault application built with [Rune](https://github.com/anomalyco/rune). It uses the `kurama-host` backend — Bitwarden/Vaultwarden API client, encryption, local cache, daemon and SSH agent — in place of the original Omarchy QML overlay.
 
