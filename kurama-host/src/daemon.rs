@@ -1172,10 +1172,7 @@ fn auth_result_json(result: crate::auth::AuthResult) -> Value {
     }
 }
 
-fn batch_item_result(
-    ids: Vec<String>,
-    mut apply: impl FnMut(&str) -> Result<(), String>,
-) -> Value {
+fn batch_item_result(ids: Vec<String>, mut apply: impl FnMut(&str) -> Result<(), String>) -> Value {
     let mut succeeded = Vec::new();
     let mut failed = Vec::new();
     for id in ids {
@@ -1698,6 +1695,13 @@ fn handle_client_with_timeouts(
             }
         }
         "list" => json!(state.vault_mgr.get_items()),
+        "favicon" => {
+            let host = req.get("host").and_then(Value::as_str).unwrap_or("");
+            match crate::favicon::fetch(host) {
+                Ok(bytes) => json!({ "ok": true, "data": crate::crypto::BASE64.encode(bytes) }),
+                Err(error) => json!({ "ok": false, "error": error }),
+            }
+        }
         "search" => {
             let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let category = req.get("category").and_then(|v| v.as_str());
@@ -1992,8 +1996,16 @@ mod tests {
     fn socket_state_polling_waits_for_changes() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("daemon.sock");
-        assert!(!wait_for_socket_state(&path, true, Duration::from_millis(30)));
-        assert!(wait_for_socket_state(&path, false, Duration::from_millis(30)));
+        assert!(!wait_for_socket_state(
+            &path,
+            true,
+            Duration::from_millis(30)
+        ));
+        assert!(wait_for_socket_state(
+            &path,
+            false,
+            Duration::from_millis(30)
+        ));
 
         let thread_path = path.clone();
         let handle = std::thread::spawn(move || {
@@ -2019,7 +2031,10 @@ mod tests {
             ))
         });
         assert!(error.is_err());
-        assert!(!path.exists(), "a failed bind must not leave a stale socket");
+        assert!(
+            !path.exists(),
+            "a failed bind must not leave a stale socket"
+        );
         let listener = UnixListener::bind(&path).unwrap();
         drop(listener);
         let _ = fs::remove_file(&path);
@@ -2027,16 +2042,14 @@ mod tests {
 
     #[test]
     fn batch_results_report_partial_success() {
-        let result = batch_item_result(
-            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
-            |id| {
+        let result =
+            batch_item_result(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()], |id| {
                 if id == "b" {
                     Err("denied".to_owned())
                 } else {
                     Ok(())
                 }
-            },
-        );
+            });
         assert_eq!(result["ok"], false);
         assert_eq!(result["partial"], true);
         assert_eq!(result["succeeded"], json!(["a", "c"]));
@@ -2057,7 +2070,9 @@ mod tests {
             15,
         ));
         let (mut client, server) = UnixStream::pair().unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let handle = std::thread::spawn(move || {
             handle_client_with_timeouts(
                 server,
@@ -2109,7 +2124,9 @@ mod tests {
             )
         });
 
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let mut line = String::new();
         assert_eq!(BufReader::new(&client).read_line(&mut line).unwrap(), 0);
         assert!(handle.join().unwrap().is_err(), "idle client must time out");
@@ -2138,9 +2155,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        state
-            .ssh_agent
-            .remember_approval("fingerprint|client|app");
+        state.ssh_agent.remember_approval("fingerprint|client|app");
         assert!(state.ssh_agent.has_approvals());
 
         let (mut client, server) = UnixStream::pair().unwrap();

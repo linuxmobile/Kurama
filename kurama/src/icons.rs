@@ -118,6 +118,138 @@ static ACTION_USER: Icon = Icon {
     body: r#"<circle cx="12" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5 20c0-3.8 3.1-6.5 7-6.5s7 2.7 7 6.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>"#,
 };
 
+static ACTION_PANEL: Icon = Icon {
+    name: "kurama-action-panel",
+    view: 24.0,
+    body: r#"<rect x="3" y="4.5" width="18" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9.5 4.5v15" fill="none" stroke="currentColor" stroke-width="1.8"/>"#,
+};
+
+static ACTION_SEARCH: Icon = Icon {
+    name: "kurama-action-search",
+    view: 24.0,
+    body: r#"<circle cx="10.8" cy="10.8" r="6.3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.5 15.5 5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>"#,
+};
+
+static ACTION_CHEVRON_LEFT: Icon = Icon {
+    name: "kurama-action-chevron-left",
+    view: 24.0,
+    body: r#"<path d="m14.5 5-7 7 7 7" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_CHEVRON_RIGHT: Icon = Icon {
+    name: "kurama-action-chevron-right",
+    view: 24.0,
+    body: r#"<path d="m9.5 5 7 7-7 7" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_STAR: Icon = Icon {
+    name: "kurama-action-star",
+    view: 24.0,
+    body: r#"<path d="m12 3.2 2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_STAR_FILLED: Icon = Icon {
+    name: "kurama-action-star-filled",
+    view: 24.0,
+    body: r#"<path d="m12 3.2 2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9Z" fill="currentColor"/>"#,
+};
+
+static ACTION_COPY: Icon = Icon {
+    name: "kurama-action-copy",
+    view: 24.0,
+    body: r#"<rect x="8" y="8" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" fill="none" stroke="currentColor" stroke-width="1.8"/>"#,
+};
+
+static ACTION_EDIT: Icon = Icon {
+    name: "kurama-action-edit",
+    view: 24.0,
+    body: r#"<path d="m4 16.5-.6 4 4-.6L19 8.3 15.7 5 4 16.5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m13.8 6.9 3.3 3.3" fill="none" stroke="currentColor" stroke-width="1.8"/>"#,
+};
+
+static ACTION_EXTERNAL: Icon = Icon {
+    name: "kurama-action-external",
+    view: 24.0,
+    body: r#"<path d="M14 4h6v6M20 4l-8.5 8.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 14.5V19a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 19V6.5A1.5 1.5 0 0 1 5 5h4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>"#,
+};
+
+static ACTION_GLOBE: Icon = Icon {
+    name: "kurama-action-globe",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M3.7 12h16.6M12 3.5c2.4 2.3 3.6 5.1 3.6 8.5S14.4 18.2 12 20.5c-2.4-2.3-3.6-5.1-3.6-8.5S9.6 5.8 12 3.5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_EYE: Icon = Icon {
+    name: "kurama-action-eye",
+    view: 24.0,
+    body: r#"<path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.8" fill="none" stroke="currentColor" stroke-width="1.8"/>"#,
+};
+
+static ACTION_EYE_OFF: Icon = Icon {
+    name: "kurama-action-eye-off",
+    view: 24.0,
+    body: r#"<path d="M4 4l16 16M9.7 6.2A9.7 9.7 0 0 1 12 6c6 0 9.5 6 9.5 6a16 16 0 0 1-3.2 3.7M6.2 8.2A16 16 0 0 0 2.5 12S6 18 12 18a9.4 9.4 0 0 0 3-.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_FOLDER: Icon = Icon {
+    name: "kurama-action-folder",
+    view: 24.0,
+    body: r#"<path d="M3 7a2 2 0 0 1 2-2h4.4l2 2.4H19a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_PLUS: Icon = Icon {
+    name: "kurama-action-plus",
+    view: 24.0,
+    body: r#"<path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>"#,
+};
+
+static ACTION_TRASH: Icon = Icon {
+    name: "kurama-action-trash",
+    view: 24.0,
+    body: r#"<path d="M4 7h16M9 7V4.5h6V7M6 7l1 13h10l1-13M10 10.5v6M14 10.5v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_GRID: Icon = Icon {
+    name: "kurama-action-grid",
+    view: 24.0,
+    body: r#"<rect x="3.5" y="3.5" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>"#,
+};
+
+static ACTION_KEY: Icon = Icon {
+    name: "kurama-action-key",
+    view: 24.0,
+    body: r#"<circle cx="8" cy="9" r="4.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m11 12 9 9M16.5 16.5l2-2M14 14l2-2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>"#,
+};
+
+static ACTION_SHIELD: Icon = Icon {
+    name: "kurama-action-shield",
+    view: 24.0,
+    body: r#"<path d="M12 2.5 4.5 5.5v6c0 4.8 3.1 8.5 7.5 10 4.4-1.5 7.5-5.2 7.5-10v-6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 8v5M12 16h.01" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>"#,
+};
+
+static ACTION_COLLECTION: Icon = Icon {
+    name: "kurama-action-collection",
+    view: 24.0,
+    body: r#"<path d="M4 20V10M9.3 20V4M14.7 20v-7M20 20V7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>"#,
+};
+
+static ACTION_ATTACH: Icon = Icon {
+    name: "kurama-action-attach",
+    view: 24.0,
+    body: r#"<path d="M20 11.5 12.6 19a4.6 4.6 0 0 1-6.5-6.5l8.2-8.2a3 3 0 0 1 4.2 4.2l-8.1 8.2a1.4 1.4 0 0 1-2-2l7.3-7.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_CLOCK: Icon = Icon {
+    name: "kurama-action-clock",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ACTION_FILTER: Icon = Icon {
+    name: "kurama-action-filter",
+    view: 24.0,
+    body: r##"<path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="9" cy="7" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="15" cy="17" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/>"##,
+};
+
 pub fn action(name: &str) -> &'static Icon {
     match name {
         "new" => &ACTION_NEW,
@@ -133,6 +265,31 @@ pub fn action(name: &str) -> &'static Icon {
         "logout" => &ACTION_LOGOUT,
         "vault" => &ACTION_VAULT,
         "user" => &ACTION_USER,
+        "card" => &CARD,
+        "note" => &NOTE,
+        "login" => &LOGIN,
+        "panel" => &ACTION_PANEL,
+        "search" => &ACTION_SEARCH,
+        "chevron-left" => &ACTION_CHEVRON_LEFT,
+        "chevron-right" => &ACTION_CHEVRON_RIGHT,
+        "star" => &ACTION_STAR,
+        "star-filled" => &ACTION_STAR_FILLED,
+        "copy" => &ACTION_COPY,
+        "edit" => &ACTION_EDIT,
+        "external" => &ACTION_EXTERNAL,
+        "globe" => &ACTION_GLOBE,
+        "eye" => &ACTION_EYE,
+        "eye-off" => &ACTION_EYE_OFF,
+        "folder" => &ACTION_FOLDER,
+        "plus" => &ACTION_PLUS,
+        "trash" => &ACTION_TRASH,
+        "grid" => &ACTION_GRID,
+        "key" => &ACTION_KEY,
+        "shield" => &ACTION_SHIELD,
+        "collection" => &ACTION_COLLECTION,
+        "attach" => &ACTION_ATTACH,
+        "filter" => &ACTION_FILTER,
+        "clock" => &ACTION_CLOCK,
         _ => &ITEM,
     }
 }

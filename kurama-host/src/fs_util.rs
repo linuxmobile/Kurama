@@ -47,15 +47,12 @@ pub fn atomic_write_file<P: AsRef<Path>>(
         fs::create_dir_all(parent)?;
     }
 
-    let filename = dest
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Destination filename must be valid UTF-8",
-            )
-        })?;
+    let filename = dest.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Destination filename must be valid UTF-8",
+        )
+    })?;
     let nonce = OsRng.next_u64();
     let temp_path = parent.join(format!(
         ".tmp_{}_{}_{}",

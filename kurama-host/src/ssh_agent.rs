@@ -528,26 +528,24 @@ pub fn spawn(state: Arc<DaemonState>) -> std::io::Result<()> {
     let thread_host = host.clone();
     let handle = std::thread::Builder::new()
         .name("ssh-agent-listener".into())
-        .spawn(move || {
-            loop {
-                match accept_listener.accept() {
-                    Ok((stream, _)) => {
-                        if thread_host.agent().is_running() {
-                            accepted(&thread_host, Ok(stream));
-                        }
+        .spawn(move || loop {
+            match accept_listener.accept() {
+                Ok((stream, _)) => {
+                    if thread_host.agent().is_running() {
+                        accepted(&thread_host, Ok(stream));
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        let mut signal = [0u8; 1];
-                        match stop_reader.read(&mut signal) {
-                            Ok(0) | Ok(_) => break,
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                std::thread::sleep(Duration::from_millis(20));
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    Err(_) => break,
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let mut signal = [0u8; 1];
+                    match stop_reader.read(&mut signal) {
+                        Ok(0) | Ok(_) => break,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                Err(_) => break,
             }
         });
     match handle {

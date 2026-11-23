@@ -5,6 +5,7 @@
 //! one place rather than repeated across views.
 
 use rune::{tok, Color, TextStyle};
+use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 pub enum ThemePreference {
@@ -70,6 +71,75 @@ pub fn accent(dark: bool) -> Color {
 
 pub fn selected_row(dark: bool) -> Color {
     accent(dark).alpha(if dark { 0.16 } else { 0.12 })
+}
+
+#[derive(Clone, Copy)]
+pub struct Palette {
+    pub canvas: Color,
+    pub sidebar: Color,
+    pub list: Color,
+    pub panel: Color,
+    pub raised: Color,
+    pub separator: Color,
+    pub text: Color,
+    pub muted: Color,
+    pub accent: Color,
+    pub selected: Color,
+    pub selected_text: Color,
+    pub danger: Color,
+    pub site_tile: Color,
+    pub site_glyph: Color,
+}
+
+fn hex(value: &str) -> Color {
+    rune::color::hex(value).unwrap_or(Color::WHITE)
+}
+
+impl Palette {
+    pub fn new(dark: bool) -> Self {
+        static DARK: OnceLock<Palette> = OnceLock::new();
+        static LIGHT: OnceLock<Palette> = OnceLock::new();
+        let cache = if dark { &DARK } else { &LIGHT };
+        *cache.get_or_init(|| Palette::build(dark))
+    }
+
+    fn build(dark: bool) -> Self {
+        if dark {
+            Self {
+                canvas: hex("#171718"),
+                sidebar: hex("#1e1e20"),
+                list: hex("#1a1a1c"),
+                panel: hex("#202022"),
+                raised: hex("#29292c"),
+                separator: hex("#303034"),
+                text: hex("#f4f4f5"),
+                muted: hex("#9b9ba5"),
+                accent: hex("#3b82f6"),
+                selected: hex("#3b82f6"),
+                selected_text: Color::WHITE,
+                danger: hex("#ef5a5a"),
+                site_tile: hex("#f1f2f4"),
+                site_glyph: hex("#4b5563"),
+            }
+        } else {
+            Self {
+                canvas: hex("#f7f7f8"),
+                sidebar: hex("#f2f3f5"),
+                list: hex("#fbfbfc"),
+                panel: hex("#ffffff"),
+                raised: hex("#f4f5f7"),
+                separator: hex("#e4e6ea"),
+                text: hex("#18181b"),
+                muted: hex("#6b7280"),
+                accent: hex("#2563eb"),
+                selected: hex("#2563eb"),
+                selected_text: Color::WHITE,
+                danger: hex("#dc2626"),
+                site_tile: hex("#ffffff"),
+                site_glyph: hex("#4b5563"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -687,15 +687,10 @@ esac
         let config_mgr = ConfigManager::new(Some(dir.path()));
         let storage_path = dir.path().join("data.json");
         let storage_mgr = crate::storage::StorageManager::new(storage_path.clone());
-        let keyring_mgr =
-            crate::keyring::KeyringManager::new(&create_mock_secret_tool(dir.path()));
+        let keyring_mgr = crate::keyring::KeyringManager::new(&create_mock_secret_tool(dir.path()));
 
         fs::write(&storage_path, "{}").unwrap();
-        assert!(keyring_mgr.store_token(
-            DEFAULT_SERVER_URL,
-            "access_token",
-            "old-access-token"
-        ));
+        assert!(keyring_mgr.store_token(DEFAULT_SERVER_URL, "access_token", "old-access-token"));
 
         let result = config_mgr.update_config(
             ConfigUpdateOptions {
@@ -706,7 +701,10 @@ esac
             &keyring_mgr,
         );
         assert!(result.is_err(), "writing config to a directory must fail");
-        assert!(storage_path.exists(), "vault cache must survive a failed save");
+        assert!(
+            storage_path.exists(),
+            "vault cache must survive a failed save"
+        );
         assert!(
             keyring_mgr
                 .get_token(DEFAULT_SERVER_URL, "access_token")

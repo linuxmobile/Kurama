@@ -82,6 +82,10 @@ fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     if state.snapshot.status != "unlocked" {
         return false;
     }
+    if event.is_command('s') {
+        state::toggle_sidebar(state);
+        return true;
+    }
     if event.is_command('l') {
         state::dispatch(state, backend::Request::Lock);
         return true;
@@ -923,6 +927,52 @@ mod tests {
         assert!(requests
             .iter()
             .any(|request| matches!(request, Request::Sync)));
+    }
+
+    #[test]
+    fn website_icon_fallback_uses_domain_like_names() {
+        assert_eq!(backend::domain_from_name("Discord.com"), "discord.com");
+        assert_eq!(backend::domain_from_name("www.Netflix.com"), "netflix.com");
+        assert_eq!(backend::domain_from_name("AWS Production"), "");
+    }
+
+    #[test]
+    fn command_s_toggles_the_sidebar() {
+        let mut rt = runtime(state::scene_populated);
+        rt.on_key = Some(on_key);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.sidebar_visible);
+        assert!(rt.find("sidebar").is_some());
+        assert!(rt.find("sidebar-toggle").is_some());
+        rt.key(KeyEvent {
+            key: Key::Command('s'),
+            mods: Mods::default(),
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(!rt.state.sidebar_visible);
+        assert!(rt.find("sidebar").is_none());
+        assert!(rt.find("sidebar-toggle").is_some());
+        rt.key(KeyEvent {
+            key: Key::Command('s'),
+            mods: Mods::default(),
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.sidebar_visible);
+        assert!(rt.find("sidebar").is_some());
+    }
+
+    #[test]
+    fn sidebar_grip_resizes_the_sidebar() {
+        let mut rt = runtime(state::scene_populated);
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("sidebar-grip").expect("resize grip");
+        let before = rt.state.sidebar_width;
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_move(x + 60.0, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.sidebar_width > before + 40.0);
+        rt.pointer_up(x + 60.0, y);
     }
 
     #[test]

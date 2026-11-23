@@ -500,14 +500,19 @@ mod tests {
 
         let resolved = resolve_helper("KURAMA_FIDO2_TOKEN", "fido2-token");
         assert!(
-            resolved.as_ref().map_or(true, |path| !path.starts_with(dir.path())),
+            resolved
+                .as_ref()
+                .map_or(true, |path| !path.starts_with(dir.path())),
             "only trusted absolute paths are considered: {resolved:?}"
         );
 
         env::set_var("KURAMA_FIDO2_TOKEN", "fido2-token");
         assert_eq!(resolve_helper("KURAMA_FIDO2_TOKEN", "fido2-token"), None);
         env::set_var("KURAMA_FIDO2_TOKEN", mock.to_str().unwrap());
-        assert_eq!(resolve_helper("KURAMA_FIDO2_TOKEN", "fido2-token"), Some(mock));
+        assert_eq!(
+            resolve_helper("KURAMA_FIDO2_TOKEN", "fido2-token"),
+            Some(mock)
+        );
 
         match old_override {
             Some(value) => env::set_var("KURAMA_FIDO2_TOKEN", value),

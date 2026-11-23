@@ -152,10 +152,9 @@ pub fn clear_preview_attachments(item_id: Option<&str>) {
     let legacy_roots = [
         PathBuf::from("/tmp/kurama/attachments"),
         #[cfg(unix)]
-        PathBuf::from(format!(
-            "/tmp/kurama-{}/attachments",
-            unsafe { libc::getuid() }
-        )),
+        PathBuf::from(format!("/tmp/kurama-{}/attachments", unsafe {
+            libc::getuid()
+        })),
     ];
     for root in legacy_roots {
         let legacy_dir = match item_id {

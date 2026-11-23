@@ -1,11 +1,13 @@
 use rune::edit::TextEdit;
 use rune::tok::{self, type_};
 use rune::{
-    col, el, icon, row, text, text_input, Color, Cursor, Cx, El, GrowthSpec, Key, KeyEvent,
-    ScrollSpec, Tx,
+    col, el, icon, row, text, text_input, Color, Cursor, Cx, Drag, El, GrowthSpec, Key, KeyEvent,
+    Phase, ScrollSpec, SurfaceFit, Tx,
 };
 
-use crate::backend::{revealed_value, totp_value, FieldValue, Request, Secret, VaultRow};
+use crate::backend::{
+    revealed_value, totp_value, FieldValue, ItemDetails, ItemField, Request, Secret, VaultRow,
+};
 use crate::icons;
 use crate::state::{
     add_create_field, add_create_uri, add_edit_uri, adjust_generator_length,
@@ -24,12 +26,12 @@ use crate::state::{
     submit_quick_unlock, submit_search, submit_send, submit_ssh_export, submit_ssh_generate,
     submit_ssh_import, submit_unlock, toggle_create_favorite, toggle_create_field_value,
     toggle_edit_favorite, toggle_generator_option, toggle_reveal, toggle_send_hidden,
-    toggle_setting, use_generated, AttachmentView, AuthMode, CardDraft, Category, CustomFieldDraft,
-    GeneratorOption, GeneratorTarget, IdentityDraft, Location, SendDraft, SettingsSection,
-    SshDraft, SshToolMode, State, ToggleSetting,
+    toggle_setting, toggle_sidebar, use_generated, AttachmentView, AuthMode, CardDraft, Category,
+    CustomFieldDraft, GeneratorOption, GeneratorTarget, IdentityDraft, Location, SendDraft,
+    SettingsSection, SshDraft, SshToolMode, State, ToggleSetting,
 };
 use crate::theme::{
-    accent, selected_row, ThemePreference, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE,
+    accent, selected_row, Palette, ThemePreference, META, ROW_SUBTITLE, ROW_TITLE, SECTION_TITLE,
     WINDOW_TITLE,
 };
 
@@ -58,7 +60,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             s,
             dark,
             "Vault not connected",
-            "Start the Kurama backend daemon to browse your vault.",
+            "Start the backend daemon to browse your vault.",
             "Retry",
             Request::Refresh,
         )
@@ -102,6 +104,7 @@ fn help(_s: &State, dark: bool) -> El {
         (",", "Open settings"),
         ("Ctrl/⌘ + L", "Lock the vault"),
         ("Ctrl/⌘ + R", "Synchronize the vault"),
+        ("Ctrl/⌘ + S", "Hide or show the sidebar"),
         ("?", "Toggle this help"),
         ("Esc", "Close a form or this help"),
     ];
@@ -702,16 +705,21 @@ fn settings_toggle(
                         .color(t.text_secondary),
                 ),
         )
-        .child(
-            el().key(format!("{key}-switch"))
+        .child({
+            let switch = el()
+                .key(format!("{key}-switch"))
                 .size(42.0, 24.0)
                 .radius(12.0)
                 .fill(if value { accent(dark) } else { t.control_off })
                 .center_y()
-                .justify_between()
-                .px(3.0)
-                .child(el().size(18.0, 18.0).radius(9.0).fill(t.knob)),
-        )
+                .px(3.0);
+            let switch = if value {
+                switch.justify_end()
+            } else {
+                switch.justify_start()
+            };
+            switch.child(el().size(18.0, 18.0).radius(9.0).fill(t.knob))
+        })
 }
 
 fn segment_button(
@@ -2370,62 +2378,96 @@ fn locked_bar(dark: bool) -> El {
         .center_y()
         .fill(t.card)
         .border(1.0, t.card_border)
-        .child(text("Kurama").key("brand").font(WINDOW_TITLE).color(t.text))
+        .child(
+            text("Vault locked")
+                .key("locked-label")
+                .font(WINDOW_TITLE)
+                .color(t.text),
+        )
 }
 
 fn top_bar(s: &State, dark: bool) -> El {
-    let t = tok::theme(dark);
-    let search = text_input(&s.query, type_::BODY)
-        .key("search")
-        .label("Search items")
-        .placeholder("Search items", t.text_secondary)
-        .color(t.text)
-        .h(34.0)
-        .w(320.0)
-        .padding(10.0)
-        .radius(8.0)
-        .fill(t.card)
-        .border(1.0, t.card_border)
-        .on_edit(|s: &mut State| &mut s.query)
-        .on_submit(submit_search)
-        .on_input_key(
-            |s: &mut State, event: &KeyEvent, tx: &mut Tx| match &event.key {
-                Key::Down => move_selection(s, 1, tx),
-                Key::Up => move_selection(s, -1, tx),
-                Key::Enter => {
-                    submit_search(s, tx);
-                    true
-                }
-                _ => false,
-            },
+    let p = Palette::new(dark);
+    let search = row()
+        .h(36.0)
+        .w(440.0)
+        .min_w(180.0)
+        .shrink()
+        .px(10.0)
+        .gap(8.0)
+        .center_y()
+        .radius(9.0)
+        .fill(p.raised)
+        .child(icon(icons::action("search"), 16.0).color(p.muted))
+        .child(
+            text_input(&s.query, type_::BODY)
+                .key("search")
+                .label("Search items")
+                .placeholder("Search vault", p.muted)
+                .color(p.text)
+                .h(34.0)
+                .min_w(0.0)
+                .grow(1.0)
+                .on_edit(|s: &mut State| &mut s.query)
+                .on_submit(submit_search)
+                .on_input_key(
+                    |s: &mut State, event: &KeyEvent, tx: &mut Tx| match &event.key {
+                        Key::Down => move_selection(s, 1, tx),
+                        Key::Up => move_selection(s, -1, tx),
+                        Key::Enter => {
+                            submit_search(s, tx);
+                            true
+                        }
+                        _ => false,
+                    },
+                ),
+        )
+        .child(
+            text("⌘F")
+                .font(META)
+                .color(p.muted)
+                .padding(4.0)
+                .radius(5.0)
+                .fill(p.panel),
         );
-
-    let brand = text("Kurama").key("brand").font(WINDOW_TITLE).color(t.text);
 
     row()
         .key("top-bar")
         .w_full()
-        .h(64.0)
-        .px(18.0)
-        .gap(8.0)
+        .h(62.0)
+        .px(16.0)
+        .gap(10.0)
         .center_y()
-        .fill(t.card)
-        .border(1.0, t.card_border)
-        .child(brand)
-        .child(search)
-        .child(el().grow(1.0))
-        .child(icon_action_tx(
-            "new-item",
-            "new",
-            "New item",
-            dark,
-            |state, tx| {
-                state.create = Some(crate::state::start_create());
-                state.form_error = None;
-                tx.focus("create-name", true);
+        .fill(p.sidebar)
+        .child(toolbar_icon(
+            "sidebar-toggle",
+            "panel",
+            if s.sidebar_visible {
+                "Hide sidebar"
+            } else {
+                "Show sidebar"
             },
+            dark,
+            toggle_sidebar,
         ))
-        .child(icon_action(
+        .child(
+            row()
+                .gap(4.0)
+                .center_y()
+                .child(icon(icons::action("chevron-left"), 17.0).color(p.muted.alpha(0.5)))
+                .child(icon(icons::action("chevron-right"), 17.0).color(p.muted.alpha(0.5))),
+        )
+        .child(el().grow(1.0))
+        .child(search)
+        .child(toolbar_icon(
+            "sync",
+            "sync",
+            if s.syncing { "Syncing…" } else { "Sync" },
+            dark,
+            |s| dispatch(s, Request::Sync),
+        ))
+        .child(toolbar_icon("sends", "sends", "Sends", dark, open_sends))
+        .child(toolbar_icon(
             "theme",
             if dark { "sun" } else { "moon" },
             if dark {
@@ -2443,59 +2485,58 @@ fn top_bar(s: &State, dark: bool) -> El {
                 set_theme(s, next);
             },
         ))
-        .child(icon_action("sends", "sends", "Sends", dark, open_sends))
-        .child(icon_action(
-            "settings",
-            "settings",
-            "Settings",
+        .child(toolbar_icon(
+            "generate",
+            "generate",
+            "Password generator",
             dark,
-            open_settings,
+            |s| open_generator(s, GeneratorTarget::None),
         ))
-        .child(icon_action(
+        .child(toolbar_icon(
             "ssh-tools",
             "ssh",
             "SSH keys",
             dark,
             open_ssh_tools,
         ))
-        .child(icon_action(
-            "sync",
-            "sync",
-            if s.syncing { "Syncing…" } else { "Sync" },
+        .child(toolbar_icon(
+            "settings",
+            "settings",
+            "Settings",
             dark,
-            |s| dispatch(s, Request::Sync),
+            open_settings,
         ))
-        .child(icon_action(
-            "generate",
-            "generate",
-            "Generate password",
-            dark,
-            |s| open_generator(s, GeneratorTarget::None),
-        ))
-        .child(icon_action("?", "help", "Keyboard shortcuts", dark, |s| {
+        .child(toolbar_icon("?", "help", "Keyboard shortcuts", dark, |s| {
             s.help = !s.help
         }))
-        .child(icon_action("lock", "lock", "Lock vault", dark, |s| {
+        .child(toolbar_icon("lock", "lock", "Lock vault", dark, |s| {
             dispatch(s, Request::Lock)
         }))
         .child(if s.snapshot.status == "unlocked" {
-            icon_action("logout", "logout", "Log out", dark, logout)
+            toolbar_icon("logout", "logout", "Log out", dark, logout)
         } else {
             el()
         })
+        .child(primary_action(
+            "new-item",
+            "+ New Item",
+            dark,
+            |state, tx| {
+                state.create = Some(crate::state::start_create());
+                state.form_error = None;
+                tx.focus("create-name", true);
+            },
+        ))
 }
 
 fn vault(s: &State, dark: bool) -> El {
     let t = tok::theme(dark);
-    let body = row()
-        .w_full()
-        .grow(1.0)
-        .shrink()
-        .min_h(0.0)
-        .child(sidebar(s, dark))
-        .child(item_list(s, dark))
-        .child(details(s, dark))
-        .fill(t.bg);
+    let p = Palette::new(dark);
+    let mut body = row().w_full().grow(1.0).shrink().min_h(0.0).fill(p.canvas);
+    if s.sidebar_visible {
+        body = body.child(sidebar(s, dark)).child(sidebar_grip(dark));
+    }
+    body = body.child(item_list(s, dark)).child(details(s, dark));
 
     if let Some(approval) = s.approvals.first() {
         let title = if approval.title.is_empty() {
@@ -2555,202 +2596,331 @@ fn vault(s: &State, dark: bool) -> El {
     body.key("vault")
 }
 
+const SIDEBAR_MIN: f32 = 200.0;
+const SIDEBAR_MAX: f32 = 440.0;
+
+fn sidebar_grip(dark: bool) -> El {
+    let p = Palette::new(dark);
+    el().key("sidebar-grip")
+        .w(5.0)
+        .h_full()
+        .fill(p.separator)
+        .cursor(Cursor::ResizeColumn)
+        .on_drag(
+            |s: &mut State, drag: &mut Drag, tx: &mut Tx| match drag.phase {
+                Phase::Down => drag.data = s.sidebar_width,
+                Phase::Move => {
+                    tx.instant();
+                    let width = drag.data + drag.dx;
+                    s.sidebar_width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                }
+                Phase::Up if !drag.cancelled() => {
+                    let width = drag.data + drag.dx;
+                    s.sidebar_width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                }
+                _ => {}
+            },
+        )
+}
+
 fn trash_nav(s: &State, dark: bool) -> El {
-    let t = tok::theme(dark);
     let active = s.location == Location::Trash;
-    el().key("trash-nav")
-        .h(34.0)
-        .px(10.0)
-        .radius(8.0)
-        .role("button")
-        .label("Trash")
-        .checked(active)
-        .focusable(true)
-        .fill(if active {
-            selected_row(dark)
-        } else {
-            Color::TRANSPARENT
-        })
-        .hover(t.hover)
-        .press(t.press)
-        .cursor(Cursor::Pointer)
-        .on_press(|s: &mut State| {
+    nav_item(
+        "trash-nav".to_owned(),
+        "Trash",
+        "trash",
+        None,
+        active,
+        dark,
+        move |s: &mut State| {
             if s.location != Location::Trash {
                 open_trash(s);
             }
-        })
+        },
+    )
+}
+
+fn section_label(key: &str, label: &str, dark: bool) -> El {
+    let p = Palette::new(dark);
+    text(label.to_owned())
+        .key(key)
+        .font(SECTION_TITLE)
+        .color(p.muted)
+        .padding(8.0)
+}
+
+fn nav_item(
+    key: String,
+    label: &str,
+    icon_name: &str,
+    count: Option<usize>,
+    active: bool,
+    dark: bool,
+    on_press: impl Fn(&mut State) + 'static,
+) -> El {
+    let p = Palette::new(dark);
+    el().key(key)
+        .h(34.0)
+        .px(9.0)
+        .radius(8.0)
+        .role("button")
+        .label(label.to_owned())
+        .checked(active)
+        .focusable(true)
+        .fill(if active { p.raised } else { Color::TRANSPARENT })
+        .hover(p.raised)
+        .press(p.separator)
+        .cursor(Cursor::Pointer)
+        .on_press(on_press)
         .child(
             row()
                 .w_full()
                 .center_y()
-                .gap(8.0)
+                .gap(10.0)
+                .child(icon(icons::action(icon_name), 16.0).color(if active {
+                    p.accent
+                } else {
+                    p.muted
+                }))
                 .child(
-                    text("Trash")
+                    text(label.to_owned())
                         .font(type_::LABEL)
-                        .color(if active { accent(dark) } else { t.text })
-                        .grow(1.0),
+                        .color(p.text)
+                        .grow(1.0)
+                        .truncate(),
                 )
+                .child(if let Some(count) = count {
+                    text(count.to_string()).font(META).color(p.muted)
+                } else {
+                    el()
+                }),
+        )
+}
+
+fn account_footer(s: &State, dark: bool) -> El {
+    let p = Palette::new(dark);
+    let email = if s.snapshot.email.is_empty() {
+        "Not connected"
+    } else {
+        &s.snapshot.email
+    };
+    let initials = email
+        .split('@')
+        .next()
+        .unwrap_or(email)
+        .chars()
+        .take(2)
+        .collect::<String>()
+        .to_uppercase();
+    let status = if s.syncing {
+        "Syncing…"
+    } else if s.snapshot.last_sync.is_empty() {
+        "Not synced yet"
+    } else {
+        "Synced"
+    };
+    row()
+        .key("account-footer")
+        .w_full()
+        .h(56.0)
+        .px(12.0)
+        .gap(10.0)
+        .center_y()
+        .fill(p.list)
+        .child(
+            el().w(30.0)
+                .h(30.0)
+                .radius(15.0)
+                .center()
+                .fill(p.accent)
+                .child(text(initials).font(type_::LABEL).color(Color::WHITE)),
+        )
+        .child(
+            col()
+                .gap(2.0)
+                .grow(1.0)
                 .child(
-                    text(if active {
-                        s.rows.len().to_string()
-                    } else {
-                        String::new()
-                    })
-                    .font(META)
-                    .color(t.text_secondary),
-                ),
+                    text(email.to_owned())
+                        .font(type_::LABEL)
+                        .color(p.text)
+                        .truncate(),
+                )
+                .child(text(status.to_owned()).font(META).color(p.muted)),
         )
 }
 
 fn sidebar(s: &State, dark: bool) -> El {
-    let t = tok::theme(dark);
-    let mut nav = col()
-        .key("sidebar")
-        .w(190.0)
-        .h_full()
-        .padding(12.0)
-        .gap(3.0)
-        .fill(t.card)
-        .border(1.0, t.card_border)
-        .child(
-            text("LIBRARY")
-                .key("library-label")
-                .font(SECTION_TITLE)
-                .color(t.text_secondary)
-                .padding(8.0),
-        );
-
-    for category in Category::ALL {
-        let active = s.category == category;
-        let label = category.label();
-        let count = match category {
-            Category::All => s.snapshot.items.len(),
-            Category::Favorites => s.snapshot.items.iter().filter(|item| item.favorite).count(),
-            _ => s
-                .snapshot
-                .items
-                .iter()
-                .filter(|item| category.matches(item))
-                .count(),
-        };
-        nav = nav.child(
-            el().key(format!("category-{label}"))
-                .h(34.0)
-                .px(10.0)
-                .radius(8.0)
-                .role("button")
-                .label(label)
-                .checked(active)
-                .focusable(true)
-                .fill(if active {
-                    selected_row(dark)
-                } else {
-                    Color::TRANSPARENT
-                })
-                .hover(t.hover)
-                .press(t.press)
-                .cursor(Cursor::Pointer)
-                .on_press(move |s: &mut State| select_category(s, category))
-                .child(
-                    row()
-                        .w_full()
-                        .center_y()
-                        .gap(8.0)
-                        .child(
-                            text(label)
-                                .font(type_::LABEL)
-                                .color(if active { accent(dark) } else { t.text })
-                                .grow(1.0),
-                        )
-                        .child(text(count.to_string()).font(META).color(t.text_secondary)),
-                ),
-        );
-    }
-
-    nav = nav.child(
-        text("FOLDERS")
-            .key("folders-label")
-            .font(SECTION_TITLE)
-            .color(t.text_secondary)
-            .padding(8.0),
-    );
-    let mut folders = col()
-        .key("folder-list")
+    let p = Palette::new(dark);
+    let mut content = col()
+        .key("sidebar-content")
+        .w_full()
+        .px(10.0)
+        .pt(12.0)
+        .pb(8.0)
         .gap(2.0)
+        .grow(1.0)
+        .shrink()
+        .min_h(0.0)
         .scroll(ScrollSpec {
             stick_bottom: false,
-        })
-        .shrink()
-        .min_h(0.0);
+        });
+
+    for (category, glyph, display) in [
+        (Category::All, "grid", "All Items"),
+        (Category::Favorites, "star", "Favorites"),
+    ] {
+        let active = s.category == category && s.location != Location::Trash;
+        let count = s
+            .snapshot
+            .items
+            .iter()
+            .filter(|item| category.matches(item))
+            .count();
+        content = content.child(nav_item(
+            format!("category-{}", category.label()),
+            display,
+            glyph,
+            Some(count),
+            active,
+            dark,
+            move |s: &mut State| select_category(s, category),
+        ));
+    }
+
+    content = content.child(section_label("library-label", "Categories", dark));
+
+    for (category, glyph, display) in [
+        (Category::Logins, "key", "Logins"),
+        (Category::Cards, "card", "Cards"),
+        (Category::Identities, "user", "Identities"),
+        (Category::Notes, "note", "Secure Notes"),
+        (Category::SshKeys, "shield", "SSH Keys"),
+    ] {
+        let active = s.category == category && s.location != Location::Trash;
+        let count = s
+            .snapshot
+            .items
+            .iter()
+            .filter(|item| category.matches(item))
+            .count();
+        content = content.child(nav_item(
+            format!("category-{}", category.label()),
+            display,
+            glyph,
+            Some(count),
+            active,
+            dark,
+            move |s: &mut State| select_category(s, category),
+        ));
+    }
+
+    content = content.child(section_label("folders-label", "Folders", dark));
+    let mut folders = col().key("folder-list").gap(2.0);
     if s.folders.is_empty() {
-        folders = folders.child(
-            text("No folders")
-                .font(META)
-                .color(t.text_secondary)
-                .padding(10.0),
-        );
+        folders = folders.child(text("No folders").font(META).color(p.muted).padding(10.0));
     }
     for folder in &s.folders {
         let active = s.location != Location::Trash && s.folder.as_deref() == Some(folder.as_str());
         let target = folder.clone();
-        folders = folders.child(
-            el().key(format!("folder-{folder}"))
-                .h(30.0)
-                .px(10.0)
-                .radius(8.0)
-                .role("button")
-                .label(folder.clone())
-                .checked(active)
-                .focusable(true)
-                .fill(if active {
-                    selected_row(dark)
-                } else {
-                    Color::TRANSPARENT
-                })
-                .hover(t.hover)
-                .press(t.press)
-                .cursor(Cursor::Pointer)
-                .on_press(move |s: &mut State| select_folder(s, target.clone()))
-                .child(
-                    text(folder.clone())
-                        .font(type_::LABEL)
-                        .color(if active { accent(dark) } else { t.text })
-                        .truncate(),
-                ),
-        );
+        let count = s.rows.iter().filter(|row| row.folder == *folder).count();
+        folders = folders.child(nav_item(
+            format!("folder-{folder}"),
+            folder,
+            "folder",
+            Some(count),
+            active,
+            dark,
+            move |s: &mut State| select_folder(s, target.clone()),
+        ));
     }
-    nav.child(folders)
-        .child(trash_nav(s, dark))
-        .child(el().grow(1.0))
+    content = content
+        .child(folders)
+        .child(section_label("tools-label", "Tools", dark));
+    content = content
+        .child(nav_item(
+            "sends-nav".to_owned(),
+            "Sends",
+            "sends",
+            None,
+            false,
+            dark,
+            open_sends,
+        ))
+        .child(nav_item(
+            "generator-nav".to_owned(),
+            "Generator",
+            "generate",
+            None,
+            false,
+            dark,
+            |s| open_generator(s, GeneratorTarget::None),
+        ))
+        .child(nav_item(
+            "ssh-nav".to_owned(),
+            "SSH Keys",
+            "ssh",
+            None,
+            false,
+            dark,
+            open_ssh_tools,
+        ))
+        .child(trash_nav(s, dark));
+
+    col()
+        .key("sidebar")
+        .w(s.sidebar_width)
+        .min_w(SIDEBAR_MIN)
+        .max_w(SIDEBAR_MAX)
+        .h_full()
+        .fill(p.sidebar)
+        .child(content)
+        .child(account_footer(s, dark))
 }
 
 fn item_list(s: &State, dark: bool) -> El {
-    let t = tok::theme(dark);
-    let visible_count = s.visible_indices().len();
+    let p = Palette::new(dark);
+    let visible_count = s.visible_count();
     let version = (
         s.rows_version(),
         s.query.text.clone(),
         s.category,
         s.location,
         s.folder.clone(),
+        website_icons_enabled(s),
+        s.site_icons.len(),
     );
     let list = col()
         .key("item-rows")
         .w_full()
-        .padding(8.0)
+        .px(6.0)
+        .py(4.0)
         .gap(2.0)
         .growth(GrowthSpec::default())
         .virtual_rows(
             visible_count,
             58.0,
             |s: &State, index: usize| {
-                let row = s.visible_indices()[index];
+                let row = s.visible_index_at(index).unwrap_or(0);
                 format!("item-{}", s.rows[row].id).into()
             },
             move |s: &State, index: usize| {
-                let row = s.visible_indices()[index];
+                let row = s.visible_index_at(index).unwrap_or(0);
                 let item = &s.rows[row];
-                item_row(item, s.selected.as_deref() == Some(item.id.as_str()), dark)
+                let has_totp = s.totp.as_ref().is_some_and(|meta| meta.item_id == item.id);
+                let website = if website_icons_enabled(s) {
+                    item_website(item)
+                } else {
+                    String::new()
+                };
+                let site_icon = s.site_icons.get(&website);
+                item_row(
+                    item,
+                    s.selected.as_deref() == Some(item.id.as_str()),
+                    has_totp,
+                    dark,
+                    &website,
+                    site_icon,
+                )
             },
         )
         .virtual_rows_version(version);
@@ -2759,45 +2929,18 @@ fn item_list(s: &State, dark: bool) -> El {
         el().key("list-empty").padding(24.0).child(
             text("No items match this view.")
                 .font(ROW_SUBTITLE)
-                .color(t.text_secondary),
+                .color(p.muted),
         )
     } else {
         el()
     };
 
-    let title = if s.location == Location::Trash {
-        "Trash"
-    } else if let Some(folder) = &s.folder {
-        folder.as_str()
-    } else {
-        s.category.label()
-    };
     col()
         .key("items")
-        .w(292.0)
+        .w(340.0)
+        .min_w(280.0)
         .h_full()
-        .fill(t.card)
-        .border(1.0, t.card_border)
-        .child(
-            row()
-                .key("items-header")
-                .w_full()
-                .h(42.0)
-                .px(14.0)
-                .center_y()
-                .child(
-                    text(title.to_owned())
-                        .font(SECTION_TITLE)
-                        .color(t.text)
-                        .grow(1.0),
-                )
-                .child(
-                    text(visible_count.to_string())
-                        .font(META)
-                        .color(t.text_secondary),
-                ),
-        )
-        .child(el().h(1.0).w_full().fill(t.separator))
+        .fill(p.list)
         .child(if visible_count == 0 {
             empty
         } else {
@@ -2812,16 +2955,68 @@ fn item_list(s: &State, dark: bool) -> El {
         })
 }
 
-fn item_row(item: &VaultRow, selected: bool, dark: bool) -> El {
-    let t = tok::theme(dark);
+fn type_tile_color(type_name: &str, dark: bool) -> Color {
+    let p = Palette::new(dark);
+    let value = match type_name {
+        "login" => "#0b78c4",
+        "note" => "#d98a27",
+        "card" => "#3d5bd9",
+        "identity" => "#8256d8",
+        "ssh_key" => "#606872",
+        _ => "#4b5563",
+    };
+    rune::color::hex(value).unwrap_or(p.accent)
+}
+
+fn website_icons_enabled(state: &State) -> bool {
+    state
+        .settings
+        .as_ref()
+        .is_some_and(|settings| settings.show_website_icons)
+}
+
+fn item_website(item: &VaultRow) -> String {
+    crate::backend::host_for_row(item)
+}
+
+fn item_row(
+    item: &VaultRow,
+    selected: bool,
+    has_totp: bool,
+    dark: bool,
+    website: &str,
+    site_icon: Option<&rune::Image>,
+) -> El {
+    let p = Palette::new(dark);
     let id = item.id.clone();
-    let star = if item.favorite { "★" } else { "" };
     let type_label = icons::label(&item.type_name);
+    let show_site = item.type_name == "login" && !website.is_empty();
+    let initial = if show_site {
+        String::new()
+    } else {
+        item.name
+            .chars()
+            .next()
+            .unwrap_or('?')
+            .to_uppercase()
+            .to_string()
+    };
+    let tile_color = if show_site {
+        p.site_tile
+    } else {
+        type_tile_color(&item.type_name, dark)
+    };
+    let tile = if selected {
+        tile_color.mix(Color::WHITE, 0.25)
+    } else {
+        tile_color
+    };
+    let tile_radius = 9.0;
 
     el().key(format!("item-{}", item.id))
         .h(56.0)
         .w_full()
-        .px(12.0)
+        .px(8.0)
         .gap(10.0)
         .center_y()
         .radius(8.0)
@@ -2830,38 +3025,56 @@ fn item_row(item: &VaultRow, selected: bool, dark: bool) -> El {
         .checked(selected)
         .focusable(true)
         .fill(if selected {
-            selected_row(dark)
+            p.selected
         } else {
             Color::TRANSPARENT
         })
-        .hover(t.hover)
-        .press(t.press)
+        .hover(if selected { p.selected } else { p.raised })
+        .press(p.separator)
         .cursor(Cursor::Pointer)
         .on_press(move |s: &mut State| select_item(s, id.clone()))
         .child(
-            icon(icons::for_type(&item.type_name), 18.0)
-                .key(format!("item-icon-{}-{}", item.type_name, item.id))
-                .label(format!("{} icon", type_label))
-                .color(t.text_secondary),
+            el().key(format!("item-icon-{}-{}", item.type_name, item.id))
+                .w(34.0)
+                .h(34.0)
+                .radius(tile_radius)
+                .center()
+                .fill(tile)
+                .border(
+                    1.0,
+                    if show_site {
+                        p.separator
+                    } else {
+                        Color::TRANSPARENT
+                    },
+                )
+                .label(if show_site {
+                    format!("{} site icon", website)
+                } else {
+                    format!("{} icon", icons::for_type(&item.type_name).name)
+                })
+                .child(if let Some(image) = site_icon {
+                    el().w_full()
+                        .h_full()
+                        .px(4.0)
+                        .py(4.0)
+                        .pixels_fit(image.pixels(), SurfaceFit::Fit)
+                } else if show_site {
+                    icon(icons::action("globe"), 18.0).color(p.site_glyph)
+                } else {
+                    text(initial).font(ROW_TITLE).color(Color::WHITE)
+                }),
         )
         .child(
             col()
                 .grow(1.0)
-                .gap(2.0)
+                .gap(3.0)
                 .child(
-                    row()
-                        .w_full()
-                        .gap(6.0)
-                        .center_y()
-                        .child(
-                            text(item.name.clone())
-                                .key("item-name")
-                                .font(ROW_TITLE)
-                                .color(t.text)
-                                .grow(1.0)
-                                .truncate(),
-                        )
-                        .child(text(star).font(ROW_TITLE).color(accent(dark))),
+                    text(item.name.clone())
+                        .key("item-name")
+                        .font(ROW_TITLE)
+                        .color(if selected { p.selected_text } else { p.text })
+                        .truncate(),
                 )
                 .child(
                     text(if item.subtitle.is_empty() {
@@ -2870,14 +3083,146 @@ fn item_row(item: &VaultRow, selected: bool, dark: bool) -> El {
                         item.subtitle.as_str()
                     })
                     .font(ROW_SUBTITLE)
-                    .color(t.text_secondary)
+                    .color(if selected {
+                        p.selected_text.alpha(0.8)
+                    } else {
+                        p.muted
+                    })
                     .truncate(),
                 ),
         )
+        .child(
+            row()
+                .gap(5.0)
+                .center_y()
+                .child(if has_totp {
+                    icon(icons::action("clock"), 14.0).color(if selected {
+                        p.selected_text
+                    } else {
+                        p.muted
+                    })
+                } else {
+                    el()
+                })
+                .child(if item.favorite {
+                    icon(icons::action("star-filled"), 14.0).color(if selected {
+                        Color::WHITE
+                    } else {
+                        p.accent
+                    })
+                } else {
+                    el()
+                }),
+        )
+}
+
+fn chip(label: &str, dark: bool) -> El {
+    let p = Palette::new(dark);
+    row()
+        .h(22.0)
+        .px(9.0)
+        .center()
+        .radius(11.0)
+        .fill(p.raised)
+        .child(text(label.to_owned()).font(META).color(p.muted))
+}
+
+fn detail_card(key: &str, title: &str, rows: Vec<El>, dark: bool) -> El {
+    let p = Palette::new(dark);
+    let mut card = col().key(key).w_full().radius(10.0).fill(p.panel);
+    for (index, row) in rows.into_iter().enumerate() {
+        if index > 0 {
+            card = card.child(el().h(1.0).w_full().fill(p.separator));
+        }
+        card = card.child(row);
+    }
+    col()
+        .gap(8.0)
+        .child(text(title.to_owned()).font(SECTION_TITLE).color(p.muted))
+        .child(card)
+}
+
+fn detail_row(s: &State, details: &ItemDetails, detail: &ItemField, dark: bool) -> El {
+    let p = Palette::new(dark);
+    let revealed = s
+        .revealed
+        .as_ref()
+        .is_some_and(|(id, key)| id == &details.id && key == &detail.key);
+    let sensitive = matches!(detail.value, FieldValue::Masked);
+    let shown = match &detail.value {
+        FieldValue::Text(value) => value.clone(),
+        FieldValue::Masked if revealed => {
+            revealed_value(&details.id, &detail.key).unwrap_or_else(|| "••••••••".to_owned())
+        }
+        FieldValue::Masked => "••••••••".to_owned(),
+    };
+    let shown = if detail.key == "totp" {
+        s.totp
+            .as_ref()
+            .filter(|meta| meta.item_id == details.id)
+            .map(|meta| {
+                let code = totp_value(&meta.item_id).unwrap_or_else(|| "······".to_owned());
+                format!("{code} · {}s", meta.ttl)
+            })
+            .unwrap_or(shown)
+    } else {
+        shown
+    };
+    let key = detail.key.clone();
+    let is_uri = key.starts_with("uri-");
+    let label = detail.label.clone();
+    let copy_key = key.clone();
+    let copy_label = label.clone();
+    let value = field(&label, &shown, dark)
+        .grow(1.0)
+        .min_w(0.0)
+        .key(format!("detail-field-{key}"))
+        .role("button")
+        .label(format!("Copy {label}"))
+        .help(format!("Copy {label}"))
+        .cursor(Cursor::Pointer)
+        .hover(p.raised)
+        .press(p.separator)
+        .on_press(move |state| copy_field(state, &copy_key, &copy_label, sensitive));
+    let mut buttons = row().gap(4.0);
+    if sensitive {
+        buttons = buttons.child(icon_action(
+            &format!("reveal-{reveal_key}", reveal_key = key),
+            if revealed { "eye-off" } else { "eye" },
+            if revealed { "Hide" } else { "Reveal" },
+            dark,
+            move |state| toggle_reveal(state, key.clone()),
+        ));
+    }
+    if is_uri {
+        if let FieldValue::Text(url) = &detail.value {
+            let url = url.clone();
+            let open_key = detail.key.clone();
+            buttons = buttons.child(icon_action_tx(
+                &format!("open-{open_key}"),
+                "external",
+                "Open website",
+                dark,
+                move |state, tx| {
+                    if let Err(error) = tx.open_url(&url) {
+                        notice(state, format!("Cannot open website: {error}"));
+                    }
+                },
+            ));
+        }
+    }
+    row()
+        .px(14.0)
+        .py(10.0)
+        .w_full()
+        .center_y()
+        .gap(10.0)
+        .child(value)
+        .child(buttons)
 }
 
 fn details(s: &State, dark: bool) -> El {
-    let t = tok::theme(dark);
+    let p = Palette::new(dark);
     let Some(item) = s.selected_item() else {
         return col()
             .key("details")
@@ -2885,117 +3230,120 @@ fn details(s: &State, dark: bool) -> El {
             .h_full()
             .center()
             .gap(6.0)
-            .fill(t.bg)
-            .child(text("No item selected").font(WINDOW_TITLE).color(t.text))
+            .fill(p.canvas)
+            .child(text("No item selected").font(WINDOW_TITLE).color(p.text))
             .child(
                 text("Choose an item from the list to see its details.")
                     .font(ROW_SUBTITLE)
-                    .color(t.text_secondary),
+                    .color(p.muted),
             );
     };
 
     let favorite = item.favorite;
     let type_label = icons::label(&item.type_name);
-    let mut fields = col()
-        .key("detail-fields")
-        .padding(20.0)
-        .gap(14.0)
-        .child(field("Type", type_label.as_ref(), dark));
-    if let Some(details) = s.details.as_ref().filter(|details| details.id == item.id) {
+    let website = if website_icons_enabled(s) {
+        item_website(item)
+    } else {
+        String::new()
+    };
+    let site_icon = s.site_icons.get(&website);
+    let show_site = item.type_name == "login" && !website.is_empty();
+    let tile_source = if show_site {
+        website.as_str()
+    } else {
+        item.name.as_str()
+    };
+    let initial = if show_site {
+        String::new()
+    } else {
+        tile_source
+            .chars()
+            .next()
+            .unwrap_or('?')
+            .to_uppercase()
+            .to_string()
+    };
+    let tile_color = if show_site {
+        p.site_tile
+    } else {
+        type_tile_color(&item.type_name, dark)
+    };
+    let loaded = s.details.as_ref().filter(|details| details.id == item.id);
+    let mut credentials = Vec::new();
+    let mut websites = Vec::new();
+    let mut custom = Vec::new();
+    let mut metadata = Vec::new();
+    if let Some(details) = loaded {
         for detail in &details.fields {
-            let revealed = s
-                .revealed
-                .as_ref()
-                .is_some_and(|(id, key)| id == &details.id && key == &detail.key);
-            let sensitive = matches!(detail.value, FieldValue::Masked);
-            let shown = match &detail.value {
-                FieldValue::Text(value) => value.clone(),
-                FieldValue::Masked if revealed => revealed_value(&details.id, &detail.key)
-                    .unwrap_or_else(|| "••••••••".to_owned()),
-                FieldValue::Masked => "••••••••".to_owned(),
-            };
-            let shown = if detail.key == "totp" {
-                s.totp
-                    .as_ref()
-                    .filter(|meta| meta.item_id == item.id)
-                    .map(|meta| {
-                        let code = totp_value(&meta.item_id).unwrap_or_else(|| "······".to_owned());
-                        format!("{code} · {}s", meta.ttl)
-                    })
-                    .unwrap_or(shown)
-            } else {
-                shown
-            };
-            let key = detail.key.clone();
-            let label = detail.label.clone();
-            let copy_key = key.clone();
-            let copy_label = label.clone();
-            let value = field(&label, &shown, dark)
-                .grow(1.0)
-                .key(format!("detail-field-{key}"))
-                .role("button")
-                .label(format!("Copy {label}"))
-                .help(format!("Copy {label}"))
-                .cursor(Cursor::Pointer)
-                .hover(t.hover)
-                .press(t.press)
-                .on_press(move |state| copy_field(state, &copy_key, &copy_label, sensitive));
-            let mut buttons = row().gap(6.0);
-            if sensitive {
-                let reveal_key = key.clone();
-                let text = if revealed { "Hide" } else { "Reveal" };
-                buttons = buttons.child(action(
-                    &format!("reveal-{reveal_key}"),
-                    text,
-                    dark,
-                    move |state| toggle_reveal(state, reveal_key.clone()),
-                ));
+            let row = detail_row(s, details, detail, dark);
+            match detail.key.as_str() {
+                "username" | "password" | "totp" => credentials.push(row),
+                key if key.starts_with("uri-") => websites.push(row),
+                "created" | "updated" => metadata.push(row),
+                _ => custom.push(row),
             }
-            if key.starts_with("uri-") {
-                if let FieldValue::Text(url) = &detail.value {
-                    let url = url.clone();
-                    buttons = buttons.child(action_tx(
-                        &format!("open-{key}"),
-                        "Open",
-                        dark,
-                        move |state, tx| {
-                            if let Err(error) = tx.open_url(&url) {
-                                notice(state, format!("Cannot open website: {error}"));
-                            }
-                        },
-                    ));
-                }
-            }
-            fields = fields.child(row().gap(10.0).center_y().child(value).child(buttons));
         }
     } else if !item.subtitle.is_empty() {
-        fields = fields.child(field("Username", &item.subtitle, dark));
+        credentials.push(
+            row().px(14.0).py(10.0).child(
+                field("Username", &item.subtitle, dark)
+                    .grow(1.0)
+                    .key("detail-field-username"),
+            ),
+        );
     }
-    fields = fields.child(field(
-        "Folder",
-        if item.folder.is_empty() {
-            "—"
-        } else {
-            &item.folder
-        },
-        dark,
-    ));
-    if !s
-        .details
-        .as_ref()
-        .is_some_and(|details| details.id == item.id)
-    {
-        fields = fields.child(field(
-            "Updated",
-            if item.updated.is_empty() {
-                "—"
-            } else {
-                &item.updated
-            },
+
+    let mut body = col()
+        .key("detail-fields")
+        .w_full()
+        .px(24.0)
+        .py(20.0)
+        .gap(20.0);
+    if !credentials.is_empty() {
+        body = body.child(detail_card(
+            "section-credentials",
+            "Credentials",
+            credentials,
             dark,
         ));
     }
-    if let Some(details) = s.details.as_ref().filter(|details| details.id == item.id) {
+    if !websites.is_empty() {
+        body = body.child(detail_card("section-websites", "Websites", websites, dark));
+    }
+    if !custom.is_empty() {
+        body = body.child(detail_card("section-custom", "Custom Fields", custom, dark));
+    }
+
+    let mut info = Vec::new();
+    info.push(
+        row().px(14.0).py(10.0).child(
+            field(
+                "Folder",
+                if item.folder.is_empty() {
+                    "—"
+                } else {
+                    &item.folder
+                },
+                dark,
+            )
+            .grow(1.0),
+        ),
+    );
+    if loaded.is_none() && !item.updated.is_empty() {
+        info.push(
+            row()
+                .px(14.0)
+                .py(10.0)
+                .child(field("Updated", &item.updated, dark).grow(1.0)),
+        );
+    }
+    body = body.child(detail_card("section-info", "Details", info, dark));
+    if !metadata.is_empty() {
+        body = body.child(detail_card("section-metadata", "Metadata", metadata, dark));
+    }
+
+    if let Some(details) = loaded {
+        let mut attachments = Vec::new();
         for attachment in &details.attachments {
             let label = if attachment.size.is_empty() {
                 attachment.filename.clone()
@@ -3034,101 +3382,179 @@ fn details(s: &State, dark: bool) -> El {
                         )
                     },
                 ));
-            fields = fields.child(row().gap(10.0).center_y().child(value).child(buttons));
+            attachments.push(
+                row()
+                    .px(14.0)
+                    .py(10.0)
+                    .w_full()
+                    .center_y()
+                    .gap(10.0)
+                    .child(value)
+                    .child(buttons),
+            );
+        }
+        if !attachments.is_empty() {
+            body = body.child(detail_card(
+                "section-attachments",
+                "Attachments",
+                attachments,
+                dark,
+            ));
         }
     }
 
     let in_trash = s.location == Location::Trash;
-    fields = fields.child(
-        row()
-            .key("detail-actions")
-            .gap(8.0)
-            .child(action_tx("edit-item", "Edit", dark, |state, tx| {
-                start_edit(state);
-                tx.focus("edit-name", true);
-            }))
-            .child(if in_trash {
-                action("restore-item", "Restore", dark, restore_item)
+    let delete_label = if s.pending_delete.as_deref() == Some(item.id.as_str()) {
+        "Confirm delete"
+    } else if in_trash {
+        "Delete forever"
+    } else {
+        "Move to Trash"
+    };
+    let footer = row()
+        .key("detail-actions")
+        .w_full()
+        .px(24.0)
+        .py(12.0)
+        .gap(12.0)
+        .center_y()
+        .fill(p.list)
+        .child(
+            text(if item.updated.is_empty() {
+                String::new()
             } else {
-                el()
+                format!("Updated {}", item.updated)
             })
-            .child(action(
-                "delete-item",
-                if s.pending_delete.as_deref() == Some(item.id.as_str()) {
-                    "Confirm delete"
-                } else if in_trash {
-                    "Delete forever"
-                } else {
-                    "Delete"
-                },
-                dark,
-                move |state| delete_item(state, in_trash),
-            )),
-    );
+            .font(META)
+            .color(p.muted)
+            .grow(1.0)
+            .truncate(),
+        )
+        .child(if in_trash {
+            action("restore-item", "Restore", dark, restore_item)
+        } else {
+            el()
+        })
+        .child(danger_action(
+            "delete-item",
+            delete_label,
+            dark,
+            move |state| delete_item(state, in_trash),
+        ));
 
     col()
         .key("details")
         .grow(1.0)
         .h_full()
-        .fill(t.bg)
+        .fill(p.canvas)
         .child(
             row()
                 .key("detail-header")
                 .w_full()
-                .h(64.0)
-                .px(20.0)
-                .gap(12.0)
+                .h(104.0)
+                .px(24.0)
+                .gap(16.0)
                 .center_y()
                 .child(
-                    icon(icons::for_type(&item.type_name), 22.0)
-                        .key(format!("detail-icon-{}", item.type_name))
-                        .label(format!("{} icon", type_label))
-                        .color(t.text_secondary),
+                    el().key(format!("detail-icon-{}", item.type_name))
+                        .w(52.0)
+                        .h(52.0)
+                        .radius(14.0)
+                        .center()
+                        .fill(tile_color)
+                        .border(
+                            1.0,
+                            if show_site {
+                                p.separator
+                            } else {
+                                Color::TRANSPARENT
+                            },
+                        )
+                        .label(if show_site {
+                            format!("{} site icon", website)
+                        } else {
+                            format!("{} icon", icons::for_type(&item.type_name).name)
+                        })
+                        .child(if let Some(image) = site_icon {
+                            el().w_full()
+                                .h_full()
+                                .px(7.0)
+                                .py(7.0)
+                                .pixels_fit(image.pixels(), SurfaceFit::Fit)
+                        } else if show_site {
+                            icon(icons::action("globe"), 26.0).color(p.site_glyph)
+                        } else {
+                            text(initial).font(WINDOW_TITLE).color(Color::WHITE)
+                        }),
                 )
                 .child(
                     col()
-                        .gap(2.0)
+                        .gap(8.0)
+                        .grow(1.0)
                         .child(
                             text(item.name.clone())
                                 .key("detail-name")
                                 .font(WINDOW_TITLE)
-                                .color(t.text),
+                                .color(p.text),
                         )
-                        .child(text(type_label.as_ref()).font(META).color(t.text_secondary)),
+                        .child(
+                            row()
+                                .gap(6.0)
+                                .child(chip(type_label.as_ref(), dark))
+                                .child(if item.folder.is_empty() {
+                                    el()
+                                } else {
+                                    chip(&item.folder, dark)
+                                })
+                                .child(chip("Password reprompt", dark)),
+                        ),
                 )
-                .child(el().grow(1.0))
-                .child(action(
+                .child(icon_action(
                     "favorite-toggle",
+                    if favorite { "star-filled" } else { "star" },
                     if favorite { "Unfavorite" } else { "Favorite" },
                     dark,
                     move |state| set_favorite(state, !favorite),
-                )),
+                ))
+                .child(action_tx("edit-item", "Edit", dark, |state, tx| {
+                    start_edit(state);
+                    tx.focus("edit-name", true);
+                })),
         )
-        .child(el().h(1.0).w_full().fill(t.separator))
-        .child(fields)
+        .child(
+            el().key("detail-scroll")
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .grow(1.0)
+                .shrink()
+                .min_h(0.0)
+                .child(body),
+        )
+        .child(footer)
 }
 
 fn field(label: &str, value: &str, dark: bool) -> El {
-    let t = tok::theme(dark);
+    let p = Palette::new(dark);
     col()
         .key(format!("field-{label}"))
-        .gap(3.0)
-        .child(
-            text(label.to_uppercase())
-                .font(SECTION_TITLE)
-                .color(t.text_secondary),
-        )
+        .w_full()
+        .min_w(0.0)
+        .gap(4.0)
+        .child(text(label.to_owned()).font(META).color(p.muted))
         .child(
             text(value.to_owned())
                 .key(format!("field-value-{label}"))
                 .font(ROW_SUBTITLE)
-                .color(t.text)
+                .color(p.text)
+                .w_full()
+                .truncate()
                 .selectable(true),
         )
 }
 
 fn status_bar(s: &State, dark: bool) -> El {
-    let t = tok::theme(dark);
+    let p = Palette::new(dark);
     let label = if s.syncing {
         "Syncing vault…".to_owned()
     } else if s.busy {
@@ -3143,9 +3569,9 @@ fn status_bar(s: &State, dark: bool) -> El {
         format!("{} · {} items", s.snapshot.email, s.snapshot.items_count)
     };
     let dot = if s.notice.is_some() || s.snapshot.status.is_empty() {
-        t.text_secondary
+        p.muted
     } else {
-        accent(dark)
+        p.accent
     };
 
     let sync = if s.syncing {
@@ -3165,17 +3591,17 @@ fn status_bar(s: &State, dark: bool) -> El {
     row()
         .key("status-bar")
         .w_full()
-        .h(30.0)
-        .px(14.0)
+        .h(24.0)
+        .px(16.0)
         .gap(8.0)
         .center_y()
-        .fill(t.card)
+        .fill(p.list)
         .child(el().key("status-dot").size(6.0, 6.0).radius(3.0).fill(dot))
         .child(
             text(label)
                 .key("status-label")
                 .font(META)
-                .color(t.text_secondary)
+                .color(p.muted)
                 .grow(1.0)
                 .truncate(),
         )
@@ -3183,7 +3609,7 @@ fn status_bar(s: &State, dark: bool) -> El {
             text(server)
                 .key("status-sync")
                 .font(META)
-                .color(t.text_secondary)
+                .color(p.muted)
                 .truncate(),
         )
 }
@@ -3212,7 +3638,7 @@ fn generator(s: &State, dark: bool) -> El {
     let Some(g) = s.generator.as_ref() else {
         return el();
     };
-    let header = text("Generate a strong value with the Kurama daemon.")
+    let header = text("Generate a strong value with the daemon.")
         .font(ROW_SUBTITLE)
         .color(t.text_secondary);
 
@@ -3402,7 +3828,7 @@ fn account(s: &State, dark: bool) -> El {
         AuthMode::NewDevice => "Verify new device",
         AuthMode::Fido2 { .. } => "Security key verification",
     };
-    let header = text("Connect Kurama to your vault server.")
+    let header = text("Connect to your vault server.")
         .font(ROW_SUBTITLE)
         .color(t.text_secondary);
 
@@ -3670,6 +4096,81 @@ fn placeholder(
         .child(action("placeholder-action", button_label, dark, move |s| {
             dispatch(s, request.clone())
         }))
+}
+
+fn danger_action(
+    key: &str,
+    label: &str,
+    dark: bool,
+    on_press: impl Fn(&mut State) + 'static,
+) -> El {
+    let p = Palette::new(dark);
+    el().key(key)
+        .role("button")
+        .label(label.to_owned())
+        .focusable(true)
+        .h(32.0)
+        .px(12.0)
+        .center()
+        .radius(8.0)
+        .fill(p.danger.mix(p.panel, 0.86))
+        .hover(p.danger.mix(p.panel, 0.76))
+        .press(p.danger.mix(p.panel, 0.68))
+        .cursor(Cursor::Pointer)
+        .on_press(on_press)
+        .child(text(label.to_owned()).font(type_::LABEL).color(p.danger))
+}
+
+fn toolbar_icon(
+    key: &str,
+    icon_name: &str,
+    tooltip: &str,
+    dark: bool,
+    on_press: impl Fn(&mut State) + 'static,
+) -> El {
+    let p = Palette::new(dark);
+    el().key(key)
+        .role("button")
+        .label(tooltip.to_owned())
+        .help(tooltip.to_owned())
+        .focusable(true)
+        .w(28.0)
+        .h(28.0)
+        .center()
+        .radius(7.0)
+        .fill(Color::TRANSPARENT)
+        .hover(p.raised)
+        .press(p.separator)
+        .cursor(Cursor::Pointer)
+        .on_press(on_press)
+        .child(icon(icons::action(icon_name), 17.0).color(p.muted))
+}
+
+fn primary_action(
+    key: &str,
+    label: &str,
+    dark: bool,
+    on_press: impl Fn(&mut State, &mut Tx) + 'static,
+) -> El {
+    let p = Palette::new(dark);
+    el().key(key)
+        .role("button")
+        .label(label.to_owned())
+        .focusable(true)
+        .h(34.0)
+        .px(14.0)
+        .center()
+        .radius(8.0)
+        .fill(p.accent)
+        .hover(p.accent.mix(Color::WHITE, 0.12))
+        .press(p.accent.mix(Color::BLACK, 0.15))
+        .cursor(Cursor::Pointer)
+        .on_press_tx(on_press)
+        .child(
+            text(label.to_owned())
+                .font(type_::LABEL)
+                .color(Color::WHITE),
+        )
 }
 
 fn icon_action(

@@ -10,6 +10,7 @@ use std::sync::Mutex;
 
 use crate::theme::ThemePreference;
 use kurama_host::config::{Config, ConfigManager};
+use kurama_host::crypto::{Engine, BASE64};
 use kurama_host::ssh::{generate_keypair, parse_private_key, GeneratedSshKey, SshAlgorithm};
 use serde_json::{json, Value};
 
@@ -32,6 +33,7 @@ pub struct VaultRow {
     pub folder: String,
     pub folder_id: String,
     pub updated: String,
+    pub website: String,
 }
 
 /// Value of a detail field. Sensitive values never leave the daemon.
@@ -322,6 +324,9 @@ pub enum Request {
         favorite: bool,
     },
     Folders,
+    Favicon {
+        host: String,
+    },
     Restore {
         id: String,
     },
@@ -566,6 +571,10 @@ pub enum Event {
         name: String,
     },
     Folders(Vec<FolderMeta>),
+    Favicon {
+        host: String,
+        bytes: Option<Vec<u8>>,
+    },
     Restored {
         id: String,
     },
@@ -627,7 +636,7 @@ pub enum Event {
     SyncFailed(String),
 }
 
-const DAEMON_HINT: &str = "Kurama backend is not running. Start it with `kurama daemon`.";
+const DAEMON_HINT: &str = "Backend is not running. Start it with `kurama daemon`.";
 
 /// Perform a request on the worker thread and return the UI-facing result.
 pub fn perform(request: Request) -> Event {
@@ -647,6 +656,17 @@ pub fn perform(request: Request) -> Event {
                 Ok(items) => Event::Trash(items),
                 Err(error) => Event::Error(error),
             }
+        }
+        Request::Favicon { host } => {
+            let bytes = call(json!({ "action": "favicon", "host": host }))
+                .ok()
+                .and_then(|response| {
+                    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+                        return None;
+                    }
+                    BASE64.decode(text(&response, "data")).ok()
+                });
+            Event::Favicon { host, bytes }
         }
         Request::Details { id } => match details(&id) {
             Ok(details) => Event::Details(details),
@@ -1374,6 +1394,107 @@ fn trash_rows(response: &Value) -> Result<Vec<VaultRow>, String> {
     rows(values)
 }
 
+pub(crate) fn host_for_row(row: &VaultRow) -> String {
+    if !row.website.is_empty() {
+        return row.website.clone();
+    }
+    let name = row.name.trim();
+    let host = domain_from_name(name);
+    if !host.is_empty() {
+        return host;
+    }
+    guessed_host(name)
+}
+
+pub(crate) fn domain_from_name(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() || name.chars().any(char::is_whitespace) || !name.contains('.') {
+        return String::new();
+    }
+    let host = name
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("www.")
+        .to_lowercase();
+    if host.len() < 4
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        String::new()
+    } else {
+        host
+    }
+}
+
+fn guessed_host(name: &str) -> String {
+    const BRANDS: [(&str, &str); 12] = [
+        ("apple tv", "apple.com"),
+        ("disney+", "disneyplus.com"),
+        ("discord", "discord.com"),
+        ("figma", "figma.com"),
+        ("github", "github.com"),
+        ("google", "google.com"),
+        ("netflix", "netflix.com"),
+        ("nike", "nike.com"),
+        ("paypal", "paypal.com"),
+        ("slack", "slack.com"),
+        ("spotify", "spotify.com"),
+        ("todoist", "todoist.com"),
+    ];
+    const GENERIC: [&str; 12] = [
+        "account", "card", "email", "folder", "login", "note", "notes", "pass", "password",
+        "personal", "site", "website",
+    ];
+
+    if let Some((_, host)) = BRANDS
+        .iter()
+        .find(|(needle, _)| name.eq_ignore_ascii_case(needle))
+    {
+        return (*host).to_owned();
+    }
+    if name.chars().any(char::is_whitespace) {
+        return String::new();
+    }
+    let brand: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if brand.len() < 4
+        || brand.len() > 24
+        || GENERIC
+            .iter()
+            .any(|value| brand.eq_ignore_ascii_case(value))
+    {
+        return String::new();
+    }
+    format!("{brand}.com").to_lowercase()
+}
+
+fn website_host(uri: &str) -> String {
+    if let Some((scheme, _)) = uri.split_once("://") {
+        if scheme != "http" && scheme != "https" {
+            return String::new();
+        }
+    }
+    let rest = uri.split_once("://").map(|(_, rest)| rest).unwrap_or(uri);
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("www.")
+        .to_lowercase();
+    if host.is_empty() || host.chars().any(char::is_whitespace) {
+        String::new()
+    } else {
+        host
+    }
+}
+
 fn row(value: &Value) -> Option<VaultRow> {
     let id = value.get("id")?.as_str()?.to_owned();
     let subtitle = value
@@ -1389,11 +1510,25 @@ fn row(value: &Value) -> Option<VaultRow> {
         })
         .unwrap_or_default();
 
+    let name = text(value, "name");
+    let website = value
+        .get("login")
+        .and_then(|login| login.get("uris"))
+        .and_then(Value::as_array)
+        .and_then(|uris| {
+            uris.iter()
+                .find_map(|uri| uri.get("uri").and_then(Value::as_str))
+        })
+        .map(website_host)
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| website_host(&name));
+
     Some(VaultRow {
         id,
-        name: text(value, "name"),
+        name,
         subtitle,
         type_name: text(value, "type_name"),
+        website,
         favorite: value
             .get("favorite")
             .and_then(Value::as_bool)
@@ -1891,6 +2026,39 @@ fn text(value: &Value, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn website_host_keeps_only_the_host() {
+        assert_eq!(
+            website_host("https://www.GitHub.com/owner/repo?token=secret"),
+            "github.com"
+        );
+        assert_eq!(
+            website_host("http://user:pass@example.com:8443/path"),
+            "example.com"
+        );
+        assert_eq!(website_host("androidapp://com.example.app"), "");
+    }
+
+    #[test]
+    fn guessed_hosts_cover_brand_names_without_generic_guesses() {
+        assert_eq!(guessed_host("Todoist"), "todoist.com");
+        assert_eq!(guessed_host("Disney+"), "disneyplus.com");
+        assert_eq!(guessed_host("Figma"), "figma.com");
+        assert_eq!(guessed_host("Site"), "");
+        assert_eq!(guessed_host("My bank account"), "");
+    }
+
+    #[test]
+    fn row_extracts_website_from_login_uris() {
+        let value = json!({
+            "id": "1",
+            "name": "discord.com",
+            "type_name": "login",
+            "login": { "uris": [{ "uri": "https://discord.com/reset?token=secret" }] }
+        });
+        assert_eq!(row(&value).unwrap().website, "discord.com");
+    }
 
     #[test]
     fn clipboard_timeout_uses_configured_seconds() {

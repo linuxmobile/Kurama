@@ -1,15 +1,15 @@
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use rune::{edit::TextEdit, Tx, Waker};
+use rune::{edit::TextEdit, Image, ImageCache, Tx, Waker};
 
 use crate::backend::{
-    self, clear_revealed, clear_totp, Approval, AuthOutcome, CardInput, CustomFieldInput, Event,
-    FieldValue, IdentityInput, ItemDetails, ItemField, Request, Secret, SendRow, Setting, Settings,
-    Snapshot, TotpMeta, VaultRow,
+    self, clear_revealed, clear_totp, host_for_row, Approval, AuthOutcome, CardInput,
+    CustomFieldInput, Event, FieldValue, IdentityInput, ItemDetails, ItemField, Request, Secret,
+    SendRow, Setting, Settings, Snapshot, TotpMeta, VaultRow,
 };
 use crate::theme::ThemePreference;
 
@@ -341,6 +341,11 @@ pub struct State {
     pub settings_draft: SettingsDraft,
     pub theme: ThemePreference,
     pub help: bool,
+    pub sidebar_width: f32,
+    pub sidebar_visible: bool,
+    pub image_cache: Option<ImageCache>,
+    pub site_icons: HashMap<String, Image>,
+    favicon_requests: BTreeSet<String>,
     rows_version: u64,
     visible_cache: RefCell<Option<VisibleCache>>,
     pub(crate) requests: Option<Sender<Request>>,
@@ -398,6 +403,11 @@ impl Default for State {
             settings_draft: SettingsDraft::default(),
             theme: ThemePreference::default(),
             help: false,
+            sidebar_width: 268.0,
+            sidebar_visible: true,
+            image_cache: None,
+            site_icons: HashMap::new(),
+            favicon_requests: BTreeSet::new(),
             rows_version: 0,
             visible_cache: RefCell::new(None),
             requests: None,
@@ -421,7 +431,7 @@ struct VisibleCache {
 }
 
 impl State {
-    pub fn visible_indices(&self) -> Vec<usize> {
+    fn refresh_visible_cache(&self) {
         let query = self.query.text.trim().to_lowercase();
         if let Some(cache) = self.visible_cache.borrow().as_ref() {
             if cache.version == self.rows_version
@@ -430,7 +440,7 @@ impl State {
                 && cache.location == self.location
                 && cache.folder == self.folder
             {
-                return cache.indices.clone();
+                return;
             }
         }
 
@@ -458,9 +468,33 @@ impl State {
             category: self.category,
             location: self.location,
             folder: self.folder.clone(),
-            indices: indices.clone(),
+            indices,
         });
-        indices
+    }
+
+    pub fn visible_indices(&self) -> Vec<usize> {
+        self.refresh_visible_cache();
+        self.visible_cache
+            .borrow()
+            .as_ref()
+            .map(|cache| cache.indices.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn visible_count(&self) -> usize {
+        self.refresh_visible_cache();
+        self.visible_cache
+            .borrow()
+            .as_ref()
+            .map_or(0, |cache| cache.indices.len())
+    }
+
+    pub fn visible_index_at(&self, index: usize) -> Option<usize> {
+        self.refresh_visible_cache();
+        self.visible_cache
+            .borrow()
+            .as_ref()
+            .and_then(|cache| cache.indices.get(index).copied())
     }
 
     pub fn rows_version(&self) -> u64 {
@@ -483,6 +517,10 @@ impl State {
     pub fn dark(&self, system_dark: bool) -> bool {
         self.theme.dark(system_dark)
     }
+}
+
+pub fn toggle_sidebar(state: &mut State) {
+    state.sidebar_visible = !state.sidebar_visible;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -1536,6 +1574,31 @@ fn leave_trash(state: &mut State) -> bool {
     true
 }
 
+fn sort_favorites(rows: &mut [VaultRow]) {
+    rows.sort_by_key(|row| !row.favorite);
+}
+
+fn request_favicons(state: &mut State) {
+    if !state
+        .settings
+        .as_ref()
+        .is_some_and(|settings| settings.show_website_icons)
+    {
+        return;
+    }
+    let hosts: Vec<String> = state
+        .rows
+        .iter()
+        .map(host_for_row)
+        .filter(|host| !host.is_empty())
+        .collect();
+    for host in hosts {
+        if state.favicon_requests.insert(host.clone()) {
+            dispatch(state, Request::Favicon { host });
+        }
+    }
+}
+
 fn folders_from(items: &[VaultRow]) -> Vec<String> {
     let mut folders = BTreeSet::new();
     for item in items {
@@ -1555,6 +1618,7 @@ fn send_quiet(state: &State, request: Request) {
 /// Start the worker once, on the app's setup hook. Every backend call is made
 /// here, off the UI thread; results are delivered through `poll`.
 pub fn setup(state: &mut State, wake: Waker) {
+    state.image_cache = Some(ImageCache::new(wake.clone()));
     let (request_tx, request_rx) = mpsc::channel::<Request>();
     let (event_tx, event_rx) = mpsc::channel::<Event>();
     state.requests = Some(request_tx.clone());
@@ -1649,6 +1713,12 @@ fn visible_fingerprint(state: &State) -> u64 {
     state.settings_draft.identity_url.text.hash(&mut hasher);
     state.settings.hash(&mut hasher);
     state.help.hash(&mut hasher);
+    state.sidebar_width.to_bits().hash(&mut hasher);
+    state.sidebar_visible.hash(&mut hasher);
+    state.site_icons.len().hash(&mut hasher);
+    for host in state.site_icons.keys() {
+        host.hash(&mut hasher);
+    }
     if state.snapshot.status != "unlocked" {
         state.snapshot.quick_unlock_ready.hash(&mut hasher);
         return hasher.finish();
@@ -1663,17 +1733,8 @@ fn visible_fingerprint(state: &State) -> u64 {
     for folder in &state.folders {
         folder.hash(&mut hasher);
     }
-    for index in state.visible_indices() {
-        index.hash(&mut hasher);
-        let row = &state.rows[index];
-        row.id.hash(&mut hasher);
-        row.name.hash(&mut hasher);
-        row.subtitle.hash(&mut hasher);
-        row.type_name.hash(&mut hasher);
-        row.favorite.hash(&mut hasher);
-        row.folder.hash(&mut hasher);
-        row.updated.hash(&mut hasher);
-    }
+    state.rows_version.hash(&mut hasher);
+    state.visible_count().hash(&mut hasher);
     for approval in &state.approvals {
         approval.id.hash(&mut hasher);
         approval.title.hash(&mut hasher);
@@ -1840,7 +1901,9 @@ fn apply_snapshot(state: &mut State, snapshot: Snapshot) {
     }
     if state.location != Location::Trash {
         state.rows = items;
+        sort_favorites(&mut state.rows);
         state.bump_rows_version();
+        request_favicons(state);
     }
     clear_notice(state);
     clear_reveal(state);
@@ -1909,6 +1972,13 @@ fn apply(state: &mut State, event: Event) {
                     SettingsDraft::new(&settings.download_dir, &settings.identity_url);
             }
             state.settings = Some(settings);
+            request_favicons(state);
+        }
+        Event::Favicon { host, bytes } => {
+            if let (Some(cache), Some(bytes)) = (state.image_cache.as_ref(), bytes) {
+                let image = cache.load(bytes);
+                state.site_icons.insert(host, image);
+            }
         }
         Event::Auth(outcome) => apply_auth_outcome(state, outcome),
         Event::Generated {
@@ -1927,7 +1997,9 @@ fn apply(state: &mut State, event: Event) {
                 return;
             }
             state.rows = items;
+            sort_favorites(&mut state.rows);
             state.bump_rows_version();
+            request_favicons(state);
             clear_reveal(state);
             if state.selected.is_none() && !state.selection_cleared {
                 state.selected = state.rows.first().map(|item| item.id.clone());
@@ -2143,6 +2215,8 @@ fn apply(state: &mut State, event: Event) {
                     row.favorite = favorite;
                 }
             }
+            sort_favorites(&mut state.rows);
+            state.bump_rows_version();
             notice(
                 state,
                 if favorite {
@@ -2224,6 +2298,8 @@ fn apply(state: &mut State, event: Event) {
                     row.favorite = favorite;
                 }
             }
+            sort_favorites(&mut state.rows);
+            state.bump_rows_version();
             notice(state, "Item renamed".to_owned());
             send_quiet(state, Request::Refresh);
         }
@@ -2388,6 +2464,7 @@ fn dispatch_setting(state: &mut State, setting: Setting, update: impl FnOnce(&mu
         update(settings);
     }
     dispatch(state, Request::SetSetting(setting));
+    request_favicons(state);
 }
 
 pub fn toggle_setting(state: &mut State, setting: ToggleSetting, value: bool) {
@@ -2869,6 +2946,7 @@ pub fn scene_stress(state: &mut State) {
             folder: String::new(),
             folder_id: String::new(),
             updated: "2026-01-02T03:04:05Z".to_owned(),
+            website: String::new(),
         })
         .collect();
     state.snapshot.items = state.rows.clone();
@@ -2892,7 +2970,7 @@ pub fn scene_account(state: &mut State) {
 
 pub fn scene_disconnected(state: &mut State) {
     state.busy = false;
-    notice(state, "Kurama backend is not running.".to_owned());
+    notice(state, "Backend is not running.".to_owned());
 }
 
 pub fn scene_account_two_factor(state: &mut State) {
@@ -3096,6 +3174,7 @@ pub fn scene_trash(state: &mut State) {
         folder: "Personal".to_owned(),
         folder_id: "folder-personal".to_owned(),
         updated: "2026-01-01T00:00:00Z".to_owned(),
+        website: String::new(),
     }];
     state.selected = state.rows.first().map(|item| item.id.clone());
     state.bump_rows_version();
@@ -3110,6 +3189,7 @@ fn fixtures() -> Vec<VaultRow> {
             "login",
             true,
             "Development",
+            "github.com",
         ),
         (
             "2",
@@ -3118,13 +3198,14 @@ fn fixtures() -> Vec<VaultRow> {
             "login",
             false,
             "Work",
+            "console.aws.amazon.com",
         ),
-        ("3", "Recovery codes", "", "note", false, "Personal"),
-        ("4", "Laptop SSH key", "ed25519", "ssh_key", false, ""),
+        ("3", "Recovery codes", "", "note", false, "Personal", ""),
+        ("4", "Laptop SSH key", "ed25519", "ssh_key", false, "", ""),
     ]
     .into_iter()
     .map(
-        |(id, name, subtitle, type_name, favorite, folder)| VaultRow {
+        |(id, name, subtitle, type_name, favorite, folder, website)| VaultRow {
             id: id.to_owned(),
             name: name.to_owned(),
             subtitle: subtitle.to_owned(),
@@ -3133,6 +3214,7 @@ fn fixtures() -> Vec<VaultRow> {
             folder: folder.to_owned(),
             folder_id: folder.to_lowercase(),
             updated: "2026-01-02T03:04:05Z".to_owned(),
+            website: website.to_owned(),
         },
     )
     .collect()
@@ -3458,6 +3540,37 @@ mod tests {
             Some("Email and password are required.")
         );
         assert!(state.auth.is_some());
+    }
+
+    #[test]
+    fn favorites_sort_to_the_top_of_all_items() {
+        let mut state = State::default();
+        scene_populated(&mut state);
+        let mut items = fixtures();
+        items[0].favorite = false;
+        items[1].favorite = true;
+
+        apply(&mut state, Event::Items(items));
+        let order: Vec<&str> = state
+            .visible_indices()
+            .iter()
+            .map(|&index| state.rows[index].id.as_str())
+            .collect();
+        assert_eq!(order, ["2", "1", "3", "4"]);
+
+        apply(
+            &mut state,
+            Event::FavoriteChanged {
+                id: "3".to_owned(),
+                favorite: true,
+            },
+        );
+        let order: Vec<&str> = state
+            .visible_indices()
+            .iter()
+            .map(|&index| state.rows[index].id.as_str())
+            .collect();
+        assert_eq!(order, ["2", "3", "1", "4"]);
     }
 
     #[test]

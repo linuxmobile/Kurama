@@ -3,9 +3,9 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -144,9 +144,7 @@ impl ClipboardManager {
         };
 
         let wrote = match child.stdin.take() {
-            Some(mut stdin) => stdin
-                .write_all(text.as_bytes())
-                .and_then(|_| stdin.flush()),
+            Some(mut stdin) => stdin.write_all(text.as_bytes()).and_then(|_| stdin.flush()),
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "wl-copy stdin unavailable",
@@ -575,7 +573,10 @@ fi
         let log = dir.path().join("args.log");
         crate::write_test_executable(
             &script,
-            &format!("#!/bin/sh\nprintf '%s\n' \"$*\" >> \"{}\"\nexit 0\n", log.display()),
+            &format!(
+                "#!/bin/sh\nprintf '%s\n' \"$*\" >> \"{}\"\nexit 0\n",
+                log.display()
+            ),
         );
         let gen = dir.path().join("clipboard_gen");
         let mgr = ClipboardManager::new(script.to_str().unwrap())
@@ -587,6 +588,9 @@ fi
         }
         assert_eq!(mgr.timer.spawn_count.load(Ordering::SeqCst), 1);
         assert_eq!(mgr.current_generation(), 6);
-        assert!(fs::read_to_string(&log).unwrap().lines().all(|l| l == "--sensitive"));
+        assert!(fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .all(|l| l == "--sensitive"));
     }
 }
