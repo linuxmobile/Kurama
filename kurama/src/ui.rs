@@ -2,7 +2,7 @@ use rune::edit::TextEdit;
 use rune::tok::{self, type_};
 use rune::{
     col, el, icon, row, text, text_input, Color, Cursor, Cx, Drag, El, GrowthSpec, Key, KeyEvent,
-    Phase, ScrollSpec, SurfaceFit, Tx,
+    Phase, ScrollSpec, Tx,
 };
 
 use crate::backend::{
@@ -318,16 +318,6 @@ fn settings_general(s: &State, dark: bool) -> El {
             dark,
             col()
                 .gap(8.0)
-                .child(settings_toggle(
-                    "settings-website-icons",
-                    "Website icons",
-                    "Show site icons for login items.",
-                    cfg.show_website_icons,
-                    dark,
-                    move |state, value| {
-                        toggle_setting(state, ToggleSetting::ShowWebsiteIcons, value)
-                    },
-                ))
                 .child(settings_toggle(
                     "settings-remember-last-search",
                     "Remember last search",
@@ -2886,8 +2876,6 @@ fn item_list(s: &State, dark: bool) -> El {
         s.category,
         s.location,
         s.folder.clone(),
-        website_icons_enabled(s),
-        s.site_icons.len(),
     );
     let list = col()
         .key("item-rows")
@@ -2907,19 +2895,11 @@ fn item_list(s: &State, dark: bool) -> El {
                 let row = s.visible_index_at(index).unwrap_or(0);
                 let item = &s.rows[row];
                 let has_totp = s.totp.as_ref().is_some_and(|meta| meta.item_id == item.id);
-                let website = if website_icons_enabled(s) {
-                    item_website(item)
-                } else {
-                    String::new()
-                };
-                let site_icon = s.site_icons.get(&website);
                 item_row(
                     item,
                     s.selected.as_deref() == Some(item.id.as_str()),
                     has_totp,
                     dark,
-                    &website,
-                    site_icon,
                 )
             },
         )
@@ -2968,44 +2948,18 @@ fn type_tile_color(type_name: &str, dark: bool) -> Color {
     rune::color::hex(value).unwrap_or(p.accent)
 }
 
-fn website_icons_enabled(state: &State) -> bool {
-    state
-        .settings
-        .as_ref()
-        .is_some_and(|settings| settings.show_website_icons)
-}
-
-fn item_website(item: &VaultRow) -> String {
-    crate::backend::host_for_row(item)
-}
-
-fn item_row(
-    item: &VaultRow,
-    selected: bool,
-    has_totp: bool,
-    dark: bool,
-    website: &str,
-    site_icon: Option<&rune::Image>,
-) -> El {
+fn item_row(item: &VaultRow, selected: bool, has_totp: bool, dark: bool) -> El {
     let p = Palette::new(dark);
     let id = item.id.clone();
     let type_label = icons::label(&item.type_name);
-    let show_site = item.type_name == "login" && !website.is_empty();
-    let initial = if show_site {
-        String::new()
-    } else {
-        item.name
-            .chars()
-            .next()
-            .unwrap_or('?')
-            .to_uppercase()
-            .to_string()
-    };
-    let tile_color = if show_site {
-        p.site_tile
-    } else {
-        type_tile_color(&item.type_name, dark)
-    };
+    let initial = item
+        .name
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_uppercase()
+        .to_string();
+    let tile_color = type_tile_color(&item.type_name, dark);
     let tile = if selected {
         tile_color.mix(Color::WHITE, 0.25)
     } else {
@@ -3040,30 +2994,9 @@ fn item_row(
                 .radius(tile_radius)
                 .center()
                 .fill(tile)
-                .border(
-                    1.0,
-                    if show_site {
-                        p.separator
-                    } else {
-                        Color::TRANSPARENT
-                    },
-                )
-                .label(if show_site {
-                    format!("{} site icon", website)
-                } else {
-                    format!("{} icon", icons::for_type(&item.type_name).name)
-                })
-                .child(if let Some(image) = site_icon {
-                    el().w_full()
-                        .h_full()
-                        .px(4.0)
-                        .py(4.0)
-                        .pixels_fit(image.pixels(), SurfaceFit::Fit)
-                } else if show_site {
-                    icon(icons::action("globe"), 18.0).color(p.site_glyph)
-                } else {
-                    text(initial).font(ROW_TITLE).color(Color::WHITE)
-                }),
+                .border(1.0, Color::TRANSPARENT)
+                .label(format!("{} icon", icons::for_type(&item.type_name).name))
+                .child(text(initial).font(ROW_TITLE).color(Color::WHITE)),
         )
         .child(
             col()
@@ -3241,33 +3174,14 @@ fn details(s: &State, dark: bool) -> El {
 
     let favorite = item.favorite;
     let type_label = icons::label(&item.type_name);
-    let website = if website_icons_enabled(s) {
-        item_website(item)
-    } else {
-        String::new()
-    };
-    let site_icon = s.site_icons.get(&website);
-    let show_site = item.type_name == "login" && !website.is_empty();
-    let tile_source = if show_site {
-        website.as_str()
-    } else {
-        item.name.as_str()
-    };
-    let initial = if show_site {
-        String::new()
-    } else {
-        tile_source
-            .chars()
-            .next()
-            .unwrap_or('?')
-            .to_uppercase()
-            .to_string()
-    };
-    let tile_color = if show_site {
-        p.site_tile
-    } else {
-        type_tile_color(&item.type_name, dark)
-    };
+    let initial = item
+        .name
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_uppercase()
+        .to_string();
+    let tile_color = type_tile_color(&item.type_name, dark);
     let loaded = s.details.as_ref().filter(|details| details.id == item.id);
     let mut credentials = Vec::new();
     let mut websites = Vec::new();
@@ -3462,30 +3376,9 @@ fn details(s: &State, dark: bool) -> El {
                         .radius(14.0)
                         .center()
                         .fill(tile_color)
-                        .border(
-                            1.0,
-                            if show_site {
-                                p.separator
-                            } else {
-                                Color::TRANSPARENT
-                            },
-                        )
-                        .label(if show_site {
-                            format!("{} site icon", website)
-                        } else {
-                            format!("{} icon", icons::for_type(&item.type_name).name)
-                        })
-                        .child(if let Some(image) = site_icon {
-                            el().w_full()
-                                .h_full()
-                                .px(7.0)
-                                .py(7.0)
-                                .pixels_fit(image.pixels(), SurfaceFit::Fit)
-                        } else if show_site {
-                            icon(icons::action("globe"), 26.0).color(p.site_glyph)
-                        } else {
-                            text(initial).font(WINDOW_TITLE).color(Color::WHITE)
-                        }),
+                        .border(1.0, Color::TRANSPARENT)
+                        .label(format!("{} icon", icons::for_type(&item.type_name).name))
+                        .child(text(initial).font(WINDOW_TITLE).color(Color::WHITE)),
                 )
                 .child(
                     col()

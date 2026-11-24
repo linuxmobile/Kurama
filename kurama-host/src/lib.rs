@@ -9,7 +9,6 @@ pub mod clipboard;
 pub mod config;
 pub mod crypto;
 pub mod daemon;
-pub mod favicon;
 pub mod fs_util;
 pub mod generator;
 pub mod health;

@@ -1695,13 +1695,6 @@ fn handle_client_with_timeouts(
             }
         }
         "list" => json!(state.vault_mgr.get_items()),
-        "favicon" => {
-            let host = req.get("host").and_then(Value::as_str).unwrap_or("");
-            match crate::favicon::fetch(host) {
-                Ok(bytes) => json!({ "ok": true, "data": crate::crypto::BASE64.encode(bytes) }),
-                Err(error) => json!({ "ok": false, "error": error }),
-            }
-        }
         "search" => {
             let query = req.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let category = req.get("category").and_then(|v| v.as_str());

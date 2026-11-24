@@ -1,15 +1,15 @@
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use rune::{edit::TextEdit, Image, ImageCache, Tx, Waker};
+use rune::{edit::TextEdit, Tx, Waker};
 
 use crate::backend::{
-    self, clear_revealed, clear_totp, host_for_row, Approval, AuthOutcome, CardInput,
-    CustomFieldInput, Event, FieldValue, IdentityInput, ItemDetails, ItemField, Request, Secret,
-    SendRow, Setting, Settings, Snapshot, TotpMeta, VaultRow,
+    self, clear_revealed, clear_totp, Approval, AuthOutcome, CardInput, CustomFieldInput, Event,
+    FieldValue, IdentityInput, ItemDetails, ItemField, Request, Secret, SendRow, Setting, Settings,
+    Snapshot, TotpMeta, VaultRow,
 };
 use crate::theme::ThemePreference;
 
@@ -52,7 +52,6 @@ impl SettingsSection {
 pub enum ToggleSetting {
     RememberEmail,
     CheckUpdates,
-    ShowWebsiteIcons,
     RememberLastSearch,
     QuickUnlock,
     SshAgentEnabled,
@@ -343,9 +342,6 @@ pub struct State {
     pub help: bool,
     pub sidebar_width: f32,
     pub sidebar_visible: bool,
-    pub image_cache: Option<ImageCache>,
-    pub site_icons: HashMap<String, Image>,
-    favicon_requests: BTreeSet<String>,
     rows_version: u64,
     visible_cache: RefCell<Option<VisibleCache>>,
     pub(crate) requests: Option<Sender<Request>>,
@@ -405,9 +401,6 @@ impl Default for State {
             help: false,
             sidebar_width: 268.0,
             sidebar_visible: true,
-            image_cache: None,
-            site_icons: HashMap::new(),
-            favicon_requests: BTreeSet::new(),
             rows_version: 0,
             visible_cache: RefCell::new(None),
             requests: None,
@@ -569,7 +562,24 @@ fn notice_level(kind: &str) -> NoticeLevel {
     }
 }
 
+fn is_background_request(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Events { .. }
+            | Request::Approvals
+            | Request::AgentStatus
+            | Request::AgentApply
+            | Request::Totp { .. }
+    )
+}
+
 pub fn dispatch(state: &mut State, request: Request) {
+    if is_background_request(&request) {
+        if let Some(sender) = &state.requests {
+            let _ = sender.send(request);
+        }
+        return;
+    }
     if matches!(request, Request::Sync) {
         state.syncing = true;
         state.sync_error = None;
@@ -1578,27 +1588,6 @@ fn sort_favorites(rows: &mut [VaultRow]) {
     rows.sort_by_key(|row| !row.favorite);
 }
 
-fn request_favicons(state: &mut State) {
-    if !state
-        .settings
-        .as_ref()
-        .is_some_and(|settings| settings.show_website_icons)
-    {
-        return;
-    }
-    let hosts: Vec<String> = state
-        .rows
-        .iter()
-        .map(host_for_row)
-        .filter(|host| !host.is_empty())
-        .collect();
-    for host in hosts {
-        if state.favicon_requests.insert(host.clone()) {
-            dispatch(state, Request::Favicon { host });
-        }
-    }
-}
-
 fn folders_from(items: &[VaultRow]) -> Vec<String> {
     let mut folders = BTreeSet::new();
     for item in items {
@@ -1615,17 +1604,9 @@ fn send_quiet(state: &State, request: Request) {
     }
 }
 
-/// Start the worker once, on the app's setup hook. Every backend call is made
-/// here, off the UI thread; results are delivered through `poll`.
-pub fn setup(state: &mut State, wake: Waker) {
-    state.image_cache = Some(ImageCache::new(wake.clone()));
-    let (request_tx, request_rx) = mpsc::channel::<Request>();
-    let (event_tx, event_rx) = mpsc::channel::<Event>();
-    state.requests = Some(request_tx.clone());
-    state.events = Some(event_rx);
-
+fn spawn_worker(rx: Receiver<Request>, event_tx: Sender<Event>, wake: Waker) {
     std::thread::spawn(move || {
-        while let Ok(request) = request_rx.recv() {
+        while let Ok(request) = rx.recv() {
             let event = backend::perform(request);
             if event_tx.send(event).is_ok() {
                 wake();
@@ -1634,6 +1615,17 @@ pub fn setup(state: &mut State, wake: Waker) {
             }
         }
     });
+}
+
+/// Start the worker once, on the app's setup hook. Backend calls run off the
+/// UI thread; results are delivered through `poll`.
+pub fn setup(state: &mut State, wake: Waker) {
+    let (request_tx, request_rx) = mpsc::channel::<Request>();
+    let (event_tx, event_rx) = mpsc::channel::<Event>();
+    state.requests = Some(request_tx.clone());
+    state.events = Some(event_rx);
+
+    spawn_worker(request_rx, event_tx, wake);
 
     let _ = request_tx.send(Request::Refresh);
     let _ = request_tx.send(Request::Folders);
@@ -1715,10 +1707,6 @@ fn visible_fingerprint(state: &State) -> u64 {
     state.help.hash(&mut hasher);
     state.sidebar_width.to_bits().hash(&mut hasher);
     state.sidebar_visible.hash(&mut hasher);
-    state.site_icons.len().hash(&mut hasher);
-    for host in state.site_icons.keys() {
-        host.hash(&mut hasher);
-    }
     if state.snapshot.status != "unlocked" {
         state.snapshot.quick_unlock_ready.hash(&mut hasher);
         return hasher.finish();
@@ -1903,7 +1891,6 @@ fn apply_snapshot(state: &mut State, snapshot: Snapshot) {
         state.rows = items;
         sort_favorites(&mut state.rows);
         state.bump_rows_version();
-        request_favicons(state);
     }
     clear_notice(state);
     clear_reveal(state);
@@ -1972,13 +1959,6 @@ fn apply(state: &mut State, event: Event) {
                     SettingsDraft::new(&settings.download_dir, &settings.identity_url);
             }
             state.settings = Some(settings);
-            request_favicons(state);
-        }
-        Event::Favicon { host, bytes } => {
-            if let (Some(cache), Some(bytes)) = (state.image_cache.as_ref(), bytes) {
-                let image = cache.load(bytes);
-                state.site_icons.insert(host, image);
-            }
         }
         Event::Auth(outcome) => apply_auth_outcome(state, outcome),
         Event::Generated {
@@ -1999,7 +1979,6 @@ fn apply(state: &mut State, event: Event) {
             state.rows = items;
             sort_favorites(&mut state.rows);
             state.bump_rows_version();
-            request_favicons(state);
             clear_reveal(state);
             if state.selected.is_none() && !state.selection_cleared {
                 state.selected = state.rows.first().map(|item| item.id.clone());
@@ -2464,7 +2443,6 @@ fn dispatch_setting(state: &mut State, setting: Setting, update: impl FnOnce(&mu
         update(settings);
     }
     dispatch(state, Request::SetSetting(setting));
-    request_favicons(state);
 }
 
 pub fn toggle_setting(state: &mut State, setting: ToggleSetting, value: bool) {
@@ -2477,11 +2455,6 @@ pub fn toggle_setting(state: &mut State, setting: ToggleSetting, value: bool) {
         ToggleSetting::CheckUpdates => {
             dispatch_setting(state, Setting::CheckUpdates(value), |settings| {
                 settings.check_updates = value
-            })
-        }
-        ToggleSetting::ShowWebsiteIcons => {
-            dispatch_setting(state, Setting::ShowWebsiteIcons(value), |settings| {
-                settings.show_website_icons = value
             })
         }
         ToggleSetting::RememberLastSearch => {
@@ -3031,7 +3004,6 @@ pub fn scene_settings(state: &mut State) {
         remember_email: true,
         check_updates: true,
         log_level: "error".to_owned(),
-        show_website_icons: true,
         remember_last_search: false,
         max_attachment_size_mb: 500,
         quick_unlock: true,
@@ -3261,6 +3233,38 @@ mod tests {
     }
 
     #[test]
+    fn agent_requests_do_not_leak_busy_count() {
+        let mut state = State::default();
+        let (tx, rx) = mpsc::channel();
+        state.requests = Some(tx);
+        state.busy = false;
+        state.in_flight = 0;
+
+        dispatch(&mut state, Request::AgentStatus);
+        dispatch(&mut state, Request::Approvals);
+        dispatch(&mut state, Request::AgentApply);
+        assert!(!state.busy);
+        assert_eq!(rx.try_iter().count(), 3);
+
+        dispatch(&mut state, Request::Refresh);
+        assert!(state.busy);
+        apply(
+            &mut state,
+            Event::AgentStatus {
+                running: false,
+                socket: String::new(),
+            },
+        );
+        apply(&mut state, Event::Approvals(Vec::new()));
+        assert!(
+            state.busy,
+            "background events must not clear in-flight work"
+        );
+        apply(&mut state, Event::Snapshot(Snapshot::default()));
+        assert!(!state.busy);
+    }
+
+    #[test]
     fn batched_notices_prefer_errors_and_refresh_only_on_transitions() {
         let mut state = State::default();
         let (tx, rx) = mpsc::channel();
@@ -3400,7 +3404,6 @@ mod tests {
         scene_settings(&mut state);
         state.requests = Some(tx);
 
-        toggle_setting(&mut state, ToggleSetting::ShowWebsiteIcons, false);
         toggle_setting(&mut state, ToggleSetting::QuickUnlock, false);
         set_log_level(&mut state, "debug");
         step_attachment_size(&mut state, 1);
@@ -3412,17 +3415,12 @@ mod tests {
         save_settings_paths(&mut state);
 
         let settings = state.settings.as_ref().expect("settings");
-        assert!(!settings.show_website_icons);
         assert!(!settings.quick_unlock);
         assert_eq!(settings.log_level, "debug");
         assert_eq!(settings.max_attachment_size_mb, 1000);
         assert_eq!(settings.ssh_agent_confirm, "always");
 
         let requests: Vec<_> = rx.try_iter().collect();
-        assert!(requests.iter().any(|request| matches!(
-            request,
-            Request::SetSetting(Setting::ShowWebsiteIcons(false))
-        )));
         assert!(requests
             .iter()
             .any(|request| matches!(request, Request::SetSetting(Setting::QuickUnlock(false)))));

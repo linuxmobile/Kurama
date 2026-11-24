@@ -930,13 +930,6 @@ mod tests {
     }
 
     #[test]
-    fn website_icon_fallback_uses_domain_like_names() {
-        assert_eq!(backend::domain_from_name("Discord.com"), "discord.com");
-        assert_eq!(backend::domain_from_name("www.Netflix.com"), "netflix.com");
-        assert_eq!(backend::domain_from_name("AWS Production"), "");
-    }
-
-    #[test]
     fn command_s_toggles_the_sidebar() {
         let mut rt = runtime(state::scene_populated);
         rt.on_key = Some(on_key);
@@ -1004,7 +997,6 @@ mod tests {
         assert!(rt.find("settings-theme-system").is_some());
         assert!(rt.find("settings-theme-dark").is_some());
         assert!(rt.find("settings-theme-light").is_some());
-        assert!(rt.find("settings-website-icons").is_some());
         assert!(rt.find("settings-close").is_some());
 
         let (x, y) = rt.find("settings-tab-vault").expect("vault tab");
